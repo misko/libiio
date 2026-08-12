@@ -32,8 +32,10 @@ struct spf_iiod_metadata_context {
 	uint32_t samples_per_channel;
 	uint32_t observation_interval_samples;
 	uint64_t stream_id;
-	uint64_t buffer_sequence;
+	uint64_t stream_first_sample_sequence;
+	uint64_t frames_emitted;
 	uint64_t refills_started;
+	bool stream_origin_valid;
 	bool sampler_started;
 	bool timestamp_configured;
 };
@@ -172,6 +174,8 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	spf_gain_observation_v3_t observations[SPF_IIOD_OBSERVATION_CAPACITY];
 	uint32_t observation_overflow_count = 0;
 	uint64_t first_sample_sequence;
+	uint64_t capture_index;
+	uint64_t sample_delta;
 	spf_rssi_pair_t rssi_start;
 	spf_rssi_pair_t rssi_end;
 	uint32_t rssi_overflow_count = 0;
@@ -194,7 +198,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	observation_count = spf_gain_sampler_collect(&ctx->sampler,
 		first_sample_sequence, ctx->samples_per_channel, observations,
 		SPF_IIOD_OBSERVATION_CAPACITY, &observation_overflow_count);
-	if (spf_gain_frame_decide(ctx->buffer_sequence, observation_count, 0) !=
+	if (spf_gain_frame_decide(ctx->frames_emitted, observation_count, 0) !=
 			SPF_GAIN_FRAME_ACCEPT)
 		return -ENODATA;
 	if (!spf_gain_sampler_collect_rssi(&ctx->sampler,
@@ -203,10 +207,20 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		return -ENODATA;
 	if (rssi_overflow_count)
 		return -EOVERFLOW;
+	if (!ctx->stream_origin_valid) {
+		ctx->stream_first_sample_sequence = first_sample_sequence;
+		ctx->stream_origin_valid = true;
+	}
+	if (first_sample_sequence < ctx->stream_first_sample_sequence)
+		return -ERANGE;
+	sample_delta = first_sample_sequence - ctx->stream_first_sample_sequence;
+	if (sample_delta % ctx->samples_per_channel)
+		return -EIO;
+	capture_index = sample_delta / ctx->samples_per_channel;
 	const spf_radio_frame_v3_args_t args = {
 		.metadata_features = SPF_META_REQUIRED_FEATURES_V3,
 		.stream_id = ctx->stream_id,
-		.buffer_sequence = ctx->buffer_sequence,
+		.buffer_sequence = capture_index,
 		.first_sample_sequence = first_sample_sequence,
 		.samples_per_channel = ctx->samples_per_channel,
 		.iq_payload_bytes = ctx->samples_per_channel * UINT32_C(8),
@@ -238,7 +252,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (!spf_radio_frame_v3_build(metadata, metadata_capacity, &args))
 		return -EIO;
 
-	ctx->buffer_sequence++;
+	ctx->frames_emitted++;
 	*iq_offset = sizeof(first_sample_sequence);
 	*iq_bytes = (size_t)ctx->samples_per_channel * 8U;
 	return (ssize_t)header_bytes;
