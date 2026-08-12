@@ -583,6 +583,14 @@ __api __check_ret int iio_context_get_attr(
 __api __check_ret const char * iio_context_get_attr_value(
 		const struct iio_context *ctx, const char *name);
 
+/** @brief Add or replace a context attribute.
+ * @param ctx A pointer to an iio_context structure
+ * @param name Attribute name
+ * @param value Attribute value
+ * @return 0 on success, a negative errno code otherwise */
+__api __check_ret int iio_context_add_attr(struct iio_context *ctx,
+		const char *name, const char *value);
+
 
 /** @brief Enumerate the devices found in the given context
  * @param ctx A pointer to an iio_context structure
@@ -1465,6 +1473,18 @@ __api __check_ret __pure const struct iio_device * iio_buffer_get_device(
 __api __check_ret struct iio_buffer * iio_device_create_buffer(const struct iio_device *dev,
 		size_t samples_count, bool cyclic);
 
+/** @brief Create a non-cyclic input buffer whose refills include optional,
+ * capture-associated metadata.
+ * @param dev A pointer to an iio_device structure
+ * @param samples_count The number of samples that the buffer should contain
+ * @return On success, a pointer to an iio_buffer structure; NULL otherwise
+ *
+ * Use iio_buffer_refill_with_metadata() to refill the returned buffer. A
+ * backend or remote iiOD without metadata support fails with errno=ENOSYS. */
+__api __check_ret struct iio_buffer *
+iio_device_create_buffer_with_metadata(const struct iio_device *dev,
+		size_t samples_count);
+
 
 /** @brief Destroy the given buffer
  * @param buf A pointer to an iio_buffer structure
@@ -1503,6 +1523,23 @@ __api __check_ret int iio_buffer_set_blocking_mode(struct iio_buffer *buf, bool 
  *
  * <b>NOTE:</b> Only valid for input buffers */
 __api __check_ret ssize_t iio_buffer_refill(struct iio_buffer *buf);
+
+/** @brief Refill an input buffer and return metadata associated with the
+ * exact captured sample range.
+ * @param buf A pointer to an iio_buffer structure
+ * @param metadata Destination for the opaque metadata record
+ * @param metadata_capacity Size of the metadata destination, in bytes
+ * @param metadata_bytes Receives the number of metadata bytes written
+ * @return On success, the number of IQ bytes written to the buffer; a negative
+ * errno code otherwise. In particular, -ENOSYS means that the selected backend
+ * or remote iiOD does not support capture-associated metadata.
+ *
+ * This operation is opt-in. It does not alter the data returned by ordinary
+ * iio_buffer_refill(). The metadata schema is negotiated by the application
+ * and remains opaque to libiio. */
+__api __check_ret ssize_t iio_buffer_refill_with_metadata(
+		struct iio_buffer *buf, void *metadata,
+		size_t metadata_capacity, size_t *metadata_bytes);
 
 
 /** @brief Send the samples to the hardware

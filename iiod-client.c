@@ -646,6 +646,26 @@ int iiod_client_open_unlocked(struct iiod_client *client,
 	return iiod_client_exec_command(client, desc, buf);
 }
 
+int iiod_client_open_with_metadata_unlocked(struct iiod_client *client,
+		struct iiod_client_pdata *desc, const struct iio_device *dev,
+		size_t samples_count)
+{
+	char buf[1024], *ptr;
+	size_t i;
+	ssize_t len = sizeof(buf);
+
+	len -= iio_snprintf(buf, len, "OPENM %s %lu ",
+			iio_device_get_id(dev), (unsigned long)samples_count);
+	ptr = buf + strlen(buf);
+	for (i = dev->words; i > 0; i--, ptr += 8)
+		len -= iio_snprintf(ptr, len, "%08" PRIx32, dev->mask[i - 1]);
+	len -= iio_strlcpy(ptr, "\r\n", len);
+	if (len < 0)
+		return -ENOMEM;
+
+	return iiod_client_exec_command(client, desc, buf);
+}
+
 int iiod_client_close_unlocked(struct iiod_client *client,
 			       struct iiod_client_pdata *desc,
 			       const struct iio_device *dev)
@@ -727,6 +747,8 @@ ssize_t iiod_client_read_unlocked(struct iiod_client *client,
 			return (ssize_t) to_read;
 		if (!to_read)
 			break;
+		if ((size_t)to_read > len)
+			return -EOVERFLOW;
 
 		if (mask) {
 			ret = iiod_client_read_mask(client, desc, mask, words);
@@ -748,6 +770,66 @@ ssize_t iiod_client_read_unlocked(struct iiod_client *client,
 	} while (len);
 
 	return read;
+}
+
+ssize_t iiod_client_read_with_metadata_unlocked(
+		struct iiod_client *client, struct iiod_client_pdata *desc,
+		const struct iio_device *dev, void *dst, size_t len,
+		uint32_t *mask, size_t words, void *metadata,
+		size_t metadata_capacity, size_t *metadata_bytes)
+{
+	unsigned int nb_channels = iio_device_get_channels_count(dev);
+	char command[1024];
+	int iq_bytes, meta_bytes;
+	ssize_t ret;
+
+	if (!dst || !len || !metadata || !metadata_capacity || !metadata_bytes ||
+		words != (nb_channels + 31) / 32)
+		return -EINVAL;
+
+	*metadata_bytes = 0;
+	iio_snprintf(command, sizeof(command), "READBUFM %s %lu %lu\r\n",
+			iio_device_get_id(dev), (unsigned long)len,
+			(unsigned long)metadata_capacity);
+
+	ret = iiod_client_write_all(client, desc, command, strlen(command));
+	if (ret < 0)
+		return ret;
+
+	ret = iiod_client_read_integer(client, desc, &iq_bytes);
+	if (ret < 0)
+		return ret;
+	if (iq_bytes < 0)
+		return iq_bytes;
+	if (!iq_bytes || (size_t)iq_bytes > len)
+		return -EOVERFLOW;
+
+	if (mask) {
+		ret = iiod_client_read_mask(client, desc, mask, words);
+		if (ret < 0)
+			return ret;
+	}
+
+	ret = iiod_client_read_integer(client, desc, &meta_bytes);
+	if (ret < 0)
+		return ret;
+	if (meta_bytes < 0)
+		return meta_bytes;
+	if (!meta_bytes || (size_t)meta_bytes > metadata_capacity)
+		return -EOVERFLOW;
+
+	ret = iiod_client_read_all(client, desc, metadata, (size_t)meta_bytes);
+	if (ret < 0)
+		return ret;
+	*metadata_bytes = (size_t)meta_bytes;
+
+	ret = iiod_client_read_all(client, desc, dst, (size_t)iq_bytes);
+	if (ret < 0) {
+		*metadata_bytes = 0;
+		return ret;
+	}
+
+	return iq_bytes;
 }
 
 ssize_t iiod_client_write_unlocked(struct iiod_client *client,

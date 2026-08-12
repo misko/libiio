@@ -23,8 +23,8 @@ static bool device_is_high_speed(const struct iio_device *dev)
 		(ops->get_buffer(dev, NULL, 0, NULL, 0) != -ENOSYS);
 }
 
-struct iio_buffer * iio_device_create_buffer(const struct iio_device *dev,
-		size_t samples_count, bool cyclic)
+static struct iio_buffer * create_buffer(const struct iio_device *dev,
+		size_t samples_count, bool cyclic, bool metadata_enabled)
 {
 	ssize_t ret = -EINVAL;
 	struct iio_buffer *buf;
@@ -59,9 +59,20 @@ struct iio_buffer * iio_device_create_buffer(const struct iio_device *dev,
 	 * iio_buffer_foreach_sample to be used. */
 	memcpy(buf->mask, dev->mask, dev->words * sizeof(*buf->mask));
 
-	ret = iio_device_open(dev, samples_count, cyclic);
+	if (metadata_enabled) {
+		if (cyclic ||
+				dev->ctx->backend_api_version < IIO_BACKEND_API_V2 ||
+				!dev->ctx->ops->open_with_metadata) {
+			ret = -ENOSYS;
+			goto err_free_mask;
+		}
+		ret = dev->ctx->ops->open_with_metadata(dev, samples_count, false);
+	} else {
+		ret = iio_device_open(dev, samples_count, cyclic);
+	}
 	if (ret < 0)
 		goto err_free_mask;
+	buf->metadata_enabled = metadata_enabled;
 
 	buf->dev_is_high_speed = device_is_high_speed(dev);
 	if (buf->dev_is_high_speed) {
@@ -101,6 +112,18 @@ err_set_errno:
 	return NULL;
 }
 
+struct iio_buffer * iio_device_create_buffer(const struct iio_device *dev,
+		size_t samples_count, bool cyclic)
+{
+	return create_buffer(dev, samples_count, cyclic, false);
+}
+
+struct iio_buffer * iio_device_create_buffer_with_metadata(
+		const struct iio_device *dev, size_t samples_count)
+{
+	return create_buffer(dev, samples_count, false, true);
+}
+
 void iio_buffer_destroy(struct iio_buffer *buffer)
 {
 	iio_device_close(buffer->dev);
@@ -125,6 +148,8 @@ ssize_t iio_buffer_refill(struct iio_buffer *buffer)
 	ssize_t read;
 	const struct iio_device *dev = buffer->dev;
 	ssize_t ret;
+	if (buffer->metadata_enabled)
+		return -EINVAL;
 
 	if (buffer->dev_is_high_speed) {
 		read = dev->ctx->ops->get_buffer(dev, &buffer->buffer,
@@ -141,6 +166,49 @@ ssize_t iio_buffer_refill(struct iio_buffer *buffer)
 			return ret;
 		buffer->sample_size = (unsigned int)ret;
 	}
+	return read;
+}
+
+ssize_t iio_buffer_refill_with_metadata(struct iio_buffer *buffer,
+		void *metadata, size_t metadata_capacity, size_t *metadata_bytes)
+{
+	ssize_t read, ret;
+	const struct iio_device *dev;
+	const struct iio_backend_ops *ops;
+
+	if (!buffer || !metadata || !metadata_capacity || !metadata_bytes)
+		return -EINVAL;
+	if (!buffer->metadata_enabled)
+		return -EINVAL;
+
+	*metadata_bytes = 0;
+	dev = buffer->dev;
+	ops = dev->ctx->ops;
+	if (dev->ctx->backend_api_version < IIO_BACKEND_API_V2)
+		return -ENOSYS;
+
+	if (buffer->dev_is_high_speed) {
+		if (!ops->get_buffer_with_metadata)
+			return -ENOSYS;
+		read = ops->get_buffer_with_metadata(dev, &buffer->buffer,
+				buffer->length, buffer->mask, dev->words,
+				metadata, metadata_capacity, metadata_bytes);
+	} else {
+		if (!ops->read_with_metadata)
+			return -ENOSYS;
+		read = ops->read_with_metadata(dev, buffer->buffer, buffer->length,
+				buffer->mask, dev->words, metadata,
+				metadata_capacity, metadata_bytes);
+	}
+
+	if (read >= 0) {
+		buffer->data_length = read;
+		ret = iio_device_get_sample_size_mask(dev, buffer->mask, dev->words);
+		if (ret < 0)
+			return ret;
+		buffer->sample_size = (unsigned int)ret;
+	}
+
 	return read;
 }
 

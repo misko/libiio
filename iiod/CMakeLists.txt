@@ -28,7 +28,20 @@ if (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR CMAKE_COMPILER_IS_GNUCC)
 	set_source_files_properties(${BISON_parser_OUTPUTS} PROPERTIES COMPILE_FLAGS "-Wno-sign-compare")
 endif ()
 
-set(IIOD_CFILES iiod.c ops.c thread-pool.c ${BISON_parser_OUTPUTS} ${FLEX_lexer_OUTPUTS})
+set(IIOD_BUFFER_METADATA_PROVIDER "" CACHE FILEPATH
+	"Optional C source implementing capture-associated iiOD buffer metadata")
+set(IIOD_BUFFER_METADATA_INCLUDE_DIRS "" CACHE STRING
+	"Include directories for the optional iiOD metadata provider")
+set(IIOD_BUFFER_METADATA_LIBRARIES "" CACHE STRING
+	"Libraries for the optional iiOD metadata provider")
+if (IIOD_BUFFER_METADATA_PROVIDER)
+	set(IIOD_METADATA_CFILE ${IIOD_BUFFER_METADATA_PROVIDER})
+else()
+	set(IIOD_METADATA_CFILE buffer-metadata-none.c)
+endif()
+
+set(IIOD_CFILES iiod.c ops.c thread-pool.c ${IIOD_METADATA_CFILE}
+	${BISON_parser_OUTPUTS} ${FLEX_lexer_OUTPUTS})
 
 option(WITH_AIO "Build IIOD with async. I/O support" ON)
 if (WITH_AIO)
@@ -68,6 +81,11 @@ set_target_properties(iiod PROPERTIES
 	C_EXTENSIONS OFF
 )
 target_link_libraries(iiod iio ${PTHREAD_LIBRARIES} ${AVAHI_LIBRARIES})
+if (IIOD_BUFFER_METADATA_PROVIDER)
+	target_include_directories(iiod PRIVATE ${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+	target_link_libraries(iiod ${IIOD_BUFFER_METADATA_LIBRARIES})
+	target_compile_definitions(iiod PRIVATE IIOD_HAS_BUFFER_METADATA=1)
+endif()
 
 if (WITH_AIO)
 	include_directories(${LIBAIO_INCLUDE_DIR})

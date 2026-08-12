@@ -36,6 +36,8 @@ add_executable(iio_attr    iio_attr.c     ${GETOPT_C_FILE} ${LIBIIO_RC})
 add_executable(iio_readdev iio_readdev.c  ${GETOPT_C_FILE} ${LIBIIO_RC})
 add_executable(iio_reg     iio_reg.c      ${GETOPT_C_FILE} ${LIBIIO_RC})
 add_executable(iio_writedev iio_writedev.c  ${GETOPT_C_FILE} ${LIBIIO_RC})
+add_executable(test_buffer_metadata_e2e test_buffer_metadata_e2e.c)
+target_link_libraries(test_buffer_metadata_e2e iio)
 
 if (MSVC)
 	target_link_options(iio_tests_helper PUBLIC /DEBUG)

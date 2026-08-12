@@ -299,6 +299,53 @@ out_unlock:
 	return ret;
 }
 
+static int usb_open_with_metadata(const struct iio_device *dev,
+		size_t samples_count, bool cyclic)
+{
+	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *pdata = dev->pdata;
+	int ret = -EBUSY;
+	const char *capability = iio_context_get_attr_value(dev->ctx,
+			"iio,buffer-metadata");
+
+	if (cyclic)
+		return -EINVAL;
+	if (!capability || strcmp(capability, "1"))
+		return -ENOSYS;
+	iio_mutex_lock(ctx_pdata->ep_lock);
+	pdata->io_ctx.cancelled = false;
+	if (pdata->opened)
+		goto out_unlock;
+	ret = usb_reserve_ep_unlocked(dev);
+	if (ret)
+		goto out_unlock;
+	ret = usb_open_pipe(ctx_pdata, pdata->io_ctx.ep->pipe_id);
+	if (ret) {
+		usb_free_ep_unlocked(dev);
+		goto out_unlock;
+	}
+
+	iio_mutex_lock(pdata->lock);
+	ret = iiod_client_open_with_metadata_unlocked(ctx_pdata->iiod_client,
+			&pdata->io_ctx, dev, samples_count);
+	if (!ret) {
+		unsigned int remote_timeout =
+			usb_calculate_remote_timeout(ctx_pdata->timeout_ms);
+		ret = iiod_client_set_timeout(ctx_pdata->iiod_client,
+				&pdata->io_ctx, remote_timeout);
+	}
+	pdata->opened = !ret;
+	iio_mutex_unlock(pdata->lock);
+	if (ret) {
+		usb_close_pipe(ctx_pdata, pdata->io_ctx.ep->pipe_id);
+		usb_free_ep_unlocked(dev);
+	}
+
+out_unlock:
+	iio_mutex_unlock(ctx_pdata->ep_lock);
+	return ret;
+}
+
 static int usb_close(const struct iio_device *dev)
 {
 	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
@@ -335,6 +382,23 @@ static ssize_t usb_read(const struct iio_device *dev, void *dst, size_t len,
 	iio_mutex_lock(pdata->lock);
 	ret = iiod_client_read_unlocked(ctx_pdata->iiod_client,
 			&pdata->io_ctx, dev, dst, len, mask, words);
+	iio_mutex_unlock(pdata->lock);
+
+	return ret;
+}
+
+static ssize_t usb_read_with_metadata(const struct iio_device *dev,
+		void *dst, size_t len, uint32_t *mask, size_t words,
+		void *metadata, size_t metadata_capacity, size_t *metadata_bytes)
+{
+	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *pdata = dev->pdata;
+	ssize_t ret;
+
+	iio_mutex_lock(pdata->lock);
+	ret = iiod_client_read_with_metadata_unlocked(ctx_pdata->iiod_client,
+			&pdata->io_ctx, dev, dst, len, mask, words,
+			metadata, metadata_capacity, metadata_bytes);
 	iio_mutex_unlock(pdata->lock);
 
 	return ret;
@@ -544,8 +608,10 @@ static void usb_cancel(const struct iio_device *dev)
 static const struct iio_backend_ops usb_ops = {
 	.get_version = usb_get_version,
 	.open = usb_open,
+	.open_with_metadata = usb_open_with_metadata,
 	.close = usb_close,
 	.read = usb_read,
+	.read_with_metadata = usb_read_with_metadata,
 	.write = usb_write,
 	.read_device_attr = usb_read_dev_attr,
 	.read_channel_attr = usb_read_chn_attr,
@@ -996,6 +1062,7 @@ static struct iio_context * usb_create_context(unsigned int bus,
 
 	ctx->name = "usb";
 	ctx->ops = &usb_ops;
+	ctx->backend_api_version = IIO_BACKEND_API_V2;
 	ctx->pdata = pdata;
 
 	for (i = 0; i < iio_context_get_devices_count(ctx); i++) {

@@ -103,10 +103,15 @@ int start_serial_daemon(struct iio_context *ctx, const char *uart_params,
 
 int open_dev(struct parser_pdata *pdata, struct iio_device *dev,
 		size_t samples_count, const char *mask, bool cyclic);
+int open_dev_with_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t samples_count, const char *mask);
 int close_dev(struct parser_pdata *pdata, struct iio_device *dev);
 
 ssize_t rw_dev(struct parser_pdata *pdata, struct iio_device *dev,
 		unsigned int nb, bool is_write);
+ssize_t rw_dev_with_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t nb,
+		size_t metadata_capacity);
 
 ssize_t read_dev_attr(struct parser_pdata *pdata, struct iio_device *dev,
 		const char *attr, enum iio_attr_type type);

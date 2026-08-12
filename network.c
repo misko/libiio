@@ -409,6 +409,63 @@ out_mutex_unlock:
 	return ret;
 }
 
+static int network_open_with_metadata(const struct iio_device *dev,
+		size_t samples_count, bool cyclic)
+{
+	struct iio_context_pdata *pdata = iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *ppdata = dev->pdata;
+	int ret = -EBUSY;
+	const char *capability = iio_context_get_attr_value(dev->ctx,
+			"iio,buffer-metadata");
+
+	if (cyclic)
+		return -EINVAL;
+	if (!capability || strcmp(capability, "1"))
+		return -ENOSYS;
+	iio_mutex_lock(ppdata->lock);
+	if (ppdata->io_ctx.fd >= 0)
+		goto out_mutex_unlock;
+	ret = create_socket(pdata->addrinfo);
+	if (ret < 0)
+		goto out_mutex_unlock;
+
+	ppdata->io_ctx.fd = ret;
+	ppdata->io_ctx.cancelled = false;
+	ppdata->io_ctx.cancellable = false;
+	ppdata->io_ctx.timeout_ms = DEFAULT_TIMEOUT_MS;
+	ret = iiod_client_open_with_metadata_unlocked(pdata->iiod_client,
+			&ppdata->io_ctx, dev, samples_count);
+	if (ret < 0)
+		goto err_close_socket;
+	ret = setup_cancel(&ppdata->io_ctx);
+	if (ret < 0)
+		goto err_close_socket;
+	ret = set_blocking_mode(ppdata->io_ctx.fd, false);
+	if (ret)
+		goto err_cleanup_cancel;
+	set_socket_timeout(ppdata->io_ctx.fd, pdata->io_ctx.timeout_ms);
+
+	ppdata->io_ctx.timeout_ms = pdata->io_ctx.timeout_ms;
+	ppdata->io_ctx.cancellable = true;
+	ppdata->is_tx = false;
+	ppdata->is_cyclic = false;
+	ppdata->wait_for_err_code = false;
+#ifdef WITH_NETWORK_GET_BUFFER
+	ppdata->mmap_len = samples_count * iio_device_get_sample_size(dev);
+#endif
+	iio_mutex_unlock(ppdata->lock);
+	return 0;
+
+err_cleanup_cancel:
+	cleanup_cancel(&ppdata->io_ctx);
+err_close_socket:
+	close(ppdata->io_ctx.fd);
+	ppdata->io_ctx.fd = -1;
+out_mutex_unlock:
+	iio_mutex_unlock(ppdata->lock);
+	return ret;
+}
+
 static int network_close(const struct iio_device *dev)
 {
 	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
@@ -458,6 +515,23 @@ static ssize_t network_read(const struct iio_device *dev, void *dst, size_t len,
 	iio_mutex_lock(pdata->lock);
 	ret = iiod_client_read_unlocked(ctx_pdata->iiod_client,
 			&pdata->io_ctx, dev, dst, len, mask, words);
+	iio_mutex_unlock(pdata->lock);
+
+	return ret;
+}
+
+static ssize_t network_read_with_metadata(const struct iio_device *dev,
+		void *dst, size_t len, uint32_t *mask, size_t words,
+		void *metadata, size_t metadata_capacity, size_t *metadata_bytes)
+{
+	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *pdata = dev->pdata;
+	ssize_t ret;
+
+	iio_mutex_lock(pdata->lock);
+	ret = iiod_client_read_with_metadata_unlocked(ctx_pdata->iiod_client,
+			&pdata->io_ctx, dev, dst, len, mask, words,
+			metadata, metadata_capacity, metadata_bytes);
 	iio_mutex_unlock(pdata->lock);
 
 	return ret;
@@ -787,6 +861,60 @@ err_unlock:
 	iio_mutex_unlock(pdata->lock);
 	return ret;
 }
+
+static ssize_t network_get_buffer_with_metadata(const struct iio_device *dev,
+		void **addr_ptr, size_t bytes_used, uint32_t *mask, size_t words,
+		void *metadata, size_t metadata_capacity, size_t *metadata_bytes)
+{
+	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *pdata = dev->pdata;
+	void *mapping;
+	ssize_t ret;
+	int memfd;
+
+	if (pdata->is_tx || pdata->is_cyclic)
+		return -ENOSYS;
+	if (!addr_ptr || words != (dev->nb_channels + 31) / 32 ||
+		!metadata || !metadata_capacity || !metadata_bytes)
+		return -EINVAL;
+
+	memfd = open(P_tmpdir, O_RDWR | O_TMPFILE | O_EXCL | O_CLOEXEC, S_IRWXU);
+	if (memfd < 0)
+		return -ENOSYS;
+	if (ftruncate(memfd, pdata->mmap_len) < 0) {
+		ret = -errno;
+		goto err_close_memfd;
+	}
+	mapping = mmap(NULL, pdata->mmap_len, PROT_READ | PROT_WRITE,
+			MAP_SHARED, memfd, 0);
+	if (mapping == MAP_FAILED) {
+		ret = -errno;
+		goto err_close_memfd;
+	}
+
+	iio_mutex_lock(pdata->lock);
+	ret = iiod_client_read_with_metadata_unlocked(ctx_pdata->iiod_client,
+			&pdata->io_ctx, dev, mapping, pdata->mmap_len, mask, words,
+			metadata, metadata_capacity, metadata_bytes);
+	iio_mutex_unlock(pdata->lock);
+	if (ret < 0)
+		goto err_unmap;
+
+	if (pdata->mmap_addr)
+		munmap(pdata->mmap_addr, pdata->mmap_len);
+	if (pdata->memfd >= 0)
+		close(pdata->memfd);
+	pdata->mmap_addr = mapping;
+	pdata->memfd = memfd;
+	*addr_ptr = mapping;
+	return ret;
+
+err_unmap:
+	munmap(mapping, pdata->mmap_len);
+err_close_memfd:
+	close(memfd);
+	return ret;
+}
 #endif
 
 static ssize_t network_read_dev_attr(const struct iio_device *dev,
@@ -925,11 +1053,14 @@ static struct iio_context * network_clone(const struct iio_context *ctx)
 static const struct iio_backend_ops network_ops = {
 	.clone = network_clone,
 	.open = network_open,
+	.open_with_metadata = network_open_with_metadata,
 	.close = network_close,
 	.read = network_read,
+	.read_with_metadata = network_read_with_metadata,
 	.write = network_write,
 #ifdef WITH_NETWORK_GET_BUFFER
 	.get_buffer = network_get_buffer,
+	.get_buffer_with_metadata = network_get_buffer_with_metadata,
 #endif
 	.read_device_attr = network_read_dev_attr,
 	.write_device_attr = network_write_dev_attr,
@@ -1254,6 +1385,7 @@ struct iio_context * network_create_context(const char *hostname)
 	 * with those corresponding to the network context */
 	ctx->name = "network";
 	ctx->ops = &network_ops;
+	ctx->backend_api_version = IIO_BACKEND_API_V2;
 	ctx->pdata = pdata;
 
 	uri_len = strlen(description);

@@ -195,7 +195,8 @@ struct iio_context * iio_context_create_from_backend(
 	struct iio_context *ctx;
 	int ret;
 
-	if (!backend) {
+	if (!backend || backend->api_version < IIO_BACKEND_API_V1 ||
+		backend->api_version > IIO_BACKEND_API_V2) {
 		errno = EINVAL;
 		return NULL;
 	}
@@ -221,6 +222,7 @@ struct iio_context * iio_context_create_from_backend(
 
 	ctx->name = backend->name;
 	ctx->ops = backend->ops;
+	ctx->backend_api_version = backend->api_version;
 
 	return ctx;
 
@@ -509,6 +511,20 @@ int iio_context_add_device(struct iio_context *ctx, struct iio_device *dev)
 	return 0;
 }
 
+static int refresh_context_xml(struct iio_context *ctx)
+{
+	char *xml;
+
+	if (!ctx->xml)
+		return 0;
+	xml = iio_context_create_xml(ctx);
+	if (IS_ERR(xml))
+		return (int)PTR_ERR(xml);
+	free(ctx->xml);
+	ctx->xml = xml;
+	return 0;
+}
+
 int iio_context_add_attr(struct iio_context *ctx,
 		const char *key, const char *value)
 {
@@ -522,7 +538,7 @@ int iio_context_add_attr(struct iio_context *ctx,
 				return -ENOMEM;
 			free(ctx->values[i]);
 			ctx->values[i] = new_val;
-			return 0;
+			return refresh_context_xml(ctx);
 		}
 	}
 
@@ -553,5 +569,5 @@ int iio_context_add_attr(struct iio_context *ctx,
 	ctx->attrs[ctx->nb_attrs] = new_key;
 	ctx->values[ctx->nb_attrs] = new_val;
 	ctx->nb_attrs++;
-	return 0;
+	return refresh_context_xml(ctx);
 }
