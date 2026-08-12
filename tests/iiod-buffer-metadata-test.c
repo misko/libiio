@@ -31,6 +31,18 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	return 0;
 }
 
+int iiod_buffer_metadata_buffer_opened(void *provider_context,
+		unsigned int kernel_buffers_count)
+{
+	(void)provider_context;
+	return kernel_buffers_count ? 0 : -EINVAL;
+}
+
+void iiod_buffer_metadata_before_refill(void *provider_context)
+{
+	(void)provider_context;
+}
+
 void iiod_buffer_metadata_close(void *provider_context)
 {
 	free(provider_context);

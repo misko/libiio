@@ -33,6 +33,7 @@ struct spf_iiod_metadata_context {
 	uint32_t observation_interval_samples;
 	uint64_t stream_id;
 	uint64_t buffer_sequence;
+	uint64_t refills_started;
 	bool sampler_started;
 	bool timestamp_configured;
 };
@@ -110,6 +111,43 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	*provider_context = ctx;
 	*extra_samples = 1;
 	return 0;
+}
+
+int iiod_buffer_metadata_buffer_opened(void *provider_context,
+		unsigned int kernel_buffers_count)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	uint64_t initial_credit;
+	uint64_t observations_per_frame;
+
+	if (!ctx || !kernel_buffers_count)
+		return -EINVAL;
+	observations_per_frame =
+		(ctx->samples_per_channel + ctx->observation_interval_samples - 1U) /
+		ctx->observation_interval_samples;
+	if (observations_per_frame * kernel_buffers_count >
+			SPF_GAIN_SAMPLER_RING_CAPACITY)
+		return -E2BIG;
+	initial_credit = (uint64_t)ctx->samples_per_channel *
+		kernel_buffers_count;
+	ctx->refills_started = 0;
+	spf_gain_sampler_limit(&ctx->sampler, initial_credit);
+	return 0;
+}
+
+void iiod_buffer_metadata_before_refill(void *provider_context)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+
+	if (!ctx)
+		return;
+	/* The first dequeue consumes an already queued block.  Every later
+	 * refill re-enqueues exactly one consumed block before dequeuing another.
+	 */
+	if (ctx->refills_started != 0)
+		spf_gain_sampler_add_credit(
+			&ctx->sampler, ctx->samples_per_channel);
+	ctx->refills_started++;
 }
 
 void iiod_buffer_metadata_close(void *provider_context)
