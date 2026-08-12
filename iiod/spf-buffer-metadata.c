@@ -128,11 +128,14 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 	observations_per_frame =
 		(ctx->samples_per_channel + ctx->observation_interval_samples - 1U) /
 		ctx->observation_interval_samples;
-	if (observations_per_frame * kernel_buffers_count >
+	/* One additional window covers buffer-arm latency without retaining an
+	 * unbounded observation history after the kernel queue becomes full.
+	 */
+	if (observations_per_frame * ((uint64_t)kernel_buffers_count + 1U) >
 			SPF_GAIN_SAMPLER_RING_CAPACITY)
 		return -E2BIG;
 	initial_credit = (uint64_t)ctx->samples_per_channel *
-		kernel_buffers_count;
+		((uint64_t)kernel_buffers_count + 1U);
 	ctx->refills_started = 0;
 	spf_gain_sampler_limit(&ctx->sampler, initial_credit);
 	return 0;
@@ -144,12 +147,13 @@ void iiod_buffer_metadata_before_refill(void *provider_context)
 
 	if (!ctx)
 		return;
-	/* The first dequeue consumes an already queued block.  Every later
-	 * refill re-enqueues exactly one consumed block before dequeuing another.
+	/* The first dequeue consumes an already queued block. Every later refill
+	 * re-enqueues exactly one consumed block before dequeuing another. Reset,
+	 * rather than accumulate, one frame plus one bounded arm-safety window.
 	 */
 	if (ctx->refills_started != 0)
-		spf_gain_sampler_add_credit(
-			&ctx->sampler, ctx->samples_per_channel);
+		spf_gain_sampler_limit(&ctx->sampler,
+			(uint64_t)ctx->samples_per_channel * 2U);
 	ctx->refills_started++;
 }
 
