@@ -714,9 +714,12 @@ static void rw_thd(struct thread_pool *pool, void *d)
 			ssize_t nb_bytes;
 
 			if (entry->metadata_enabled)
-				iiod_buffer_metadata_before_refill(
+				ret = iiod_buffer_metadata_before_refill(
 					entry->metadata_provider_context);
-			ret = iio_buffer_refill(entry->buf);
+			else
+				ret = 0;
+			if (ret == 0)
+				ret = iio_buffer_refill(entry->buf);
 
 			pthread_mutex_lock(&entry->thdlist_lock);
 

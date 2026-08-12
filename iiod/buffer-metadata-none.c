@@ -24,9 +24,10 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 	return -ENOSYS;
 }
 
-void iiod_buffer_metadata_before_refill(void *provider_context)
+int iiod_buffer_metadata_before_refill(void *provider_context)
 {
 	(void)provider_context;
+	return 0;
 }
 
 void iiod_buffer_metadata_close(void *provider_context)
