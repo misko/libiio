@@ -23,6 +23,7 @@
 #define SPF_IIOD_OBSERVATION_CAPACITY UINT16_C(64)
 #define SPF_IIOD_OBSERVATION_INTERVAL_MAX UINT32_C(32768)
 #define SPF_IIOD_OBSERVATION_INTERVAL_MIN UINT32_C(1024)
+#define SPF_IIOD_SAMPLER_START_TIMEOUT_MS UINT32_C(100)
 
 struct spf_iiod_metadata_context {
 	struct iio_device *rx;
@@ -141,20 +142,23 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 	return 0;
 }
 
-void iiod_buffer_metadata_before_refill(void *provider_context)
+int iiod_buffer_metadata_before_refill(void *provider_context)
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
 
 	if (!ctx)
-		return;
+		return -EINVAL;
 	/* The first dequeue consumes an already queued block. Every later refill
 	 * re-enqueues exactly one consumed block before dequeuing another. Reset,
 	 * rather than accumulate, one frame plus one bounded arm-safety window.
 	 */
-	if (ctx->refills_started != 0)
-		spf_gain_sampler_limit(&ctx->sampler,
-			(uint64_t)ctx->samples_per_channel * 2U);
+	if (ctx->refills_started != 0 &&
+		!spf_gain_sampler_limit_and_wait_started(&ctx->sampler,
+			(uint64_t)ctx->samples_per_channel * 2U,
+			SPF_IIOD_SAMPLER_START_TIMEOUT_MS))
+		return -ETIMEDOUT;
 	ctx->refills_started++;
+	return 0;
 }
 
 void iiod_buffer_metadata_close(void *provider_context)

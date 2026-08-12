@@ -19,7 +19,7 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		void **provider_context, size_t *extra_samples);
 int iiod_buffer_metadata_buffer_opened(void *provider_context,
 		unsigned int kernel_buffers_count);
-void iiod_buffer_metadata_before_refill(void *provider_context);
+int iiod_buffer_metadata_before_refill(void *provider_context);
 void iiod_buffer_metadata_close(void *provider_context);
 ssize_t iiod_buffer_metadata_get(void *provider_context,
 		const struct iio_device *dev, const struct iio_buffer *buffer,
