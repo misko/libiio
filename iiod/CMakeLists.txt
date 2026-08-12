@@ -30,17 +30,20 @@ endif ()
 
 set(IIOD_BUFFER_METADATA_PROVIDER "" CACHE FILEPATH
 	"Optional C source implementing capture-associated iiOD buffer metadata")
+set(IIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES "" CACHE STRING
+	"Additional C sources used by the optional iiOD metadata provider")
 set(IIOD_BUFFER_METADATA_INCLUDE_DIRS "" CACHE STRING
 	"Include directories for the optional iiOD metadata provider")
 set(IIOD_BUFFER_METADATA_LIBRARIES "" CACHE STRING
 	"Libraries for the optional iiOD metadata provider")
 if (IIOD_BUFFER_METADATA_PROVIDER)
-	set(IIOD_METADATA_CFILE ${IIOD_BUFFER_METADATA_PROVIDER})
+	set(IIOD_METADATA_CFILES ${IIOD_BUFFER_METADATA_PROVIDER}
+		${IIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES})
 else()
-	set(IIOD_METADATA_CFILE buffer-metadata-none.c)
+	set(IIOD_METADATA_CFILES buffer-metadata-none.c)
 endif()
 
-set(IIOD_CFILES iiod.c ops.c thread-pool.c ${IIOD_METADATA_CFILE}
+set(IIOD_CFILES iiod.c ops.c thread-pool.c ${IIOD_METADATA_CFILES}
 	${BISON_parser_OUTPUTS} ${FLEX_lexer_OUTPUTS})
 
 option(WITH_AIO "Build IIOD with async. I/O support" ON)
