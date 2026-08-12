@@ -713,13 +713,19 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		if (has_readers) {
 			ssize_t nb_bytes;
 
-			if (entry->metadata_enabled)
+			if (entry->metadata_enabled) {
 				ret = iiod_buffer_metadata_before_refill(
 					entry->metadata_provider_context);
-			else
-				ret = 0;
-			if (ret == 0)
+				if (ret == 0) {
+					ssize_t refill_ret = iio_buffer_refill(entry->buf);
+					int metadata_ret = iiod_buffer_metadata_after_refill(
+						entry->metadata_provider_context);
+					ret = refill_ret < 0 ? refill_ret :
+						(metadata_ret < 0 ? metadata_ret : refill_ret);
+				}
+			} else {
 				ret = iio_buffer_refill(entry->buf);
+			}
 
 			pthread_mutex_lock(&entry->thdlist_lock);
 
