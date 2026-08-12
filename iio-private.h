@@ -133,6 +133,7 @@ struct iio_channel_attr {
 struct iio_context {
 	struct iio_context_pdata *pdata;
 	const struct iio_backend_ops *ops;
+	unsigned int backend_api_version;
 	const char *name;
 	char *description;
 
@@ -201,6 +202,7 @@ struct iio_buffer {
 	unsigned int dev_sample_size;
 	unsigned int sample_size;
 	bool dev_is_high_speed;
+	bool metadata_enabled;
 };
 
 struct iio_context_info {

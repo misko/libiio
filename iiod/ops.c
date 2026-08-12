@@ -9,6 +9,7 @@
 #include "ops.h"
 #include "parser.h"
 #include "thread-pool.h"
+#include "buffer-metadata.h"
 #include "../debug.h"
 
 #include <errno.h>
@@ -31,6 +32,7 @@ struct ThdEntry {
 	SLIST_ENTRY(ThdEntry) parser_list_entry;
 	SLIST_ENTRY(ThdEntry) dev_list_entry;
 	unsigned int nb, sample_size, samples_count;
+	unsigned int metadata_capacity;
 	ssize_t err;
 
 	int eventfd;
@@ -41,7 +43,10 @@ struct ThdEntry {
 
 	uint32_t *mask;
 	bool active, is_writer, new_client, wait_for_open;
+	bool metadata_enabled;
 };
+
+#define IIOD_MAX_BUFFER_METADATA_BYTES (64U * 1024U)
 
 static void thd_entry_event_signal(struct ThdEntry *thd)
 {
@@ -95,10 +100,13 @@ struct DevEntry {
 	struct iio_buffer *buf;
 	unsigned int sample_size, nb_clients;
 	unsigned int samples_count;
+	size_t metadata_extra_samples;
+	void *metadata_provider_context;
 	bool update_mask;
 	bool cyclic;
 	bool closed;
 	bool cancelled;
+	bool metadata_enabled;
 
 	/* Linked list of ThdEntry structures corresponding
 	 * to all the threads who opened the device */
@@ -440,12 +448,35 @@ static ssize_t send_data(struct DevEntry *dev, struct ThdEntry *thd, size_t len)
 {
 	struct parser_pdata *pdata = thd->pdata;
 	bool demux = server_demux && dev->sample_size != thd->sample_size;
+	void *metadata = NULL;
+	ssize_t metadata_len = 0;
+	ssize_t ret;
 	void *start;
+	size_t iq_offset = 0;
+	size_t iq_bytes = len;
 
-	if (demux)
+	if (demux && !thd->metadata_enabled)
 		len = (len / dev->sample_size) * thd->sample_size;
-	if (len > thd->nb)
+	if (!thd->metadata_enabled && len > thd->nb)
 		len = thd->nb;
+
+	if (thd->metadata_enabled) {
+		metadata = malloc(thd->metadata_capacity);
+		if (!metadata)
+			return -ENOMEM;
+		metadata_len = iiod_buffer_metadata_get(
+				dev->metadata_provider_context, dev->dev, dev->buf, len,
+				metadata, thd->metadata_capacity, &iq_offset, &iq_bytes);
+		if (metadata_len <= 0 ||
+				metadata_len > (ssize_t)thd->metadata_capacity ||
+				iq_offset > len || iq_bytes > len - iq_offset ||
+				iq_bytes != thd->nb) {
+			ret = metadata_len < 0 ? metadata_len : -EIO;
+			free(metadata);
+			return ret;
+		}
+		len = iq_bytes;
+	}
 
 	print_value(pdata, len);
 
@@ -453,7 +484,7 @@ static ssize_t send_data(struct DevEntry *dev, struct ThdEntry *thd, size_t len)
 		unsigned int i;
 		char buf[129], *ptr = buf;
 		uint32_t *mask = demux ? thd->mask : dev->mask;
-		ssize_t ret, length;
+		ssize_t length;
 
 		length = sizeof(buf);
 		/* Send the current mask */
@@ -473,15 +504,22 @@ static ssize_t send_data(struct DevEntry *dev, struct ThdEntry *thd, size_t len)
 
 		ret = write_all(pdata, buf, ptr + 1 - buf);
 		if (ret < 0)
-			return ret;
+			goto out_free_metadata;
 
 		thd->new_client = false;
 	}
 
+	if (thd->metadata_enabled) {
+		print_value(pdata, metadata_len);
+		ret = write_all(pdata, metadata, (size_t)metadata_len);
+		if (ret < 0)
+			goto out_free_metadata;
+	}
+
 	if (!demux) {
 		/* Short path */
-		start = iio_buffer_start(dev->buf);
-		return write_all(pdata, start, len);
+		start = (void *)((uintptr_t)iio_buffer_start(dev->buf) + iq_offset);
+		ret = write_all(pdata, start, len);
 	} else {
 		struct sample_cb_info info = {
 			.pdata = pdata,
@@ -490,8 +528,12 @@ static ssize_t send_data(struct DevEntry *dev, struct ThdEntry *thd, size_t len)
 			.mask = thd->mask,
 		};
 
-		return iio_buffer_foreach_sample(dev->buf, send_sample, &info);
+		ret = iio_buffer_foreach_sample(dev->buf, send_sample, &info);
 	}
+
+out_free_metadata:
+	free(metadata);
+	return ret;
 }
 
 static ssize_t receive_data(struct DevEntry *dev, struct ThdEntry *thd)
@@ -607,7 +649,8 @@ static void rw_thd(struct thread_pool *pool, void *d)
 			}
 
 			entry->buf = iio_device_create_buffer(dev,
-					samples_count, entry->cyclic);
+					samples_count + entry->metadata_extra_samples,
+					entry->cyclic);
 			if (!entry->buf) {
 				ret = -errno;
 				IIO_ERROR("Unable to create buffer\n");
@@ -793,6 +836,10 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		iio_buffer_destroy(entry->buf);
 		entry->buf = NULL;
 	}
+	if (entry->metadata_provider_context) {
+		iiod_buffer_metadata_close(entry->metadata_provider_context);
+		entry->metadata_provider_context = NULL;
+	}
 	entry->closed = true;
 	pthread_mutex_unlock(&entry->thdlist_lock);
 
@@ -823,7 +870,8 @@ static struct ThdEntry *parser_lookup_thd_entry(struct parser_pdata *pdata,
 }
 
 static ssize_t rw_buffer(struct parser_pdata *pdata,
-		struct iio_device *dev, unsigned int nb, bool is_write)
+		struct iio_device *dev, unsigned int nb, bool is_write,
+		unsigned int metadata_capacity)
 {
 	struct DevEntry *entry;
 	struct ThdEntry *thd;
@@ -837,6 +885,11 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 		return -EBADF;
 
 	entry = thd->entry;
+	if (metadata_capacity && (is_write ||
+			metadata_capacity > IIOD_MAX_BUFFER_METADATA_BYTES ||
+			thd->sample_size != entry->sample_size ||
+			nb != entry->sample_size * entry->samples_count))
+		return -EINVAL;
 
 	if (nb < entry->sample_size)
 		return 0;
@@ -856,6 +909,8 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 	thd->nb = nb;
 	thd->err = 0;
 	thd->is_writer = is_write;
+	thd->metadata_enabled = metadata_capacity != 0;
+	thd->metadata_capacity = metadata_capacity;
 	thd->active = true;
 
 	pthread_cond_signal(&entry->rw_ready_cond);
@@ -972,7 +1027,8 @@ static ssize_t get_dev_sample_size_mask(const struct iio_device *dev,
 }
 
 static int open_dev_helper(struct parser_pdata *pdata, struct iio_device *dev,
-		size_t samples_count, const char *mask, bool cyclic)
+		size_t samples_count, const char *mask, bool cyclic,
+		bool metadata_enabled)
 {
 	int ret = -ENOMEM;
 	struct DevEntry *entry;
@@ -1012,7 +1068,8 @@ retry:
 	pthread_mutex_lock(&devlist_lock);
 	entry = iio_device_get_data(dev);
 	if (entry) {
-		if (cyclic || entry->cyclic) {
+		if (cyclic || entry->cyclic || metadata_enabled ||
+				entry->metadata_enabled) {
 			/* Only one client allowed in cyclic mode */
 			pthread_mutex_unlock(&devlist_lock);
 
@@ -1103,6 +1160,7 @@ retry:
 	}
 
 	entry->cyclic = cyclic;
+	entry->metadata_enabled = metadata_enabled;
 	entry->nb_words = len;
 	entry->update_mask = true;
 	entry->dev = dev;
@@ -1111,6 +1169,16 @@ retry:
 	SLIST_INSERT_HEAD(&entry->thdlist_head, thd, dev_list_entry);
 	thd->entry = entry;
 	IIO_DEBUG("Added thread to client list\n");
+
+	if (metadata_enabled) {
+		ret = iiod_buffer_metadata_open(dev, samples_count, words, len,
+				&entry->metadata_provider_context,
+				&entry->metadata_extra_samples);
+		if (ret < 0) {
+			pthread_mutex_unlock(&devlist_lock);
+			goto err_free_entry_mask;
+		}
+	}
 
 	pthread_mutex_init(&entry->thdlist_lock, NULL);
 	pthread_cond_init(&entry->rw_ready_cond, NULL);
@@ -1143,6 +1211,8 @@ retry:
 	return ret;
 
 err_free_entry_mask:
+	if (entry->metadata_provider_context)
+		iiod_buffer_metadata_close(entry->metadata_provider_context);
 	free(entry->mask);
 err_free_entry:
 	free(entry);
@@ -1174,7 +1244,15 @@ static int close_dev_helper(struct parser_pdata *pdata, struct iio_device *dev)
 int open_dev(struct parser_pdata *pdata, struct iio_device *dev,
 		size_t samples_count, const char *mask, bool cyclic)
 {
-	int ret = open_dev_helper(pdata, dev, samples_count, mask, cyclic);
+	int ret = open_dev_helper(pdata, dev, samples_count, mask, cyclic, false);
+	print_value(pdata, ret);
+	return ret;
+}
+
+int open_dev_with_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t samples_count, const char *mask)
+{
+	int ret = open_dev_helper(pdata, dev, samples_count, mask, false, true);
 	print_value(pdata, ret);
 	return ret;
 }
@@ -1189,8 +1267,22 @@ int close_dev(struct parser_pdata *pdata, struct iio_device *dev)
 ssize_t rw_dev(struct parser_pdata *pdata, struct iio_device *dev,
 		unsigned int nb, bool is_write)
 {
-	ssize_t ret = rw_buffer(pdata, dev, nb, is_write);
+	ssize_t ret = rw_buffer(pdata, dev, nb, is_write, 0);
 	if (ret <= 0 || is_write)
+		print_value(pdata, ret);
+	return ret;
+}
+
+ssize_t rw_dev_with_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t nb, size_t metadata_capacity)
+{
+	ssize_t ret;
+	if (nb > UINT_MAX || metadata_capacity > UINT_MAX)
+		ret = -EOVERFLOW;
+	else
+		ret = rw_buffer(pdata, dev, (unsigned int)nb, false,
+				(unsigned int)metadata_capacity);
+	if (ret <= 0)
 		print_value(pdata, ret);
 	return ret;
 }

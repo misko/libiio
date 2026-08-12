@@ -470,6 +470,7 @@ static struct iio_context * serial_create_context(const char *port_name,
 
 	ctx->name = "serial";
 	ctx->ops = &serial_ops;
+	ctx->backend_api_version = IIO_BACKEND_API_V1;
 	ctx->pdata = pdata;
 
 	for (i = 0; i < iio_context_get_devices_count(ctx); i++) {

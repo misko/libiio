@@ -64,11 +64,13 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token EXIT
 %token HELP
 %token OPEN
+%token OPENM
 %token CLOSE
 %token PRINT
 %token ZPRINT
 %token READ
 %token READBUF
+%token READBUFM
 %token WRITEBUF
 %token WRITE
 %token SETTRIG
@@ -117,6 +119,8 @@ Line:
 		"\t\tSet the timeout (in ms) for I/O operations\n"
 		"\tOPEN <device> <samples_count> <mask> [CYCLIC]\n"
 		"\t\tOpen the specified device with the given mask of channels\n"
+		"\tOPENM <device> <samples_count> <mask>\n"
+		"\t\tOpen an RX buffer for capture-associated metadata\n"
 		"\tCLOSE <device>\n"
 		"\t\tClose the specified device\n"
 		"\tREAD <device> DEBUG|BUFFER|[INPUT|OUTPUT <channel>] [<attribute>]\n"
@@ -125,6 +129,8 @@ Line:
 		"\t\tSet the value of an attribute\n"
 		"\tREADBUF <device> <bytes_count>\n"
 		"\t\tRead raw data from the specified device\n"
+		"\tREADBUFM <device> <bytes_count> <metadata_capacity>\n"
+		"\t\tRead raw data and its capture-associated metadata\n"
 		"\tWRITEBUF <device> <bytes_count>\n"
 		"\t\tWrite raw data to the specified device\n"
 		"\tGETTRIG <device>\n"
@@ -203,6 +209,17 @@ Line:
 		unsigned long samples_count = atol(nb);
 		int ret = open_dev(pdata, $3, samples_count, mask, false);
 		free(nb);
+		free(mask);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| OPENM SPACE DEVICE SPACE WORD SPACE WORD END {
+		char *size = $5, *mask = $7;
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		int ret = open_dev_with_metadata(pdata, $3, atol(size), mask);
+		free(size);
 		free(mask);
 		if (ret < 0)
 			YYABORT;
@@ -291,6 +308,20 @@ Line:
 		struct parser_pdata *pdata = yyget_extra(scanner);
 		ssize_t ret = rw_dev(pdata, $3, nb, false);
 		free(len);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| READBUFM SPACE DEVICE SPACE WORD SPACE WORD END {
+		char *len = $5;
+		char *metadata_capacity = $7;
+		unsigned long nb = strtoul(len, NULL, 10);
+		unsigned long cap = strtoul(metadata_capacity, NULL, 10);
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = rw_dev_with_metadata(pdata, $3, nb, cap);
+		free(len);
+		free(metadata_capacity);
 		if (ret < 0)
 			YYABORT;
 		else

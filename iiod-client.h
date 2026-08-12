@@ -78,6 +78,11 @@ int iiod_client_open_unlocked(struct iiod_client *client,
 			      const struct iio_device *dev,
 			      size_t samples_count, bool cyclic);
 
+int iiod_client_open_with_metadata_unlocked(struct iiod_client *client,
+			      struct iiod_client_pdata *desc,
+			      const struct iio_device *dev,
+			      size_t samples_count);
+
 int iiod_client_close_unlocked(struct iiod_client *client,
 			       struct iiod_client_pdata *desc,
 			       const struct iio_device *dev);
@@ -87,6 +92,15 @@ ssize_t iiod_client_read_unlocked(struct iiod_client *client,
 				  const struct iio_device *dev,
 				  void *dst, size_t len,
 				  uint32_t *mask, size_t words);
+
+ssize_t iiod_client_read_with_metadata_unlocked(
+				  struct iiod_client *client,
+				  struct iiod_client_pdata *desc,
+				  const struct iio_device *dev,
+				  void *dst, size_t len,
+				  uint32_t *mask, size_t words,
+				  void *metadata, size_t metadata_capacity,
+				  size_t *metadata_bytes);
 
 ssize_t iiod_client_write_unlocked(struct iiod_client *client,
 				   struct iiod_client_pdata *desc,

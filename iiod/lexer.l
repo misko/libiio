@@ -53,6 +53,11 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 	return OPEN;
 }
 
+<INITIAL>OPENM|openm {
+	BEGIN(WANT_DEVICE);
+	return OPENM;
+}
+
 <INITIAL>CLOSE|close {
 	BEGIN(WANT_DEVICE);
 	return CLOSE;
@@ -66,6 +71,11 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 <INITIAL>READBUF|readbuf {
 	BEGIN(WANT_DEVICE);
 	return READBUF;
+}
+
+<INITIAL>READBUFM|readbufm {
+	BEGIN(WANT_DEVICE);
+	return READBUFM;
 }
 
 <INITIAL>WRITEBUF|writebuf {
