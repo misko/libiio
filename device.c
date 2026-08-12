@@ -380,12 +380,23 @@ bool iio_device_is_trigger(const struct iio_device *dev)
 int iio_device_set_kernel_buffers_count(const struct iio_device *dev,
 		unsigned int nb_buffers)
 {
+	int ret;
+
 	if (nb_buffers == 0)
 		return -EINVAL;
-	else if (dev->ctx->ops->set_kernel_buffers_count)
-		return dev->ctx->ops->set_kernel_buffers_count(dev, nb_buffers);
-	else
+	else if (!dev->ctx->ops->set_kernel_buffers_count)
 		return -ENOSYS;
+
+	ret = dev->ctx->ops->set_kernel_buffers_count(dev, nb_buffers);
+	if (!ret)
+		((struct iio_device *)dev)->kernel_buffers_count = nb_buffers;
+	return ret;
+}
+
+unsigned int iio_device_get_kernel_buffers_count(const struct iio_device *dev)
+{
+	/* Four is the established local-backend default in libiio 0.25/0.26. */
+	return dev->kernel_buffers_count ? dev->kernel_buffers_count : 4U;
 }
 
 int iio_device_get_trigger(const struct iio_device *dev,

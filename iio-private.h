@@ -191,6 +191,7 @@ struct iio_device {
 
 	uint32_t *mask;
 	size_t words;
+	unsigned int kernel_buffers_count;
 };
 
 struct iio_buffer {

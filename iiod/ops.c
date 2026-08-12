@@ -656,6 +656,16 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				IIO_ERROR("Unable to create buffer\n");
 				break;
 			}
+			if (entry->metadata_enabled) {
+				ret = iiod_buffer_metadata_buffer_opened(
+					entry->metadata_provider_context,
+					iio_device_get_kernel_buffers_count(dev));
+				if (ret < 0) {
+					iio_buffer_destroy(entry->buf);
+					entry->buf = NULL;
+					break;
+				}
+			}
 			entry->cancelled = false;
 
 			/* Signal the threads that we opened the device */
@@ -703,6 +713,9 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		if (has_readers) {
 			ssize_t nb_bytes;
 
+			if (entry->metadata_enabled)
+				iiod_buffer_metadata_before_refill(
+					entry->metadata_provider_context);
 			ret = iio_buffer_refill(entry->buf);
 
 			pthread_mutex_lock(&entry->thdlist_lock);

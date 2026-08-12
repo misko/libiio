@@ -1113,6 +1113,13 @@ __api __check_ret __pure bool iio_device_is_trigger(const struct iio_device *dev
 __api __check_ret int iio_device_set_kernel_buffers_count(const struct iio_device *dev,
 		unsigned int nb_buffers);
 
+/** @brief Retrieve the configured number of kernel-side buffers.
+ * @param dev A pointer to an iio_device structure
+ * @return The configured buffer count, or the libiio default if it has not
+ * been changed for this device. */
+__api __check_ret __pure unsigned int iio_device_get_kernel_buffers_count(
+		const struct iio_device *dev);
+
 /** @} *//* ------------------------------------------------------------------*/
 /* ------------------------- Channel functions -------------------------------*/
 /** @defgroup Channel Channel
