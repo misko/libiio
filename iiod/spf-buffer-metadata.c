@@ -35,6 +35,7 @@ struct spf_iiod_metadata_context {
 	uint64_t stream_first_sample_sequence;
 	uint64_t frames_emitted;
 	uint64_t refills_started;
+	uint32_t startup_frames_discarded;
 	bool stream_origin_valid;
 	bool sampler_started;
 	bool timestamp_configured;
@@ -180,6 +181,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	spf_rssi_pair_t rssi_end;
 	uint32_t rssi_overflow_count = 0;
 	uint16_t observation_count;
+	spf_gain_frame_decision_t frame_decision;
 	size_t header_bytes;
 	const uint8_t *raw;
 
@@ -198,8 +200,13 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	observation_count = spf_gain_sampler_collect(&ctx->sampler,
 		first_sample_sequence, ctx->samples_per_channel, observations,
 		SPF_IIOD_OBSERVATION_CAPACITY, &observation_overflow_count);
-	if (spf_gain_frame_decide(ctx->frames_emitted, observation_count, 0) !=
-			SPF_GAIN_FRAME_ACCEPT)
+	frame_decision = spf_gain_frame_decide(ctx->frames_emitted,
+		observation_count, ctx->startup_frames_discarded);
+	if (frame_decision == SPF_GAIN_FRAME_DISCARD_STARTUP) {
+		ctx->startup_frames_discarded++;
+		return -EAGAIN;
+	}
+	if (frame_decision != SPF_GAIN_FRAME_ACCEPT)
 		return -ENODATA;
 	if (!spf_gain_sampler_collect_rssi(&ctx->sampler,
 			first_sample_sequence, ctx->samples_per_channel,
