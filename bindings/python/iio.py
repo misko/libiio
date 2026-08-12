@@ -483,6 +483,10 @@ _d_set_buffers_count.restype = c_int
 _d_set_buffers_count.argtypes = (_DevicePtr, c_uint)
 _d_set_buffers_count.errcheck = _check_negative
 
+_d_get_buffers_count = _lib.iio_device_get_kernel_buffers_count
+_d_get_buffers_count.restype = c_uint
+_d_get_buffers_count.argtypes = (_DevicePtr,)
+
 _c_get_id = _lib.iio_channel_get_id
 _c_get_id.restype = c_char_p
 _c_get_id.argtypes = (_ChannelPtr,)
@@ -602,6 +606,14 @@ _create_buffer.argtypes = (
 )
 _create_buffer.errcheck = _check_null
 
+_create_buffer_with_metadata = _lib.iio_device_create_buffer_with_metadata
+_create_buffer_with_metadata.restype = _BufferPtr
+_create_buffer_with_metadata.argtypes = (
+    _DevicePtr,
+    c_size_t,
+)
+_create_buffer_with_metadata.errcheck = _check_null
+
 _buffer_destroy = _lib.iio_buffer_destroy
 _buffer_destroy.argtypes = (_BufferPtr,)
 
@@ -609,6 +621,16 @@ _buffer_refill = _lib.iio_buffer_refill
 _buffer_refill.restype = c_ssize_t
 _buffer_refill.argtypes = (_BufferPtr,)
 _buffer_refill.errcheck = _check_negative
+
+_buffer_refill_with_metadata = _lib.iio_buffer_refill_with_metadata
+_buffer_refill_with_metadata.restype = c_ssize_t
+_buffer_refill_with_metadata.argtypes = (
+    _BufferPtr,
+    c_void_p,
+    c_size_t,
+    _POINTER(c_size_t),
+)
+_buffer_refill_with_metadata.errcheck = _check_negative
 
 _buffer_push_partial = _lib.iio_buffer_push_partial
 _buffer_push_partial.restype = c_ssize_t
@@ -1087,6 +1109,50 @@ class Buffer(object):
         return _buffer_step(self._buffer)
 
 
+class MetadataBuffer(Buffer):
+    """An input buffer whose refill atomically returns frame metadata.
+
+    This opt-in buffer requires an iiOD server advertising the matching
+    extension.  IQ remains available through the ordinary Buffer and Channel
+    read methods; ``refill()`` returns only the opaque metadata record paired
+    with that IQ refill.
+    """
+
+    def __init__(self, device, samples_count, metadata_capacity=64 * 1024):
+        if metadata_capacity <= 0:
+            raise ValueError("metadata_capacity must be positive")
+        try:
+            self._buffer = _create_buffer_with_metadata(
+                device._device, samples_count
+            )
+        except Exception:
+            self._buffer = None
+            raise
+        self._length = samples_count * device.sample_size
+        self._samples_count = samples_count
+        self._metadata_capacity = int(metadata_capacity)
+        self._metadata = None
+        self._dev = device
+
+    def refill(self):
+        """Fetch IQ and return its atomically associated metadata bytes."""
+        storage = create_string_buffer(self._metadata_capacity)
+        metadata_bytes = c_size_t()
+        _buffer_refill_with_metadata(
+            self._buffer,
+            storage,
+            self._metadata_capacity,
+            _byref(metadata_bytes),
+        )
+        self._metadata = storage.raw[: metadata_bytes.value]
+        return self._metadata
+
+    @property
+    def metadata(self):
+        """Metadata from the most recent successful refill, or ``None``."""
+        return self._metadata
+
+
 class _DeviceOrTrigger(object):
     def __init__(self, _ctx, _device):
         self._ctx = _ctx
@@ -1173,6 +1239,11 @@ class _DeviceOrTrigger(object):
 
         """
         return _d_set_buffers_count(self._device, count)
+
+    @property
+    def kernel_buffers_count(self):
+        """Number of kernel buffers configured for this device."""
+        return _d_get_buffers_count(self._device)
 
     @property
     def sample_size(self):
