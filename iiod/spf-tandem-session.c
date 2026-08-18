@@ -260,6 +260,8 @@ int spf_tandem_session_collect(struct spf_tandem_session *session,
 	ret = fill_queue(session);
 	if (ret)
 		return ret;
+process_queue:
+	consumed = 0;
 	while (consumed < session->queue_count) {
 		const struct adi_tandem_agc_event *event =
 			&session->queue[consumed];
@@ -272,7 +274,7 @@ int spf_tandem_session_collect(struct spf_tandem_session *session,
 			session->last_event_sample_sequence)
 			return -EILSEQ;
 		if (event->rx1_gain_index != event->rx2_gain_index ||
-			event->rx1_gain_index > 0x7f || event->flags & 0xff00 ||
+			event->rx1_gain_index > 0x7f || event->flags & 0xffc0 ||
 			((event->flags >> 4) & 0x3) < 1 ||
 			((event->flags >> 4) & 0x3) > 2 ||
 			(event->flags & 0xf) > 6)
@@ -295,6 +297,13 @@ int spf_tandem_session_collect(struct spf_tandem_session *session,
 		memmove(session->queue, &session->queue[consumed],
 			(session->queue_count - consumed) * sizeof(session->queue[0]));
 		session->queue_count -= consumed;
+	}
+	if (!session->queue_count) {
+		ret = fill_queue(session);
+		if (ret)
+			return ret;
+		if (session->queue_count)
+			goto process_queue;
 	}
 	ret = refresh_status(session);
 	if (ret)

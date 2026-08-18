@@ -18,6 +18,7 @@ struct mock_device {
 	uint32_t faults;
 	uint32_t overflow;
 	uint32_t transitions;
+	size_t read_batch;
 	int open_count;
 	int close_count;
 	int acquire_count;
@@ -142,6 +143,8 @@ static ssize_t mock_read(int fd, void *destination, size_t bytes, void *opaque)
 	count = bytes / sizeof(mock->events[0]);
 	if (count > mock->event_count)
 		count = mock->event_count;
+	if (mock->read_batch && count > mock->read_batch)
+		count = mock->read_batch;
 	memcpy(destination, mock->events, count * sizeof(mock->events[0]));
 	memmove(mock->events, &mock->events[count],
 		(mock->event_count - count) * sizeof(mock->events[0]));
@@ -199,6 +202,7 @@ static void test_lifecycle_and_partition(void)
 	mock.events[3] = (struct adi_tandem_agc_event){205, 13, 0x13, 23, 23};
 	mock.event_count = 4;
 	mock.transitions = 4;
+	mock.read_batch = 2;
 	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
 	assert(mock.open_count == 0);
 	assert(spf_tandem_session_acquire(&session) == 0);
