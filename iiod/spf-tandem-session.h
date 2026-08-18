@@ -46,6 +46,7 @@ int spf_tandem_session_init(struct spf_tandem_session *session,
 	const void *wire_request, size_t wire_bytes,
 	const struct spf_tandem_syscalls *syscalls);
 int spf_tandem_session_acquire(struct spf_tandem_session *session);
+int spf_tandem_session_heartbeat(struct spf_tandem_session *session);
 int spf_tandem_session_collect(struct spf_tandem_session *session,
 	uint64_t first_sample_sequence, uint32_t samples_per_channel,
 	struct adi_tandem_agc_event *events, size_t event_capacity,

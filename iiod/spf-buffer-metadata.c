@@ -193,10 +193,14 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 
 	if (!ctx)
 		return -EINVAL;
-	if (ctx->refills_started <= 1)
-		return 0;
-	return spf_gain_sampler_finish_capture(
-		&ctx->sampler, SPF_IIOD_SAMPLER_START_TIMEOUT_MS) ? 0 : -ETIMEDOUT;
+	if (ctx->refills_started > 1 &&
+		!spf_gain_sampler_finish_capture(
+			&ctx->sampler, SPF_IIOD_SAMPLER_START_TIMEOUT_MS))
+		return -ETIMEDOUT;
+	/* Every completed refill proves the owner is alive, including frames that
+	 * metadata_get() subsequently discards during sampler startup.
+	 */
+	return spf_tandem_session_heartbeat(&ctx->tandem);
 }
 
 void iiod_buffer_metadata_close(void *provider_context)

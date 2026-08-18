@@ -22,6 +22,7 @@ struct mock_device {
 	int open_count;
 	int close_count;
 	int acquire_count;
+	int status_count;
 	int release_count;
 };
 
@@ -119,6 +120,7 @@ static int mock_ioctl(int fd, unsigned long request, void *argument,
 		return 0;
 	}
 	if (request == ADI_TANDEM_AGC_IOC_GET_STATUS) {
+		mock->status_count++;
 		fill_status(mock, argument);
 		return 0;
 	}
@@ -207,6 +209,8 @@ static void test_lifecycle_and_partition(void)
 	assert(mock.open_count == 0);
 	assert(spf_tandem_session_acquire(&session) == 0);
 	assert(mock.open_count == 1 && mock.acquire_count == 1);
+	assert(spf_tandem_session_heartbeat(&session) == 0);
+	assert(mock.status_count == 1);
 	assert(spf_tandem_session_collect(&session, 100, 100,
 		output, 4, &count) == 0);
 	assert(count == 2);
@@ -219,6 +223,7 @@ static void test_lifecycle_and_partition(void)
 	spf_tandem_session_close(&session);
 	spf_tandem_session_close(&session);
 	assert(mock.release_count == 1 && mock.close_count == 1);
+	assert(spf_tandem_session_heartbeat(&session) == -EINVAL);
 }
 
 static void test_sequence_and_status_faults_fail_closed(void)

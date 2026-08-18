@@ -154,6 +154,13 @@ static int refresh_status(struct spf_tandem_session *session)
 	return 0;
 }
 
+int spf_tandem_session_heartbeat(struct spf_tandem_session *session)
+{
+	if (!session || !session->acquired)
+		return -EINVAL;
+	return refresh_status(session);
+}
+
 int spf_tandem_session_acquire(struct spf_tandem_session *session)
 {
 	struct adi_tandem_agc_caps caps = {
