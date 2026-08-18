@@ -9,6 +9,8 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#define SPF_TANDEM_STATUS_CATCHUP_ATTEMPTS 4
+
 _Static_assert(sizeof(struct adi_tandem_agc_request_v1) == 104,
 	"unexpected tandem request ABI size");
 _Static_assert(sizeof(struct adi_tandem_agc_caps) == 56,
@@ -152,6 +154,29 @@ static int refresh_status(struct spf_tandem_session *session)
 		return -EOVERFLOW;
 	session->status = status;
 	return 0;
+}
+
+static int refresh_status_at_least(struct spf_tandem_session *session,
+	uint32_t transition_count)
+{
+	unsigned int attempt;
+	int ret;
+
+	/*
+	 * Event FIFO data and the coherent status snapshot cross independently
+	 * into AXI.  A newly visible event can therefore precede the matching
+	 * transition counter by one snapshot.  Accept only bounded convergence;
+	 * a persistent disagreement remains a fail-closed EILSEQ.
+	 */
+	for (attempt = 0; attempt < SPF_TANDEM_STATUS_CATCHUP_ATTEMPTS;
+			++attempt) {
+		ret = refresh_status(session);
+		if (ret)
+			return ret;
+		if (session->status.transition_count >= transition_count)
+			return 0;
+	}
+	return -EILSEQ;
 }
 
 int spf_tandem_session_heartbeat(struct spf_tandem_session *session)
@@ -312,11 +337,9 @@ process_queue:
 		if (session->queue_count)
 			goto process_queue;
 	}
-	ret = refresh_status(session);
+	ret = refresh_status_at_least(session, session->frame_transition_count);
 	if (ret)
 		return ret;
-	if (session->status.transition_count < session->frame_transition_count)
-		return -EILSEQ;
 	session->status.transition_count = session->frame_transition_count;
 	session->status.rx1_gain_index = session->frame_rx1_gain_index;
 	session->status.rx2_gain_index = session->frame_rx2_gain_index;

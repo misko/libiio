@@ -18,6 +18,8 @@ struct mock_device {
 	uint32_t faults;
 	uint32_t overflow;
 	uint32_t transitions;
+	uint32_t lagged_transitions;
+	unsigned int lagged_status_reads;
 	size_t read_batch;
 	int open_count;
 	int close_count;
@@ -122,6 +124,11 @@ static int mock_ioctl(int fd, unsigned long request, void *argument,
 	if (request == ADI_TANDEM_AGC_IOC_GET_STATUS) {
 		mock->status_count++;
 		fill_status(mock, argument);
+		if (mock->lagged_status_reads) {
+			((struct adi_tandem_agc_status *)argument)->transition_count =
+				mock->lagged_transitions;
+			mock->lagged_status_reads--;
+		}
 		return 0;
 	}
 	if (request == ADI_TANDEM_AGC_IOC_RELEASE) {
@@ -256,11 +263,50 @@ static void test_sequence_and_status_faults_fail_closed(void)
 	spf_tandem_session_close(&session);
 }
 
+static void test_status_snapshot_catches_up_to_event_fifo(void)
+{
+	uint8_t wire[104];
+	struct mock_device mock = {.epoch = 11};
+	struct spf_tandem_syscalls calls = mock_syscalls(&mock);
+	struct spf_tandem_session session;
+	struct adi_tandem_agc_event output[4];
+	size_t count;
+
+	valid_request(wire);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	mock.events[0] = (struct adi_tandem_agc_event){10, 3, 0x13, 20, 20};
+	mock.events[1] = (struct adi_tandem_agc_event){11, 4, 0x13, 21, 21};
+	mock.event_count = 2;
+	mock.transitions = 2;
+	mock.lagged_transitions = 1;
+	mock.lagged_status_reads = 1;
+	assert(spf_tandem_session_collect(&session, 0, 100,
+		output, 4, &count) == 0);
+	assert(count == 2 && mock.status_count == 2);
+	spf_tandem_session_close(&session);
+
+	memset(&mock, 0, sizeof(mock));
+	mock.epoch = 12;
+	calls = mock_syscalls(&mock);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	mock.events[0] = (struct adi_tandem_agc_event){10, 3, 0x13, 20, 20};
+	mock.event_count = 1;
+	mock.transitions = 1;
+	mock.lagged_status_reads = 5;
+	assert(spf_tandem_session_collect(&session, 0, 100,
+		output, 4, &count) == -EILSEQ);
+	assert(mock.status_count == 4);
+	spf_tandem_session_close(&session);
+}
+
 int main(void)
 {
 	test_request_decoder();
 	test_lifecycle_and_partition();
 	test_sequence_and_status_faults_fail_closed();
+	test_status_snapshot_catches_up_to_event_fifo();
 	puts("SPF tandem session tests passed");
 	return 0;
 }
