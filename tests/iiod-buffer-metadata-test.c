@@ -12,8 +12,14 @@ struct test_metadata {
 	uint64_t sequence;
 };
 
+static const uint8_t expected_session_request[] = {
+	0x53, 0x50, 0x46, 0x54, /* SPFT */
+	0x01, 0x00, 0x08, 0x00,
+};
+
 int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
+		const void *request, size_t request_bytes,
 		void **provider_context, size_t *extra_samples)
 {
 	uint64_t *sequence;
@@ -21,7 +27,9 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	(void)samples_count;
 	(void)mask;
 	(void)words;
-	if (!provider_context || !extra_samples)
+	if (!request || request_bytes != sizeof(expected_session_request) ||
+		memcmp(request, expected_session_request, request_bytes) ||
+		!provider_context || !extra_samples)
 		return -EINVAL;
 	sequence = calloc(1, sizeof(*sequence));
 	if (!sequence)
@@ -38,9 +46,16 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 	return kernel_buffers_count ? 0 : -EINVAL;
 }
 
-void iiod_buffer_metadata_before_refill(void *provider_context)
+int iiod_buffer_metadata_before_refill(void *provider_context)
 {
 	(void)provider_context;
+	return 0;
+}
+
+int iiod_buffer_metadata_after_refill(void *provider_context)
+{
+	(void)provider_context;
+	return 0;
 }
 
 void iiod_buffer_metadata_close(void *provider_context)

@@ -16,6 +16,7 @@ struct iio_context;
 enum iio_backend_api_ver {
 	IIO_BACKEND_API_V1 = 1,
 	IIO_BACKEND_API_V2 = 2,
+	IIO_BACKEND_API_V3 = 3,
 };
 
 enum iio_attr_type {
@@ -66,9 +67,10 @@ struct iio_backend_ops {
 
 	int (*set_timeout)(struct iio_context *ctx, unsigned int timeout);
 
-	/* API v2: append-only, opt-in capture-associated metadata. */
+	/* API v3: required opaque request for capture-associated metadata. */
 	int (*open_with_metadata)(const struct iio_device *dev,
-			size_t samples_count, bool cyclic);
+			size_t samples_count, bool cyclic,
+			const void *request, size_t request_bytes);
 	ssize_t (*read_with_metadata)(const struct iio_device *dev,
 			void *dst, size_t len, uint32_t *mask, size_t words,
 			void *metadata, size_t metadata_capacity,

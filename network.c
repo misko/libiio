@@ -410,7 +410,8 @@ out_mutex_unlock:
 }
 
 static int network_open_with_metadata(const struct iio_device *dev,
-		size_t samples_count, bool cyclic)
+		size_t samples_count, bool cyclic,
+		const void *request, size_t request_bytes)
 {
 	struct iio_context_pdata *pdata = iio_context_get_pdata(dev->ctx);
 	struct iio_device_pdata *ppdata = dev->pdata;
@@ -420,7 +421,7 @@ static int network_open_with_metadata(const struct iio_device *dev,
 
 	if (cyclic)
 		return -EINVAL;
-	if (!capability || strcmp(capability, "1"))
+	if (!capability || strcmp(capability, "2"))
 		return -ENOSYS;
 	iio_mutex_lock(ppdata->lock);
 	if (ppdata->io_ctx.fd >= 0)
@@ -434,7 +435,8 @@ static int network_open_with_metadata(const struct iio_device *dev,
 	ppdata->io_ctx.cancellable = false;
 	ppdata->io_ctx.timeout_ms = DEFAULT_TIMEOUT_MS;
 	ret = iiod_client_open_with_metadata_unlocked(pdata->iiod_client,
-			&ppdata->io_ctx, dev, samples_count);
+			&ppdata->io_ctx, dev, samples_count,
+			request, request_bytes);
 	if (ret < 0)
 		goto err_close_socket;
 	ret = setup_cancel(&ppdata->io_ctx);
@@ -1385,7 +1387,7 @@ struct iio_context * network_create_context(const char *hostname)
 	 * with those corresponding to the network context */
 	ctx->name = "network";
 	ctx->ops = &network_ops;
-	ctx->backend_api_version = IIO_BACKEND_API_V2;
+	ctx->backend_api_version = IIO_BACKEND_API_V3;
 	ctx->pdata = pdata;
 
 	uri_len = strlen(description);

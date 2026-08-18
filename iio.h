@@ -1480,17 +1480,25 @@ __api __check_ret __pure const struct iio_device * iio_buffer_get_device(
 __api __check_ret struct iio_buffer * iio_device_create_buffer(const struct iio_device *dev,
 		size_t samples_count, bool cyclic);
 
-/** @brief Create a non-cyclic input buffer whose refills include optional,
+/** Maximum opaque metadata-session request accepted by libiio and iiOD. */
+#define IIO_BUFFER_METADATA_REQUEST_MAX 4096U
+
+/** @brief Create a non-cyclic input buffer whose refills include mandatory,
  * capture-associated metadata.
  * @param dev A pointer to an iio_device structure
  * @param samples_count The number of samples that the buffer should contain
+ * @param request Provider-owned session request bytes
+ * @param request_bytes Size of the session request
  * @return On success, a pointer to an iio_buffer structure; NULL otherwise
  *
  * Use iio_buffer_refill_with_metadata() to refill the returned buffer. A
- * backend or remote iiOD without metadata support fails with errno=ENOSYS. */
+ * backend or remote iiOD without metadata support fails with errno=ENOSYS.
+ * The request is passed byte-for-byte to the remote metadata provider. Empty
+ * and oversized requests are rejected; providers must reject unsupported
+ * request schemas rather than silently reducing the requested service. */
 __api __check_ret struct iio_buffer *
 iio_device_create_buffer_with_metadata(const struct iio_device *dev,
-		size_t samples_count);
+		size_t samples_count, const void *request, size_t request_bytes);
 
 
 /** @brief Destroy the given buffer

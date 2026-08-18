@@ -648,22 +648,37 @@ int iiod_client_open_unlocked(struct iiod_client *client,
 
 int iiod_client_open_with_metadata_unlocked(struct iiod_client *client,
 		struct iiod_client_pdata *desc, const struct iio_device *dev,
-		size_t samples_count)
+		size_t samples_count, const void *request, size_t request_bytes)
 {
 	char buf[1024], *ptr;
 	size_t i;
+	int response;
+	ssize_t ret;
 	ssize_t len = sizeof(buf);
+
+	if (!request || !request_bytes)
+		return -EINVAL;
+	if (request_bytes > IIO_BUFFER_METADATA_REQUEST_MAX)
+		return -E2BIG;
 
 	len -= iio_snprintf(buf, len, "OPENM %s %lu ",
 			iio_device_get_id(dev), (unsigned long)samples_count);
 	ptr = buf + strlen(buf);
 	for (i = dev->words; i > 0; i--, ptr += 8)
 		len -= iio_snprintf(ptr, len, "%08" PRIx32, dev->mask[i - 1]);
-	len -= iio_strlcpy(ptr, "\r\n", len);
+	len -= iio_snprintf(ptr, len, " %lu\r\n",
+			(unsigned long)request_bytes);
 	if (len < 0)
 		return -ENOMEM;
 
-	return iiod_client_exec_command(client, desc, buf);
+	ret = iiod_client_write_all(client, desc, buf, strlen(buf));
+	if (ret < 0)
+		return (int)ret;
+	ret = iiod_client_write_all(client, desc, request, request_bytes);
+	if (ret < 0)
+		return (int)ret;
+	ret = iiod_client_read_integer(client, desc, &response);
+	return ret < 0 ? (int)ret : response;
 }
 
 int iiod_client_close_unlocked(struct iiod_client *client,

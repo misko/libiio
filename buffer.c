@@ -24,7 +24,8 @@ static bool device_is_high_speed(const struct iio_device *dev)
 }
 
 static struct iio_buffer * create_buffer(const struct iio_device *dev,
-		size_t samples_count, bool cyclic, bool metadata_enabled)
+		size_t samples_count, bool cyclic, bool metadata_enabled,
+		const void *metadata_request, size_t metadata_request_bytes)
 {
 	ssize_t ret = -EINVAL;
 	struct iio_buffer *buf;
@@ -61,12 +62,21 @@ static struct iio_buffer * create_buffer(const struct iio_device *dev,
 
 	if (metadata_enabled) {
 		if (cyclic ||
-				dev->ctx->backend_api_version < IIO_BACKEND_API_V2 ||
+				dev->ctx->backend_api_version < IIO_BACKEND_API_V3 ||
 				!dev->ctx->ops->open_with_metadata) {
 			ret = -ENOSYS;
 			goto err_free_mask;
 		}
-		ret = dev->ctx->ops->open_with_metadata(dev, samples_count, false);
+		if (!metadata_request || !metadata_request_bytes) {
+			ret = -EINVAL;
+			goto err_free_mask;
+		}
+		if (metadata_request_bytes > IIO_BUFFER_METADATA_REQUEST_MAX) {
+			ret = -E2BIG;
+			goto err_free_mask;
+		}
+		ret = dev->ctx->ops->open_with_metadata(dev, samples_count, false,
+				metadata_request, metadata_request_bytes);
 	} else {
 		ret = iio_device_open(dev, samples_count, cyclic);
 	}
@@ -115,13 +125,15 @@ err_set_errno:
 struct iio_buffer * iio_device_create_buffer(const struct iio_device *dev,
 		size_t samples_count, bool cyclic)
 {
-	return create_buffer(dev, samples_count, cyclic, false);
+	return create_buffer(dev, samples_count, cyclic, false, NULL, 0);
 }
 
 struct iio_buffer * iio_device_create_buffer_with_metadata(
-		const struct iio_device *dev, size_t samples_count)
+		const struct iio_device *dev, size_t samples_count,
+		const void *request, size_t request_bytes)
 {
-	return create_buffer(dev, samples_count, false, true);
+	return create_buffer(dev, samples_count, false, true,
+			request, request_bytes);
 }
 
 void iio_buffer_destroy(struct iio_buffer *buffer)
@@ -184,7 +196,7 @@ ssize_t iio_buffer_refill_with_metadata(struct iio_buffer *buffer,
 	*metadata_bytes = 0;
 	dev = buffer->dev;
 	ops = dev->ctx->ops;
-	if (dev->ctx->backend_api_version < IIO_BACKEND_API_V2)
+	if (dev->ctx->backend_api_version < IIO_BACKEND_API_V3)
 		return -ENOSYS;
 
 	if (buffer->dev_is_high_speed) {

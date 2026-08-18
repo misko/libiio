@@ -611,6 +611,8 @@ _create_buffer_with_metadata.restype = _BufferPtr
 _create_buffer_with_metadata.argtypes = (
     _DevicePtr,
     c_size_t,
+    c_void_p,
+    c_size_t,
 )
 _create_buffer_with_metadata.errcheck = _check_null
 
@@ -1115,15 +1117,27 @@ class MetadataBuffer(Buffer):
     This opt-in buffer requires an iiOD server advertising the matching
     extension.  IQ remains available through the ordinary Buffer and Channel
     read methods; ``refill()`` returns only the opaque metadata record paired
-    with that IQ refill.
+    with that IQ refill.  ``request`` is a required provider-owned session
+    request; unsupported requests fail rather than silently degrading.
     """
 
-    def __init__(self, device, samples_count, metadata_capacity=64 * 1024):
+    def __init__(
+        self, device, samples_count, request, metadata_capacity=64 * 1024
+    ):
         if metadata_capacity <= 0:
             raise ValueError("metadata_capacity must be positive")
         try:
+            request = bytes(request)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("request must be bytes-like") from exc
+        if not request:
+            raise ValueError("request must not be empty")
+        if len(request) > 4096:
+            raise ValueError("request exceeds the 4096-byte libiio limit")
+        request_storage = create_string_buffer(request, len(request))
+        try:
             self._buffer = _create_buffer_with_metadata(
-                device._device, samples_count
+                device._device, samples_count, request_storage, len(request)
             )
         except Exception:
             self._buffer = None

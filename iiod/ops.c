@@ -1050,7 +1050,8 @@ static ssize_t get_dev_sample_size_mask(const struct iio_device *dev,
 
 static int open_dev_helper(struct parser_pdata *pdata, struct iio_device *dev,
 		size_t samples_count, const char *mask, bool cyclic,
-		bool metadata_enabled)
+		bool metadata_enabled, const void *metadata_request,
+		size_t metadata_request_bytes)
 {
 	int ret = -ENOMEM;
 	struct DevEntry *entry;
@@ -1194,6 +1195,7 @@ retry:
 
 	if (metadata_enabled) {
 		ret = iiod_buffer_metadata_open(dev, samples_count, words, len,
+				metadata_request, metadata_request_bytes,
 				&entry->metadata_provider_context,
 				&entry->metadata_extra_samples);
 		if (ret < 0) {
@@ -1266,15 +1268,40 @@ static int close_dev_helper(struct parser_pdata *pdata, struct iio_device *dev)
 int open_dev(struct parser_pdata *pdata, struct iio_device *dev,
 		size_t samples_count, const char *mask, bool cyclic)
 {
-	int ret = open_dev_helper(pdata, dev, samples_count, mask, cyclic, false);
+	int ret = open_dev_helper(pdata, dev, samples_count, mask, cyclic, false,
+			NULL, 0);
 	print_value(pdata, ret);
 	return ret;
 }
 
 int open_dev_with_metadata(struct parser_pdata *pdata,
-		struct iio_device *dev, size_t samples_count, const char *mask)
+		struct iio_device *dev, size_t samples_count, const char *mask,
+		size_t request_bytes)
 {
-	int ret = open_dev_helper(pdata, dev, samples_count, mask, false, true);
+	void *request = NULL;
+	ssize_t received;
+	int ret;
+
+	if (!request_bytes)
+		ret = -EINVAL;
+	else if (request_bytes > IIO_BUFFER_METADATA_REQUEST_MAX)
+		ret = -E2BIG;
+	else {
+		request = malloc(request_bytes);
+		if (!request)
+			ret = -ENOMEM;
+		else {
+			received = read_all(pdata, request, request_bytes);
+			if (received < 0)
+				ret = (int)received;
+			else if ((size_t)received != request_bytes)
+				ret = -EIO;
+			else
+				ret = open_dev_helper(pdata, dev, samples_count, mask,
+						false, true, request, request_bytes);
+		}
+	}
+	free(request);
 	print_value(pdata, ret);
 	return ret;
 }

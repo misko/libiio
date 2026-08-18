@@ -119,7 +119,7 @@ Line:
 		"\t\tSet the timeout (in ms) for I/O operations\n"
 		"\tOPEN <device> <samples_count> <mask> [CYCLIC]\n"
 		"\t\tOpen the specified device with the given mask of channels\n"
-		"\tOPENM <device> <samples_count> <mask>\n"
+		"\tOPENM <device> <samples_count> <mask> <request_bytes>\n"
 		"\t\tOpen an RX buffer for capture-associated metadata\n"
 		"\tCLOSE <device>\n"
 		"\t\tClose the specified device\n"
@@ -215,12 +215,14 @@ Line:
 		else
 			YYACCEPT;
 	}
-	| OPENM SPACE DEVICE SPACE WORD SPACE WORD END {
-		char *size = $5, *mask = $7;
+	| OPENM SPACE DEVICE SPACE WORD SPACE WORD SPACE WORD END {
+		char *size = $5, *mask = $7, *request_bytes = $9;
 		struct parser_pdata *pdata = yyget_extra(scanner);
-		int ret = open_dev_with_metadata(pdata, $3, atol(size), mask);
+		int ret = open_dev_with_metadata(pdata, $3, atol(size), mask,
+			strtoul(request_bytes, NULL, 10));
 		free(size);
 		free(mask);
+		free(request_bytes);
 		if (ret < 0)
 			YYABORT;
 		else

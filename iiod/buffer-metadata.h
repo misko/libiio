@@ -10,12 +10,16 @@ struct iio_buffer;
 struct iio_device;
 
 /*
- * Firmware may replace the default implementation at build time. The record
- * is deliberately opaque to iiOD: the provider alone owns its schema and its
- * exact association with the IIO buffer passed here.
+ * Firmware may replace the default implementation at build time. Requests and
+ * records are deliberately opaque to iiOD: the provider alone owns their
+ * schemas and the record's exact association with the IIO buffer passed here.
+ * The request is nonempty and no larger than
+ * IIO_BUFFER_METADATA_REQUEST_MAX. It is valid only for the duration of open;
+ * a provider that retains it must copy it.
  */
 int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
+		const void *request, size_t request_bytes,
 		void **provider_context, size_t *extra_samples);
 int iiod_buffer_metadata_buffer_opened(void *provider_context,
 		unsigned int kernel_buffers_count);

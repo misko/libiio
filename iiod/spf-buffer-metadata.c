@@ -65,6 +65,7 @@ static uint32_t observation_interval(size_t samples_count)
 
 int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
+		const void *request, size_t request_bytes,
 		void **provider_context, size_t *extra_samples)
 {
 	struct spf_iiod_metadata_context *ctx;
@@ -72,9 +73,13 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	uint32_t timestamp_control;
 
 	if (!dev || !mask || words != 1 || mask[0] != SPF_IIOD_SCAN_MASK ||
+		!request || !request_bytes ||
 		!provider_context || !extra_samples || samples_count == 0 ||
 		samples_count > (UINT32_MAX >> 1))
 		return -EINVAL;
+	/* The provider owns and validates this opaque schema. Tandem v2 replaces
+	 * this temporary nonempty check with its exact request decoder. */
+	(void)request;
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
 		return -ENOMEM;

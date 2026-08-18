@@ -104,7 +104,8 @@ int start_serial_daemon(struct iio_context *ctx, const char *uart_params,
 int open_dev(struct parser_pdata *pdata, struct iio_device *dev,
 		size_t samples_count, const char *mask, bool cyclic);
 int open_dev_with_metadata(struct parser_pdata *pdata,
-		struct iio_device *dev, size_t samples_count, const char *mask);
+		struct iio_device *dev, size_t samples_count, const char *mask,
+		size_t request_bytes);
 int close_dev(struct parser_pdata *pdata, struct iio_device *dev);
 
 ssize_t rw_dev(struct parser_pdata *pdata, struct iio_device *dev,

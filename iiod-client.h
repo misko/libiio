@@ -81,7 +81,8 @@ int iiod_client_open_unlocked(struct iiod_client *client,
 int iiod_client_open_with_metadata_unlocked(struct iiod_client *client,
 			      struct iiod_client_pdata *desc,
 			      const struct iio_device *dev,
-			      size_t samples_count);
+			      size_t samples_count,
+			      const void *request, size_t request_bytes);
 
 int iiod_client_close_unlocked(struct iiod_client *client,
 			       struct iiod_client_pdata *desc,

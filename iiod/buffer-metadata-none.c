@@ -5,12 +5,15 @@
 
 int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
+		const void *request, size_t request_bytes,
 		void **provider_context, size_t *extra_samples)
 {
 	(void)dev;
 	(void)samples_count;
 	(void)mask;
 	(void)words;
+	(void)request;
+	(void)request_bytes;
 	(void)provider_context;
 	(void)extra_samples;
 	return -ENOSYS;
