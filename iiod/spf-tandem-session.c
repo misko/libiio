@@ -176,6 +176,10 @@ static int refresh_status_at_least(struct spf_tandem_session *session,
 		if (session->status.transition_count >= transition_count)
 			return 0;
 	}
+	/* The event itself is authoritative for the single in-flight status
+	 * snapshot.  A larger disagreement can indicate lost FIFO data. */
+	if (session->status.transition_count == transition_count - 1U)
+		return 0;
 	return -EILSEQ;
 }
 

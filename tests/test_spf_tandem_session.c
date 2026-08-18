@@ -296,6 +296,21 @@ static void test_status_snapshot_catches_up_to_event_fifo(void)
 	mock.transitions = 1;
 	mock.lagged_status_reads = 5;
 	assert(spf_tandem_session_collect(&session, 0, 100,
+		output, 4, &count) == 0);
+	assert(count == 1 && mock.status_count == 4);
+	spf_tandem_session_close(&session);
+
+	memset(&mock, 0, sizeof(mock));
+	mock.epoch = 13;
+	calls = mock_syscalls(&mock);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	mock.events[0] = (struct adi_tandem_agc_event){10, 3, 0x13, 20, 20};
+	mock.events[1] = (struct adi_tandem_agc_event){11, 4, 0x13, 21, 21};
+	mock.event_count = 2;
+	mock.transitions = 2;
+	mock.lagged_status_reads = 5;
+	assert(spf_tandem_session_collect(&session, 0, 100,
 		output, 4, &count) == -EILSEQ);
 	assert(mock.status_count == 4);
 	spf_tandem_session_close(&session);
