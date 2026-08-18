@@ -2,6 +2,8 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "buffer-metadata.h"
+#include "spf-tandem-metadata.h"
+#include "spf-tandem-session.h"
 
 #include <spf_gain_metadata.h>
 #include <spf_gain_read.h>
@@ -29,6 +31,7 @@ struct spf_iiod_metadata_context {
 	struct iio_device *rx;
 	struct iio_device *phy;
 	spf_gain_sampler_t sampler;
+	struct spf_tandem_session tandem;
 	uint32_t timestamp_control_previous;
 	uint32_t samples_per_channel;
 	uint32_t observation_interval_samples;
@@ -40,6 +43,7 @@ struct spf_iiod_metadata_context {
 	bool stream_origin_valid;
 	bool sampler_started;
 	bool timestamp_configured;
+	bool tandem_initialized;
 };
 
 static uint64_t make_stream_id(const void *address)
@@ -71,18 +75,31 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	struct spf_iiod_metadata_context *ctx;
 	const struct iio_context *iio_ctx;
 	uint32_t timestamp_control;
+	int ret;
 
 	if (!dev || !mask || words != 1 || mask[0] != SPF_IIOD_SCAN_MASK ||
 		!request || !request_bytes ||
 		!provider_context || !extra_samples || samples_count == 0 ||
 		samples_count > (UINT32_MAX >> 1))
 		return -EINVAL;
-	/* The provider owns and validates this opaque schema. Tandem v2 replaces
-	 * this temporary nonempty check with its exact request decoder. */
-	(void)request;
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
 		return -ENOMEM;
+	ret = spf_tandem_session_init(&ctx->tandem, request, request_bytes, NULL);
+	if (ret) {
+		free(ctx);
+		return ret;
+	}
+	if (!ctx->tandem.request.observation_capacity ||
+		ctx->tandem.request.observation_capacity >
+			SPF_IIOD_OBSERVATION_CAPACITY ||
+		!ctx->tandem.request.event_capacity ||
+		ctx->tandem.request.event_capacity >
+			SPF_TANDEM_EVENT_QUEUE_CAPACITY) {
+		free(ctx);
+		return -ENOSPC;
+	}
+	ctx->tandem_initialized = true;
 	ctx->rx = (struct iio_device *)dev;
 	iio_ctx = iio_device_get_context(dev);
 	ctx->phy = iio_context_find_device(iio_ctx, "ad9361-phy");
@@ -128,6 +145,7 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 	struct spf_iiod_metadata_context *ctx = provider_context;
 	uint64_t initial_credit;
 	uint64_t observations_per_frame;
+	int ret;
 
 	if (!ctx || !kernel_buffers_count)
 		return -EINVAL;
@@ -140,6 +158,9 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 	if (observations_per_frame * ((uint64_t)kernel_buffers_count + 1U) >
 			SPF_GAIN_SAMPLER_RING_CAPACITY)
 		return -E2BIG;
+	ret = spf_tandem_session_acquire(&ctx->tandem);
+	if (ret)
+		return ret;
 	initial_credit = (uint64_t)ctx->samples_per_channel *
 		((uint64_t)kernel_buffers_count + 1U);
 	ctx->refills_started = 0;
@@ -183,6 +204,8 @@ void iiod_buffer_metadata_close(void *provider_context)
 	struct spf_iiod_metadata_context *ctx = provider_context;
 	if (!ctx)
 		return;
+	if (ctx->tandem_initialized)
+		spf_tandem_session_close(&ctx->tandem);
 	if (ctx->sampler_started)
 		spf_gain_sampler_stop(&ctx->sampler);
 	if (ctx->timestamp_configured)
@@ -198,6 +221,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
 	spf_gain_observation_v3_t observations[SPF_IIOD_OBSERVATION_CAPACITY];
+	struct adi_tandem_agc_event events[SPF_TANDEM_EVENT_QUEUE_CAPACITY];
 	uint32_t observation_overflow_count = 0;
 	uint64_t first_sample_sequence;
 	uint64_t capture_index;
@@ -206,15 +230,18 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	spf_rssi_pair_t rssi_end;
 	uint32_t rssi_overflow_count = 0;
 	uint16_t observation_count;
+	size_t event_count;
 	spf_gain_frame_decision_t frame_decision;
 	size_t header_bytes;
 	const uint8_t *raw;
+	int ret;
 
 	if (!ctx || dev != ctx->rx || !buffer || !metadata || !iq_offset ||
 		!iq_bytes)
 		return -EINVAL;
-	header_bytes = spf_radio_frame_v3_header_bytes(
-		SPF_IIOD_OBSERVATION_CAPACITY, 0);
+	header_bytes = spf_radio_frame_v4_header_bytes(
+		(uint16_t)ctx->tandem.request.observation_capacity,
+		(uint16_t)ctx->tandem.request.event_capacity);
 	if (!header_bytes || metadata_capacity < header_bytes)
 		return -ENOSPC;
 	if (raw_bytes != ((size_t)ctx->samples_per_channel + 1U) * 8U)
@@ -224,7 +251,8 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	memcpy(&first_sample_sequence, raw, sizeof(first_sample_sequence));
 	observation_count = spf_gain_sampler_collect(&ctx->sampler,
 		first_sample_sequence, ctx->samples_per_channel, observations,
-		SPF_IIOD_OBSERVATION_CAPACITY, &observation_overflow_count);
+		(uint16_t)ctx->tandem.request.observation_capacity,
+		&observation_overflow_count);
 	frame_decision = spf_gain_frame_decide(ctx->frames_emitted,
 		observation_count, ctx->startup_frames_discarded);
 	if (frame_decision == SPF_GAIN_FRAME_DISCARD_STARTUP) {
@@ -239,6 +267,11 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		return -ENODATA;
 	if (rssi_overflow_count)
 		return -EOVERFLOW;
+	ret = spf_tandem_session_collect(&ctx->tandem, first_sample_sequence,
+			ctx->samples_per_channel, events,
+			ctx->tandem.request.event_capacity, &event_count);
+	if (ret)
+		return ret;
 	if (!ctx->stream_origin_valid) {
 		ctx->stream_first_sample_sequence = first_sample_sequence;
 		ctx->stream_origin_valid = true;
@@ -249,39 +282,44 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (sample_delta % ctx->samples_per_channel)
 		return -EIO;
 	capture_index = sample_delta / ctx->samples_per_channel;
-	const spf_radio_frame_v3_args_t args = {
-		.metadata_features = SPF_META_REQUIRED_FEATURES_V3,
-		.stream_id = ctx->stream_id,
-		.buffer_sequence = capture_index,
-		.first_sample_sequence = first_sample_sequence,
-		.samples_per_channel = ctx->samples_per_channel,
-		.iq_payload_bytes = ctx->samples_per_channel * UINT32_C(8),
-		.enabled_scan_mask = SPF_IIOD_SCAN_MASK,
-		.gain_observation_interval_samples =
-			ctx->observation_interval_samples,
-		.gain_observations = observations,
-		.gain_observation_count = observation_count,
-		.gain_observation_capacity = SPF_IIOD_OBSERVATION_CAPACITY,
-		.gain_observation_overflow_count = observation_overflow_count,
-		.gain_events = NULL,
-		.gain_event_count = 0,
-		.gain_event_capacity = 0,
-		.gain_event_overflow_count = 0,
-		.rssi_start = {
-			.rx1_qdb = rssi_start.rx1_qdb,
-			.rx2_qdb = rssi_start.rx2_qdb,
-			.valid = rssi_start.valid,
-			.duration_ns = rssi_start.duration_ns,
+	const spf_radio_frame_v4_args_t args = {
+		.frame = {
+			.metadata_features = SPF_META_REQUIRED_FEATURES_V4,
+			.stream_id = ctx->stream_id,
+			.buffer_sequence = capture_index,
+			.first_sample_sequence = first_sample_sequence,
+			.samples_per_channel = ctx->samples_per_channel,
+			.iq_payload_bytes = ctx->samples_per_channel * UINT32_C(8),
+			.enabled_scan_mask = SPF_IIOD_SCAN_MASK,
+			.gain_observation_interval_samples =
+				ctx->observation_interval_samples,
+			.gain_observations = observations,
+			.gain_observation_count = observation_count,
+			.gain_observation_capacity =
+				(uint16_t)ctx->tandem.request.observation_capacity,
+			.gain_observation_overflow_count = observation_overflow_count,
+			.gain_events = (const spf_gain_event_v3_t *)events,
+			.gain_event_count = (uint16_t)event_count,
+			.gain_event_capacity =
+				(uint16_t)ctx->tandem.request.event_capacity,
+			.gain_event_overflow_count = ctx->tandem.status.overflow_count,
+			.rssi_start = {
+				.rx1_qdb = rssi_start.rx1_qdb,
+				.rx2_qdb = rssi_start.rx2_qdb,
+				.valid = rssi_start.valid,
+				.duration_ns = rssi_start.duration_ns,
+			},
+			.rssi_end = {
+				.rx1_qdb = rssi_end.rx1_qdb,
+				.rx2_qdb = rssi_end.rx2_qdb,
+				.valid = rssi_end.valid,
+				.duration_ns = rssi_end.duration_ns,
+			},
+			.device_iio_overflow = false,
 		},
-		.rssi_end = {
-			.rx1_qdb = rssi_end.rx1_qdb,
-			.rx2_qdb = rssi_end.rx2_qdb,
-			.valid = rssi_end.valid,
-			.duration_ns = rssi_end.duration_ns,
-		},
-		.device_iio_overflow = false,
+		.tandem_status = &ctx->tandem.status,
 	};
-	if (!spf_radio_frame_v3_build(metadata, metadata_capacity, &args))
+	if (!spf_radio_frame_v4_build(metadata, metadata_capacity, &args))
 		return -EIO;
 
 	ctx->frames_emitted++;
