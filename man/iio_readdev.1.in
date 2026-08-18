@@ -34,7 +34,7 @@ iio_readdev \- read buffers from an IIO device
 [-n <hostname>] [-t <trigger>] [-T <timeout-ms>] [-b <buffer-size>] [-s <samples>] <iio_device> [<channel> ...]
 .SH DESCRIPTION
 .B iio_reg
-is a utility for reading buffers from connected IIO devices, and sending resutls to standard out.
+is a utility for reading buffers from connected IIO devices, and sending results to standard out.
 
 .SH OPTIONS
 ##COMMON_COMMANDS_START##
@@ -88,4 +88,3 @@ And plots the data with gnuplot.
 .RS
 .B \f(WCgnuplot \-e \(dq\&set term png; set output 'sample.png'; plot 'sample.dat' binary format='%short%short' using 1 with lines, 'sample.dat' binary format='%short%short' using 2 with lines;\(dq\&\fP
 .RE
-

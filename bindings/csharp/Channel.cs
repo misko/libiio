@@ -438,13 +438,13 @@ namespace iio
             return new Device(new Context(dev_ptr), dev_ptr);
         }
 
-        /// <summary>Converts the data from the hardware format to the format of the arhitecture on which libiio is running.</summary>
+        /// <summary>Converts the data from the hardware format to the format of the architecture on which libiio is running.</summary>
         public void convert(IntPtr dst, IntPtr src)
         {
             iio_channel_convert(chn, dst, src);
         }
 
-        /// <summary>Converts the data from the arhitecture on which libiio is running to the hardware format.</summary>
+        /// <summary>Converts the data from the architecture on which libiio is running to the hardware format.</summary>
         public void convert_inverse(IntPtr dst, IntPtr src)
         {
             iio_channel_convert_inverse(chn, dst, src);

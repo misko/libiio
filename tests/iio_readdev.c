@@ -347,7 +347,7 @@ int main(int argc, char **argv)
 		if (ret < 0) {
 			char buf[256];
 			iio_strerror(-(int)ret, buf, sizeof(buf));
-			fprintf(stderr, "set triffer failed : %s\n", buf);
+			fprintf(stderr, "set trigger failed : %s\n", buf);
 		}
 	}
 
