@@ -58,6 +58,27 @@ target_link_libraries(iio_writedev iio iio_tests_helper)
 
 set(IIO_TESTS_TARGETS iio_genxml iio_info iio_attr iio_readdev iio_reg iio_writedev)
 
+if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
+	set(SPF_RADIO_FRAME_V3_SOURCE "")
+	foreach(SPF_PROVIDER_SOURCE ${IIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES})
+		if(SPF_PROVIDER_SOURCE MATCHES "spf_radio_frame_v3\\.c$")
+			set(SPF_RADIO_FRAME_V3_SOURCE ${SPF_PROVIDER_SOURCE})
+		endif()
+	endforeach()
+	if(NOT SPF_RADIO_FRAME_V3_SOURCE)
+		message(FATAL_ERROR "SPF tandem tests require spf_radio_frame_v3.c")
+	endif()
+	add_executable(test_spf_tandem_session test_spf_tandem_session.c
+		../iiod/spf-tandem-session.c)
+	add_executable(test_spf_tandem_metadata test_spf_tandem_metadata.c
+		../iiod/spf-tandem-metadata.c ${SPF_RADIO_FRAME_V3_SOURCE})
+	target_include_directories(test_spf_tandem_session PRIVATE ../iiod)
+	target_include_directories(test_spf_tandem_metadata PRIVATE ../iiod
+		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+	set(IIO_TESTS_TARGETS ${IIO_TESTS_TARGETS}
+		test_spf_tandem_session test_spf_tandem_metadata)
+endif()
+
 if(PTHREAD_LIBRARIES OR ANDROID)
 	project(iio_stresstest C)
 	add_executable(iio_stresstest iio_stresstest.c)
