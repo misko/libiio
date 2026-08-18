@@ -46,6 +46,8 @@ typedef struct {
 
 size_t spf_radio_frame_v4_header_bytes(uint16_t observation_capacity,
 	uint16_t event_capacity);
+uint16_t spf_tandem_compact_coherent_observations(
+	spf_gain_observation_v3_t *observations, uint16_t count);
 bool spf_radio_frame_v4_build(void *destination, size_t destination_bytes,
 	const spf_radio_frame_v4_args_t *args);
 

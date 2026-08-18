@@ -4,6 +4,32 @@
 #include <limits.h>
 #include <string.h>
 
+uint16_t spf_tandem_compact_coherent_observations(
+	spf_gain_observation_v3_t *observations, uint16_t count)
+{
+	uint16_t read_index;
+	uint16_t write_index = 0;
+
+	if (!observations)
+		return 0;
+	for (read_index = 0; read_index < count; ++read_index) {
+		/*
+		 * The AD9361 exposes RX1 and RX2 gain through separate SPI reads.  In
+		 * AUTO, an atomic paired FPGA step can land between those reads and
+		 * produce a torn 40/41 observation even though the channels never
+		 * diverged.  Exact sample-aligned tandem events retain that transition;
+		 * do not publish the non-atomic diagnostic observation as radio state.
+		 */
+		if (observations[read_index].rx1_gain_index !=
+			observations[read_index].rx2_gain_index)
+			continue;
+		if (write_index != read_index)
+			observations[write_index] = observations[read_index];
+		write_index++;
+	}
+	return write_index;
+}
+
 size_t spf_radio_frame_v4_header_bytes(uint16_t observation_capacity,
 	uint16_t event_capacity)
 {

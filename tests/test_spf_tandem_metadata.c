@@ -94,9 +94,27 @@ static void test_golden_layout_and_crc(void)
 	assert(received_crc == spf_gain_meta_crc32(output, expected_bytes));
 }
 
+static void test_auto_observations_drop_torn_pair(void)
+{
+	spf_gain_observation_v3_t observations[] = {
+		{.sample_sequence_before = 100, .sample_sequence_after = 110,
+		 .rx1_gain_index = 40, .rx2_gain_index = 40},
+		/* A paired FPGA step can land between the two sequential SPI reads. */
+		{.sample_sequence_before = 200, .sample_sequence_after = 210,
+		 .rx1_gain_index = 40, .rx2_gain_index = 41},
+		{.sample_sequence_before = 300, .sample_sequence_after = 310,
+		 .rx1_gain_index = 41, .rx2_gain_index = 41},
+	};
+
+	assert(spf_tandem_compact_coherent_observations(observations, 3) == 2);
+	assert(observations[0].sample_sequence_before == 100);
+	assert(observations[1].sample_sequence_before == 300);
+}
+
 int main(void)
 {
 	test_golden_layout_and_crc();
+	test_auto_observations_drop_torn_pair();
 	puts("SPF tandem metadata tests passed");
 	return 0;
 }

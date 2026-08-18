@@ -257,6 +257,9 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		first_sample_sequence, ctx->samples_per_channel, observations,
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		&observation_overflow_count);
+	if (ctx->tandem.request.mode == ADI_TANDEM_AGC_MODE_AUTO)
+		observation_count = spf_tandem_compact_coherent_observations(
+			observations, observation_count);
 	frame_decision = spf_gain_frame_decide(ctx->frames_emitted,
 		observation_count, ctx->startup_frames_discarded);
 	if (frame_decision == SPF_GAIN_FRAME_DISCARD_STARTUP) {
