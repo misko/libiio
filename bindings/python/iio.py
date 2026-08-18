@@ -1015,8 +1015,14 @@ class Buffer(object):
 
     def __del__(self):
         """Destroy this buffer."""
-        if self._buffer is not None:
-            _buffer_destroy(self._buffer)
+        self.close()
+
+    def close(self):
+        """Synchronously destroy this buffer; repeated calls are harmless."""
+        buffer = self._buffer
+        self._buffer = None
+        if buffer is not None:
+            _buffer_destroy(buffer)
 
     def __len__(self):
         """Size of this buffer, in bytes."""
@@ -1433,8 +1439,14 @@ class Context(object):
 
     def __del__(self):
         """Destroy this context."""
-        if self._context is not None:
-            _destroy(self._context)
+        self.close()
+
+    def close(self):
+        """Synchronously destroy this context; repeated calls are harmless."""
+        context = self._context
+        self._context = None
+        if context is not None:
+            _destroy(context)
 
     def set_timeout(self, timeout):
         """
