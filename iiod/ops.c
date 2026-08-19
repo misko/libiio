@@ -863,6 +863,7 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		entry->metadata_provider_context = NULL;
 	}
 	entry->closed = true;
+	pthread_cond_broadcast(&entry->rw_ready_cond);
 	pthread_mutex_unlock(&entry->thdlist_lock);
 
 	pthread_mutex_lock(&devlist_lock);
@@ -1250,6 +1251,8 @@ err_free_words:
 
 static int close_dev_helper(struct parser_pdata *pdata, struct iio_device *dev)
 {
+	bool wait_for_exclusive_close;
+	struct DevEntry *entry;
 	struct ThdEntry *t;
 
 	if (!dev)
@@ -1259,8 +1262,33 @@ static int close_dev_helper(struct parser_pdata *pdata, struct iio_device *dev)
 	if (!t)
 		return -ENXIO;
 
+	entry = t->entry;
+	pthread_mutex_lock(&entry->thdlist_lock);
+	wait_for_exclusive_close =
+		(entry->cyclic || entry->metadata_enabled) &&
+		SLIST_FIRST(&entry->thdlist_head) == t &&
+		SLIST_NEXT(t, dev_list_entry) == NULL;
+	if (wait_for_exclusive_close)
+		entry->ref_count++;
+	pthread_mutex_unlock(&entry->thdlist_lock);
+
 	SLIST_REMOVE(&pdata->thdlist_head, t, ThdEntry, parser_list_entry);
 	remove_thd_entry(t);
+
+	/*
+	 * Exclusive buffers use a separate socket from attribute operations and
+	 * subsequent buffer opens.  Do not acknowledge CLOSE while the R/W worker
+	 * can still own the kernel buffer: doing so lets the next socket race the
+	 * asynchronous teardown and observe a spurious -EBUSY.
+	 */
+	if (wait_for_exclusive_close) {
+		pthread_mutex_lock(&entry->thdlist_lock);
+		while (!entry->closed)
+			pthread_cond_wait(&entry->rw_ready_cond,
+					&entry->thdlist_lock);
+		pthread_mutex_unlock(&entry->thdlist_lock);
+		dev_entry_put(entry);
+	}
 
 	return 0;
 }
