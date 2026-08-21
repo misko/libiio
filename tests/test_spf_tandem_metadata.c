@@ -46,9 +46,9 @@ static void test_golden_layout_and_crc(void)
 		.gain_table_id = ADI_TANDEM_AGC_GAIN_TABLE_1300_4000_MHZ,
 		.threshold_provenance = UINT32_C(0x30313a14),
 	};
-	const spf_radio_frame_v4_args_t args = {
+	const spf_radio_frame_v5_args_t args = {
 		.frame = {
-			.metadata_features = SPF_META_REQUIRED_FEATURES_V4,
+			.metadata_features = SPF_META_REQUIRED_FEATURES_V5,
 			.stream_id = 1,
 			.buffer_sequence = 2,
 			.first_sample_sequence = 100,
@@ -66,32 +66,86 @@ static void test_golden_layout_and_crc(void)
 			.rssi_end = {.rx1_qdb = 12, .rx2_qdb = 13, .valid = true},
 		},
 		.tandem_status = &status,
+		.ad9361_temperature_mdeg_c = 43860,
 	};
 	spf_radio_meta_v3_prefix_t *prefix = (void *)output;
-	spf_radio_meta_v4_extension_t *extension =
+	spf_radio_meta_v5_extension_t *extension =
 		(void *)(output + SPF_RADIO_META_V3_PREFIX_BYTES);
-	const size_t expected_bytes = SPF_RADIO_META_V4_PREFIX_BYTES +
+	const size_t expected_bytes = SPF_RADIO_META_V5_PREFIX_BYTES +
 		SPF_GAIN_OBSERVATION_BYTES + SPF_GAIN_EVENT_BYTES + sizeof(uint32_t);
 	uint32_t received_crc;
 
 	memset(output, 0xa5, sizeof(output));
-	assert(spf_radio_frame_v4_header_bytes(1, 1) == expected_bytes);
-	assert(spf_radio_frame_v4_build(output, sizeof(output), &args));
-	assert(prefix->version == SPF_GAIN_META_VERSION_V4);
+	assert(spf_radio_frame_v5_header_bytes(1, 1) == expected_bytes);
+	assert(spf_radio_frame_v5_build(output, sizeof(output), &args));
+	assert(prefix->version == SPF_GAIN_META_VERSION_V5);
 	assert(prefix->header_bytes == expected_bytes);
-	assert(prefix->features == SPF_META_REQUIRED_FEATURES_V4);
+	assert(prefix->features == SPF_META_REQUIRED_FEATURES_V5);
 	assert(prefix->flags & SPF_META_TANDEM_VALID);
 	assert(extension->ownership_epoch == UINT32_C(0x10203040));
 	assert(extension->gain_table_id ==
 		ADI_TANDEM_AGC_GAIN_TABLE_1300_4000_MHZ);
 	assert(extension->threshold_provenance == UINT32_C(0x30313a14));
-	assert(memcmp(output + SPF_RADIO_META_V4_PREFIX_BYTES +
+	assert(extension->ad9361_temperature_mdeg_c == 43860);
+	assert(extension->reserved[0] == 0 && extension->reserved[1] == 0 &&
+		extension->reserved[2] == 0);
+	assert(memcmp(output + SPF_RADIO_META_V5_PREFIX_BYTES +
 		SPF_GAIN_OBSERVATION_BYTES, &event, sizeof(event)) == 0);
 	memcpy(&received_crc, output + expected_bytes - sizeof(received_crc),
 		sizeof(received_crc));
 	memset(output + expected_bytes - sizeof(received_crc), 0,
 		sizeof(received_crc));
 	assert(received_crc == spf_gain_meta_crc32(output, expected_bytes));
+}
+
+static void test_invalid_temperature_is_serialized_without_header_growth(void)
+{
+	uint8_t output[512];
+	spf_gain_observation_v3_t observation = {
+		.sample_sequence_before = 1,
+		.sample_sequence_after = 2,
+		.flags = SPF_GAIN_OBSERVATION_VALID |
+			SPF_GAIN_OBSERVATION_SAMPLE_INTERVAL_VALID,
+		.rx1_gain_index = 30,
+		.rx2_gain_index = 30,
+		.rx1_gain_db = 30,
+		.rx2_gain_db = 30,
+	};
+	struct adi_tandem_agc_status status = {
+		.version = ADI_TANDEM_AGC_ABI_VERSION,
+		.size = sizeof(status),
+		.state = ADI_TANDEM_AGC_STATE_ARMED_HOLD,
+		.ownership_epoch = 1,
+		.minimum_gain_db = 0,
+		.maximum_gain_db = 62,
+		.initial_gain_db = 30,
+		.rx1_gain_index = 30,
+		.rx2_gain_index = 30,
+		.gain_table_id = ADI_TANDEM_AGC_GAIN_TABLE_1300_4000_MHZ,
+	};
+	const spf_radio_frame_v5_args_t args = {
+		.frame = {
+			.metadata_features = SPF_META_REQUIRED_FEATURES_V5,
+			.stream_id = 1,
+			.samples_per_channel = 1,
+			.iq_payload_bytes = 8,
+			.enabled_scan_mask = 0x0f,
+			.gain_observation_interval_samples = 1,
+			.gain_observations = &observation,
+			.gain_observation_count = 1,
+			.gain_observation_capacity = 1,
+			.gain_event_capacity = 0,
+		},
+		.tandem_status = &status,
+		.ad9361_temperature_mdeg_c = INT32_MIN,
+	};
+	spf_radio_meta_v5_extension_t *extension =
+		(void *)(output + SPF_RADIO_META_V3_PREFIX_BYTES);
+
+	/* The v5 extension consumes one old reserved word and remains 56 bytes. */
+	assert(SPF_RADIO_META_V5_EXTENSION_BYTES == 56);
+	assert(spf_radio_frame_v5_build(output, sizeof(output), &args));
+	assert(extension->ad9361_temperature_mdeg_c == INT32_MIN);
 }
 
 static void test_auto_observations_drop_torn_pair(void)
@@ -114,6 +168,7 @@ static void test_auto_observations_drop_torn_pair(void)
 int main(void)
 {
 	test_golden_layout_and_crc();
+	test_invalid_temperature_is_serialized_without_header_growth();
 	test_auto_observations_drop_torn_pair();
 	puts("SPF tandem metadata tests passed");
 	return 0;

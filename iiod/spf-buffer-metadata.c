@@ -4,6 +4,7 @@
 #include "buffer-metadata.h"
 #include "spf-tandem-metadata.h"
 #include "spf-tandem-session.h"
+#include "spf-temperature-cache.h"
 
 #include <spf_gain_metadata.h>
 #include <spf_gain_read.h>
@@ -31,6 +32,7 @@ struct spf_iiod_metadata_context {
 	struct iio_device *rx;
 	struct iio_device *phy;
 	spf_gain_sampler_t sampler;
+	struct spf_temperature_sampler temperature_sampler;
 	struct spf_tandem_session tandem;
 	uint32_t timestamp_control_previous;
 	uint32_t samples_per_channel;
@@ -42,6 +44,7 @@ struct spf_iiod_metadata_context {
 	uint32_t startup_frames_discarded;
 	bool stream_origin_valid;
 	bool sampler_started;
+	bool temperature_sampler_started;
 	bool timestamp_configured;
 	bool tandem_initialized;
 };
@@ -133,6 +136,8 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		return -EIO;
 	}
 	ctx->sampler_started = true;
+	ctx->temperature_sampler_started =
+		spf_temperature_sampler_start(&ctx->temperature_sampler);
 
 	*provider_context = ctx;
 	*extra_samples = 1;
@@ -212,6 +217,8 @@ void iiod_buffer_metadata_close(void *provider_context)
 		spf_tandem_session_close(&ctx->tandem);
 	if (ctx->sampler_started)
 		spf_gain_sampler_stop(&ctx->sampler);
+	if (ctx->temperature_sampler_started)
+		spf_temperature_sampler_stop(&ctx->temperature_sampler);
 	if (ctx->timestamp_configured)
 		(void)iio_device_reg_write(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
 				ctx->timestamp_control_previous);
@@ -243,7 +250,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (!ctx || dev != ctx->rx || !buffer || !metadata || !iq_offset ||
 		!iq_bytes)
 		return -EINVAL;
-	header_bytes = spf_radio_frame_v4_header_bytes(
+	header_bytes = spf_radio_frame_v5_header_bytes(
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		(uint16_t)ctx->tandem.request.event_capacity);
 	if (!header_bytes || metadata_capacity < header_bytes)
@@ -289,9 +296,9 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (sample_delta % ctx->samples_per_channel)
 		return -EIO;
 	capture_index = sample_delta / ctx->samples_per_channel;
-	const spf_radio_frame_v4_args_t args = {
+	const spf_radio_frame_v5_args_t args = {
 		.frame = {
-			.metadata_features = SPF_META_REQUIRED_FEATURES_V4,
+			.metadata_features = SPF_META_REQUIRED_FEATURES_V5,
 			.stream_id = ctx->stream_id,
 			.buffer_sequence = capture_index,
 			.first_sample_sequence = first_sample_sequence,
@@ -325,8 +332,11 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			.device_iio_overflow = false,
 		},
 		.tandem_status = &ctx->tandem.status,
+		.ad9361_temperature_mdeg_c = ctx->temperature_sampler_started ?
+			spf_temperature_sampler_get(&ctx->temperature_sampler) :
+			SPF_TEMPERATURE_INVALID,
 	};
-	if (!spf_radio_frame_v4_build(metadata, metadata_capacity, &args))
+	if (!spf_radio_frame_v5_build(metadata, metadata_capacity, &args))
 		return -EIO;
 
 	ctx->frames_emitted++;
