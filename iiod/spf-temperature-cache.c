@@ -57,7 +57,8 @@ bool spf_temperature_cache_store(struct spf_temperature_cache *cache,
 	int32_t temperature_mdeg_c, uint64_t successful_read_ns)
 {
 	if (!cache || !cache->initialized ||
-		temperature_mdeg_c == SPF_TEMPERATURE_INVALID ||
+		temperature_mdeg_c < SPF_TEMPERATURE_MIN_MDEG_C ||
+		temperature_mdeg_c > SPF_TEMPERATURE_MAX_MDEG_C ||
 		!successful_read_ns)
 		return false;
 	pthread_mutex_lock(&cache->mutex);

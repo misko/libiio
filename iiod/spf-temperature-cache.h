@@ -7,6 +7,8 @@
 #include <stdint.h>
 
 #define SPF_TEMPERATURE_INVALID INT32_MIN
+#define SPF_TEMPERATURE_MIN_MDEG_C (-INT32_C(40000))
+#define SPF_TEMPERATURE_MAX_MDEG_C INT32_C(125000)
 #define SPF_TEMPERATURE_MAX_AGE_NS UINT64_C(10000000000)
 
 struct spf_temperature_cache {
