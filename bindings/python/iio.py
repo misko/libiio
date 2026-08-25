@@ -32,6 +32,7 @@ from ctypes import (
     CDLL as _cdll,
     memmove as _memmove,
     byref as _byref,
+    sizeof as _sizeof,
 )
 from ctypes.util import find_library
 from enum import Enum
@@ -634,6 +635,11 @@ _buffer_refill_with_metadata.argtypes = (
 )
 _buffer_refill_with_metadata.errcheck = _check_negative
 
+_buffer_set_metadata_batch_size = _lib.iio_buffer_set_metadata_batch_size
+_buffer_set_metadata_batch_size.restype = c_int
+_buffer_set_metadata_batch_size.argtypes = (_BufferPtr, c_uint)
+_buffer_set_metadata_batch_size.errcheck = _check_negative
+
 _buffer_push_partial = _lib.iio_buffer_push_partial
 _buffer_push_partial.restype = c_ssize_t
 _buffer_push_partial.argtypes = (
@@ -1128,10 +1134,29 @@ class MetadataBuffer(Buffer):
     """
 
     def __init__(
-        self, device, samples_count, request, metadata_capacity=64 * 1024
+        self,
+        device,
+        samples_count,
+        request,
+        metadata_capacity=64 * 1024,
+        batch_frames=1,
     ):
+        self._buffer = None
         if metadata_capacity <= 0:
             raise ValueError("metadata_capacity must be positive")
+        if isinstance(batch_frames, bool) or not isinstance(batch_frames, int):
+            raise TypeError("batch_frames must be an integer")
+        if not 1 <= batch_frames <= 64:
+            raise ValueError("batch_frames must be in [1, 64]")
+        batch_cache_bytes = 0
+        if batch_frames > 1:
+            batch_cache_bytes = batch_frames * (
+                samples_count * device.sample_size
+                + int(metadata_capacity)
+                + 2 * _sizeof(c_size_t)
+            )
+        if batch_cache_bytes > 64 * 1024 * 1024:
+            raise ValueError("metadata batch cache exceeds the 64 MiB limit")
         try:
             request = bytes(request)
         except (TypeError, ValueError) as exc:
@@ -1145,17 +1170,27 @@ class MetadataBuffer(Buffer):
             self._buffer = _create_buffer_with_metadata(
                 device._device, samples_count, request_storage, len(request)
             )
+            _buffer_set_metadata_batch_size(self._buffer, batch_frames)
         except Exception:
+            if self._buffer is not None:
+                _buffer_destroy(self._buffer)
             self._buffer = None
             raise
         self._length = samples_count * device.sample_size
         self._samples_count = samples_count
         self._metadata_capacity = int(metadata_capacity)
+        self._batch_frames = batch_frames
+        self._batch_cache_bytes = batch_cache_bytes
         self._metadata = None
         self._dev = device
 
     def refill(self):
-        """Fetch IQ and return its atomically associated metadata bytes."""
+        """Fetch IQ and return its atomically associated metadata bytes.
+
+        With ``batch_frames > 1``, the first call drains that many consecutive
+        wire responses into bounded host memory before returning frame zero.
+        The following calls replay the remaining cached frames one at a time.
+        """
         storage = create_string_buffer(self._metadata_capacity)
         metadata_bytes = c_size_t()
         _buffer_refill_with_metadata(
@@ -1171,6 +1206,16 @@ class MetadataBuffer(Buffer):
     def metadata(self):
         """Metadata from the most recent successful refill, or ``None``."""
         return self._metadata
+
+    @property
+    def batch_frames(self):
+        """Number of wire reads drained by each host-side refill batch."""
+        return self._batch_frames
+
+    @property
+    def batch_cache_bytes(self):
+        """Configured retained-cache bound (zero when batching is disabled)."""
+        return self._batch_cache_bytes
 
 
 class _DeviceOrTrigger(object):

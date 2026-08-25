@@ -26,6 +26,11 @@ static const uint8_t unsupported_session_request[] = {
 	0x02, 0x00, 0x08, 0x00,
 };
 
+static const uint8_t failure_session_request[] = {
+	0x53, 0x50, 0x46, 0x54,
+	0x01, 0x00, 0x08, 0x01,
+};
+
 int main(int argc, char **argv)
 {
 	const char *host = argc > 1 ? argv[1] : "127.0.0.1:30432";
@@ -74,6 +79,10 @@ int main(int argc, char **argv)
 	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
 		session_request, sizeof(session_request));
 	assert(buffer);
+	assert(iio_buffer_set_metadata_batch_size(buffer, 0) == -EINVAL);
+	assert(iio_buffer_set_metadata_batch_size(buffer,
+		IIO_BUFFER_METADATA_BATCH_MAX + 1U) == -E2BIG);
+	assert(iio_buffer_set_metadata_batch_size(buffer, 3) == 0);
 	uint8_t metadata[64];
 	size_t metadata_bytes = 0;
 	ssize_t iq_bytes = iio_buffer_refill_with_metadata(buffer,
@@ -84,7 +93,14 @@ int main(int argc, char **argv)
 	assert(record->magic == UINT32_C(0x54454d49));
 	assert(record->bytes == sizeof(*record));
 	assert(record->sequence == 0);
+	assert(iio_buffer_set_metadata_batch_size(buffer, 2) == -EBUSY);
 	assert(iio_buffer_refill(buffer) == -EINVAL);
+	uint8_t short_metadata[sizeof(struct test_metadata) - 1U];
+	metadata_bytes = 0;
+	iq_bytes = iio_buffer_refill_with_metadata(buffer, short_metadata,
+		sizeof(short_metadata), &metadata_bytes);
+	assert(iq_bytes == -ENOSPC);
+	assert(metadata_bytes == 0);
 	metadata_bytes = 0;
 	iq_bytes = iio_buffer_refill_with_metadata(buffer,
 		metadata, sizeof(metadata), &metadata_bytes);
@@ -92,6 +108,22 @@ int main(int argc, char **argv)
 	assert(metadata_bytes == sizeof(struct test_metadata));
 	record = (const struct test_metadata *)metadata;
 	assert(record->sequence == 1);
+	metadata_bytes = 0;
+	iq_bytes = iio_buffer_refill_with_metadata(buffer,
+		metadata, sizeof(metadata), &metadata_bytes);
+	assert(iq_bytes == 1024 * 8);
+	assert(metadata_bytes == sizeof(struct test_metadata));
+	record = (const struct test_metadata *)metadata;
+	assert(record->sequence == 2);
+	assert(iio_buffer_set_metadata_batch_size(buffer, 2) == 0);
+	metadata_bytes = 0;
+	iq_bytes = iio_buffer_refill_with_metadata(buffer,
+		metadata, sizeof(metadata), &metadata_bytes);
+	assert(iq_bytes == 1024 * 8);
+	record = (const struct test_metadata *)metadata;
+	assert(record->sequence == 3);
+	/* Response 4 was drained into host memory. Destroying now discards only
+	 * cached data, so CLOSE is not queued behind an unread wire response. */
 	iio_buffer_destroy(buffer);
 
 	/* A new buffer gets a new provider context. This proves the old session
@@ -104,6 +136,39 @@ int main(int argc, char **argv)
 		metadata, sizeof(metadata), &metadata_bytes);
 	assert(iq_bytes == 1024 * 8);
 	assert(metadata_bytes == sizeof(struct test_metadata));
+	record = (const struct test_metadata *)metadata;
+	assert(record->sequence == 0);
+	iio_buffer_destroy(buffer);
+
+	/* A provider error after response zero leaves queued commands on the data
+	 * pipe. The batch refill must poison/cancel that pipe, and destroy must not
+	 * append CLOSE behind those unread responses. A fresh session must open. */
+	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+		failure_session_request, sizeof(failure_session_request));
+	assert(buffer);
+	assert(iio_buffer_set_metadata_batch_size(buffer, 3) == 0);
+	metadata_bytes = 0;
+	iq_bytes = iio_buffer_refill_with_metadata(buffer,
+		metadata, sizeof(metadata), &metadata_bytes);
+	assert(iq_bytes < 0);
+	assert(metadata_bytes == 0);
+	assert(iio_buffer_refill_with_metadata(buffer,
+		metadata, sizeof(metadata), &metadata_bytes) == -EBADF);
+	/* A failed second open must return EBUSY without changing the old
+	 * transport's poison; destroying it must still avoid wire CLOSE. */
+	errno = 0;
+	struct iio_buffer *busy = iio_device_create_buffer_with_metadata(dev, 1024,
+		session_request, sizeof(session_request));
+	assert(!busy);
+	assert(errno == EBUSY);
+	iio_buffer_destroy(buffer);
+	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+		session_request, sizeof(session_request));
+	assert(buffer);
+	metadata_bytes = 0;
+	iq_bytes = iio_buffer_refill_with_metadata(buffer,
+		metadata, sizeof(metadata), &metadata_bytes);
+	assert(iq_bytes == 1024 * 8);
 	record = (const struct test_metadata *)metadata;
 	assert(record->sequence == 0);
 	iio_buffer_destroy(buffer);

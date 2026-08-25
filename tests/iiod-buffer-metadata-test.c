@@ -2,6 +2,7 @@
 #include "buffer-metadata.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,24 +18,37 @@ static const uint8_t expected_session_request[] = {
 	0x01, 0x00, 0x08, 0x00,
 };
 
+static const uint8_t failure_session_request[] = {
+	0x53, 0x50, 0x46, 0x54, /* SPFT */
+	0x01, 0x00, 0x08, 0x01,
+};
+
+struct test_context {
+	uint64_t sequence;
+	bool fail_after_first;
+};
+
 int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
 		const void *request, size_t request_bytes,
 		void **provider_context, size_t *extra_samples)
 {
-	uint64_t *sequence;
+	struct test_context *context;
 	(void)dev;
 	(void)samples_count;
 	(void)mask;
 	(void)words;
 	if (!request || request_bytes != sizeof(expected_session_request) ||
-		memcmp(request, expected_session_request, request_bytes) ||
+		(memcmp(request, expected_session_request, request_bytes) &&
+		 memcmp(request, failure_session_request, request_bytes)) ||
 		!provider_context || !extra_samples)
 		return -EINVAL;
-	sequence = calloc(1, sizeof(*sequence));
-	if (!sequence)
+	context = calloc(1, sizeof(*context));
+	if (!context)
 		return -ENOMEM;
-	*provider_context = sequence;
+	context->fail_after_first =
+		!memcmp(request, failure_session_request, request_bytes);
+	*provider_context = context;
 	*extra_samples = 0;
 	return 0;
 }
@@ -68,16 +82,18 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		size_t raw_bytes, void *metadata, size_t metadata_capacity,
 		size_t *iq_offset, size_t *iq_bytes)
 {
-	uint64_t *sequence = provider_context;
+	struct test_context *context = provider_context;
 	struct test_metadata record;
 	(void)dev;
 	(void)buffer;
-	if (!sequence || !metadata || metadata_capacity < sizeof(record) ||
+	if (!context || !metadata || metadata_capacity < sizeof(record) ||
 		!iq_offset || !iq_bytes)
 		return -EINVAL;
+	if (context->fail_after_first && context->sequence == 1)
+		return -EIO;
 	record.magic = UINT32_C(0x54454d49); /* IMET */
 	record.bytes = sizeof(record);
-	record.sequence = (*sequence)++;
+	record.sequence = context->sequence++;
 	memcpy(metadata, &record, sizeof(record));
 	*iq_offset = 0;
 	*iq_bytes = raw_bytes;

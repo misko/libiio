@@ -38,6 +38,17 @@ add_executable(iio_reg     iio_reg.c      ${GETOPT_C_FILE} ${LIBIIO_RC})
 add_executable(iio_writedev iio_writedev.c  ${GETOPT_C_FILE} ${LIBIIO_RC})
 add_executable(test_buffer_metadata_e2e test_buffer_metadata_e2e.c)
 target_link_libraries(test_buffer_metadata_e2e iio)
+add_executable(test_iiod_command_batch test_iiod_command_batch.c
+	../iiod-command-batch.c)
+target_include_directories(test_iiod_command_batch PRIVATE ..)
+add_executable(test_metadata_batch_core test_metadata_batch_core.c)
+target_include_directories(test_metadata_batch_core PRIVATE ..)
+target_link_libraries(test_metadata_batch_core iio)
+if((PTHREAD_LIBRARIES OR ANDROID) AND NOT WIN32 AND NOT NO_THREADS)
+	target_compile_definitions(test_metadata_batch_core PRIVATE
+		METADATA_BATCH_TEST_PTHREAD=1)
+	target_link_libraries(test_metadata_batch_core ${PTHREAD_LIBRARIES})
+endif()
 
 if (MSVC)
 	target_link_options(iio_tests_helper PUBLIC /DEBUG)
@@ -56,7 +67,8 @@ target_link_libraries(iio_readdev iio iio_tests_helper)
 target_link_libraries(iio_reg     iio iio_tests_helper)
 target_link_libraries(iio_writedev iio iio_tests_helper)
 
-set(IIO_TESTS_TARGETS iio_genxml iio_info iio_attr iio_readdev iio_reg iio_writedev)
+set(IIO_TESTS_TARGETS iio_genxml iio_info iio_attr iio_readdev iio_reg
+	iio_writedev)
 
 if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	set(SPF_RADIO_FRAME_V3_SOURCE "")
@@ -103,6 +115,11 @@ if(PTHREAD_LIBRARIES OR ANDROID)
 endif()
 
 set_target_properties(${IIO_TESTS_TARGETS} iio_tests_helper PROPERTIES
+	C_STANDARD 99
+	C_STANDARD_REQUIRED ON
+	C_EXTENSIONS OFF
+)
+set_target_properties(test_iiod_command_batch test_metadata_batch_core PROPERTIES
 	C_STANDARD 99
 	C_STANDARD_REQUIRED ON
 	C_EXTENSIONS OFF

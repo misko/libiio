@@ -122,6 +122,23 @@ static void usb_io_context_exit(struct iiod_client_pdata *io_ctx)
 	}
 }
 
+static bool usb_io_context_is_cancelled(struct iiod_client_pdata *io_ctx)
+{
+	bool cancelled;
+
+	iio_mutex_lock(io_ctx->lock);
+	cancelled = io_ctx->cancelled;
+	iio_mutex_unlock(io_ctx->lock);
+	return cancelled;
+}
+
+static void usb_io_context_reset_cancelled(struct iiod_client_pdata *io_ctx)
+{
+	iio_mutex_lock(io_ctx->lock);
+	io_ctx->cancelled = false;
+	iio_mutex_unlock(io_ctx->lock);
+}
+
 static int usb_get_version(const struct iio_context *ctx,
 		unsigned int *major, unsigned int *minor, char git_tag[8])
 {
@@ -252,9 +269,6 @@ static int usb_open(const struct iio_device *dev,
 	int ret = -EBUSY;
 
 	iio_mutex_lock(ctx_pdata->ep_lock);
-
-	pdata->io_ctx.cancelled = false;
-
 	if (pdata->opened)
 		goto out_unlock;
 
@@ -273,6 +287,9 @@ static int usb_open(const struct iio_device *dev,
 	}
 
 	iio_mutex_lock(pdata->lock);
+	/* Reset poison only after this device owns a newly opened pipe. A failed
+	 * second open must not unpoison the existing session. */
+	usb_io_context_reset_cancelled(&pdata->io_ctx);
 
 	ret = iiod_client_open_unlocked(ctx_pdata->iiod_client, &pdata->io_ctx,
 			dev, samples_count, cyclic);
@@ -314,7 +331,6 @@ static int usb_open_with_metadata(const struct iio_device *dev,
 	if (!capability || strcmp(capability, "2"))
 		return -ENOSYS;
 	iio_mutex_lock(ctx_pdata->ep_lock);
-	pdata->io_ctx.cancelled = false;
 	if (pdata->opened)
 		goto out_unlock;
 	ret = usb_reserve_ep_unlocked(dev);
@@ -327,6 +343,8 @@ static int usb_open_with_metadata(const struct iio_device *dev,
 	}
 
 	iio_mutex_lock(pdata->lock);
+	/* See usb_open(): only a fresh pipe may clear terminal cancellation. */
+	usb_io_context_reset_cancelled(&pdata->io_ctx);
 	ret = iiod_client_open_with_metadata_unlocked(ctx_pdata->iiod_client,
 			&pdata->io_ctx, dev, samples_count,
 			request, request_bytes);
@@ -359,8 +377,15 @@ static int usb_close(const struct iio_device *dev)
 		goto out_unlock;
 
 	iio_mutex_lock(pdata->lock);
-	ret = iiod_client_close_unlocked(ctx_pdata->iiod_client, &pdata->io_ctx,
-			dev);
+	/* Cancellation poisons the exclusive data pipe. In particular, a failed
+	 * metadata batch can leave READBUFM commands queued behind an unread
+	 * response; never append CLOSE to that pipe. Closing the USB pipe is the
+	 * out-of-band teardown observed by iiOD. */
+	if (!usb_io_context_is_cancelled(&pdata->io_ctx))
+		ret = iiod_client_close_unlocked(ctx_pdata->iiod_client,
+			&pdata->io_ctx, dev);
+	else
+		ret = 0;
 	pdata->opened = false;
 
 	iio_mutex_unlock(pdata->lock);
@@ -401,6 +426,25 @@ static ssize_t usb_read_with_metadata(const struct iio_device *dev,
 	ret = iiod_client_read_with_metadata_unlocked(ctx_pdata->iiod_client,
 			&pdata->io_ctx, dev, dst, len, mask, words,
 			metadata, metadata_capacity, metadata_bytes);
+	iio_mutex_unlock(pdata->lock);
+
+	return ret;
+}
+
+static ssize_t usb_read_with_metadata_batch(const struct iio_device *dev,
+		void *dst, size_t len, uint32_t *mask, size_t words,
+		void *metadata, size_t metadata_capacity, size_t *metadata_bytes,
+		unsigned int request_frames)
+{
+	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *pdata = dev->pdata;
+	ssize_t ret;
+
+	iio_mutex_lock(pdata->lock);
+	ret = iiod_client_read_with_metadata_batch_unlocked(
+			ctx_pdata->iiod_client, &pdata->io_ctx, dev, dst, len,
+			mask, words, metadata, metadata_capacity, metadata_bytes,
+			request_frames);
 	iio_mutex_unlock(pdata->lock);
 
 	return ret;
@@ -614,6 +658,7 @@ static const struct iio_backend_ops usb_ops = {
 	.close = usb_close,
 	.read = usb_read,
 	.read_with_metadata = usb_read_with_metadata,
+	.read_with_metadata_batch = usb_read_with_metadata_batch,
 	.write = usb_write,
 	.read_device_attr = usb_read_dev_attr,
 	.read_channel_attr = usb_read_chn_attr,
@@ -1064,7 +1109,7 @@ static struct iio_context * usb_create_context(unsigned int bus,
 
 	ctx->name = "usb";
 	ctx->ops = &usb_ops;
-	ctx->backend_api_version = IIO_BACKEND_API_V3;
+	ctx->backend_api_version = IIO_BACKEND_API_V4;
 	ctx->pdata = pdata;
 
 	for (i = 0; i < iio_context_get_devices_count(ctx); i++) {

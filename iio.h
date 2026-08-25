@@ -1483,6 +1483,12 @@ __api __check_ret struct iio_buffer * iio_device_create_buffer(const struct iio_
 /** Maximum opaque metadata-session request accepted by libiio and iiOD. */
 #define IIO_BUFFER_METADATA_REQUEST_MAX 4096U
 
+/** Maximum number of ordinary metadata reads that may be prequeued. */
+#define IIO_BUFFER_METADATA_BATCH_MAX 64U
+
+/** Maximum host memory retained by one metadata refill batch. */
+#define IIO_BUFFER_METADATA_BATCH_BYTES_MAX (64U * 1024U * 1024U)
+
 /** @brief Create a non-cyclic input buffer whose refills include mandatory,
  * capture-associated metadata.
  * @param dev A pointer to an iio_device structure
@@ -1499,6 +1505,25 @@ __api __check_ret struct iio_buffer * iio_device_create_buffer(const struct iio_
 __api __check_ret struct iio_buffer *
 iio_device_create_buffer_with_metadata(const struct iio_device *dev,
 		size_t samples_count, const void *request, size_t request_bytes);
+
+/** @brief Set the number of capture-associated metadata reads prequeued by
+ * each refill batch.
+ * @param buf A metadata-enabled input buffer
+ * @param frames Number of ordinary READBUFM transactions in each batch
+ * @return 0 on success, a negative errno code otherwise
+ *
+ * The default is one, which preserves the original request/response behavior.
+ * Values greater than one are bounded by IIO_BUFFER_METADATA_BATCH_MAX and
+ * require a cancellable backend implementing API v4. The first refill
+ * prequeues and drains the whole batch into bounded host memory before
+ * returning its first frame. Later refills replay the remaining cached frames
+ * one at a time. The setting may be changed only when no cached frames remain.
+ * Every batched response must contain the full requested IQ byte count and the
+ * same scan mask.
+ * Cancelling an in-progress batch aborts its data transport; create a new
+ * buffer before capturing again. */
+__api __check_ret int iio_buffer_set_metadata_batch_size(
+		struct iio_buffer *buf, unsigned int frames);
 
 
 /** @brief Destroy the given buffer

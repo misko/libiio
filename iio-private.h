@@ -204,6 +204,15 @@ struct iio_buffer {
 	unsigned int sample_size;
 	bool dev_is_high_speed;
 	bool metadata_enabled;
+	unsigned int metadata_batch_size;
+	size_t metadata_batch_capacity;
+	void *metadata_batch_iq_cache;
+	void *metadata_batch_metadata_cache;
+	size_t *metadata_batch_iq_bytes;
+	size_t *metadata_batch_metadata_bytes;
+	unsigned int metadata_batch_cached_frames;
+	unsigned int metadata_batch_next_frame;
+	volatile long metadata_batch_failed;
 };
 
 struct iio_context_info {

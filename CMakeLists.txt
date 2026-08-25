@@ -447,7 +447,7 @@ if (NEED_THREADS)
 endif()
 
 if (IIOD_CLIENT)
-	list(APPEND LIBIIO_CFILES iiod-client.c)
+	list(APPEND LIBIIO_CFILES iiod-client.c iiod-command-batch.c)
 endif()
 
 if (WIN32)
