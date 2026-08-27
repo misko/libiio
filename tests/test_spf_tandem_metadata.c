@@ -165,11 +165,86 @@ static void test_auto_observations_drop_torn_pair(void)
 	assert(observations[1].sample_sequence_before == 300);
 }
 
+static void test_v6_single_rx_and_exact_gap(void)
+{
+	uint8_t output[512];
+	spf_gain_observation_v3_t observation = {
+		.sample_sequence_before = UINT64_C(0x100000001),
+		.sample_sequence_after = UINT64_C(0x100000011),
+		.flags = SPF_GAIN_OBSERVATION_VALID |
+			SPF_GAIN_OBSERVATION_SAMPLE_INTERVAL_VALID,
+		.rx1_gain_index = 20,
+		.rx2_gain_index = 20,
+		.rx1_gain_db = 10,
+		.rx2_gain_db = 10,
+	};
+	struct adi_tandem_agc_status status = {
+		.version = ADI_TANDEM_AGC_ABI_VERSION,
+		.size = sizeof(status),
+		.state = ADI_TANDEM_AGC_STATE_ARMED_AUTO,
+		.ownership_epoch = 7,
+		.minimum_gain_db = -10,
+		.maximum_gain_db = 71,
+		.initial_gain_db = 10,
+		.minimum_gain_index = 0,
+		.maximum_gain_index = 76,
+		.rx1_gain_index = 20,
+		.rx2_gain_index = 20,
+		.gain_table_id = ADI_TANDEM_AGC_GAIN_TABLE_1300_4000_MHZ,
+	};
+	spf_radio_frame_v6_args_t args = {
+		.frame = {
+			.metadata_features = SPF_META_REQUIRED_FEATURES_V6,
+			.stream_id = 1,
+			.buffer_sequence = 3,
+			.first_sample_sequence = UINT64_C(0x100000020),
+			.samples_per_channel = 1024,
+			.iq_payload_bytes = 4096,
+			.enabled_scan_mask = UINT32_C(0x03),
+			.gain_observation_interval_samples = 256,
+			.gain_observations = &observation,
+			.gain_observation_count = 1,
+			.gain_observation_capacity = 1,
+			.gain_event_capacity = 0,
+		},
+		.tandem_status = &status,
+		.ad9361_temperature_mdeg_c = 42000,
+		.missing_samples_before = UINT64_C(0x100000002),
+	};
+	spf_radio_meta_v3_prefix_t *prefix = (void *)output;
+	uint32_t stored_crc;
+	const size_t bytes = spf_radio_frame_v5_header_bytes(1, 0);
+
+	assert(spf_radio_frame_v6_build(output, sizeof(output), &args));
+	assert(prefix->version == SPF_GAIN_META_VERSION_V6);
+	assert(prefix->header_bytes == bytes);
+	assert(prefix->channel_count == 1);
+	assert(prefix->enabled_scan_mask == UINT32_C(0x03));
+	assert(prefix->iq_payload_bytes == 4096);
+	assert(prefix->flags & SPF_META_SAMPLE_GAP_BEFORE);
+	assert(spf_radio_meta_v6_missing_samples_before(prefix) ==
+		UINT64_C(0x100000002));
+	memcpy(&stored_crc, output + bytes - sizeof(stored_crc),
+		sizeof(stored_crc));
+	memset(output + bytes - sizeof(stored_crc), 0, sizeof(stored_crc));
+	assert(stored_crc == spf_gain_meta_crc32(output, bytes));
+
+	args.frame.enabled_scan_mask = UINT32_C(0x0c);
+	args.missing_samples_before = 0;
+	assert(spf_radio_frame_v6_build(output, sizeof(output), &args));
+	args.frame.enabled_scan_mask = UINT32_C(0x0f);
+	args.frame.iq_payload_bytes = 8192;
+	assert(spf_radio_frame_v6_build(output, sizeof(output), &args));
+	args.frame.enabled_scan_mask = UINT32_C(0x05);
+	assert(!spf_radio_frame_v6_build(output, sizeof(output), &args));
+}
+
 int main(void)
 {
 	test_golden_layout_and_crc();
 	test_invalid_temperature_is_serialized_without_header_growth();
 	test_auto_observations_drop_torn_pair();
+	test_v6_single_rx_and_exact_gap();
 	puts("SPF tandem metadata tests passed");
 	return 0;
 }

@@ -93,15 +93,19 @@ if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 		../iiod/spf-tandem-metadata.c ${SPF_RADIO_FRAME_V3_SOURCE})
 	add_executable(test_spf_temperature_cache test_spf_temperature_cache.c
 		../iiod/spf-temperature-cache.c ${SPF_THREAD_JOIN_SOURCE})
-	target_include_directories(test_spf_tandem_session PRIVATE ../iiod)
+	add_executable(test_spf_buffer_layout test_spf_buffer_layout.c
+		../iiod/spf-buffer-layout.c)
+	target_include_directories(test_spf_tandem_session PRIVATE ../iiod
+		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
 	target_include_directories(test_spf_tandem_metadata PRIVATE ../iiod
 		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
 	target_include_directories(test_spf_temperature_cache PRIVATE ../iiod
 		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+	target_include_directories(test_spf_buffer_layout PRIVATE ../iiod)
 	target_link_libraries(test_spf_temperature_cache iio ${PTHREAD_LIBRARIES})
 	set(IIO_TESTS_TARGETS ${IIO_TESTS_TARGETS}
 		test_spf_tandem_session test_spf_tandem_metadata
-		test_spf_temperature_cache)
+		test_spf_temperature_cache test_spf_buffer_layout)
 endif()
 
 if(PTHREAD_LIBRARIES OR ANDROID)

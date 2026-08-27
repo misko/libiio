@@ -328,7 +328,8 @@ static int usb_open_with_metadata(const struct iio_device *dev,
 
 	if (cyclic)
 		return -EINVAL;
-	if (!capability || strcmp(capability, "2"))
+	if (!capability || (strcmp(capability, "2") &&
+		strcmp(capability, "3")))
 		return -ENOSYS;
 	iio_mutex_lock(ctx_pdata->ep_lock);
 	if (pdata->opened)

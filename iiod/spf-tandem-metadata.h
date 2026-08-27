@@ -17,6 +17,10 @@
 	(SPF_META_REQUIRED_FEATURES_V3 | SPF_META_FEATURE_FPGA_GAIN_EVENTS | \
 	 SPF_META_FEATURE_TANDEM_AGC_SESSION | \
 	 SPF_META_FEATURE_AD9361_TEMPERATURE)
+#define SPF_META_REQUIRED_FEATURES_V6 \
+	(SPF_META_REQUIRED_FEATURES_V5 | \
+	 SPF_META_FEATURE_CANONICAL_RX_LAYOUT | \
+	 SPF_META_FEATURE_EXACT_GAP_ACCOUNTING)
 
 #pragma pack(push, 1)
 typedef struct {
@@ -48,11 +52,20 @@ typedef struct {
 	int32_t ad9361_temperature_mdeg_c;
 } spf_radio_frame_v5_args_t;
 
+typedef struct {
+	spf_radio_frame_v3_args_t frame;
+	const struct adi_tandem_agc_status *tandem_status;
+	int32_t ad9361_temperature_mdeg_c;
+	uint64_t missing_samples_before;
+} spf_radio_frame_v6_args_t;
+
 size_t spf_radio_frame_v5_header_bytes(uint16_t observation_capacity,
 	uint16_t event_capacity);
 uint16_t spf_tandem_compact_coherent_observations(
 	spf_gain_observation_v3_t *observations, uint16_t count);
 bool spf_radio_frame_v5_build(void *destination, size_t destination_bytes,
 	const spf_radio_frame_v5_args_t *args);
+bool spf_radio_frame_v6_build(void *destination, size_t destination_bytes,
+	const spf_radio_frame_v6_args_t *args);
 
 #endif

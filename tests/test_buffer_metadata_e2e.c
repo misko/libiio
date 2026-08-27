@@ -40,9 +40,16 @@ int main(int argc, char **argv)
 	const char *capability =
 		iio_context_get_attr_value(ctx, "iio,buffer-metadata");
 	if (stock_server)
-		assert(!capability || strcmp(capability, "2"));
+		assert(!capability || (strcmp(capability, "2") &&
+			strcmp(capability, "3")));
 	else
-		assert(capability && !strcmp(capability, "2"));
+		assert(capability && !strcmp(capability, "3"));
+	if (!stock_server) {
+		const char *layouts = iio_context_get_attr_value(ctx,
+			"iio,buffer-metadata-layouts");
+		assert(layouts && !strcmp(layouts,
+			"00000003:1:4:2,0000000c:1:4:2,0000000f:2:8:1"));
+	}
 	struct iio_device *dev = iio_context_find_device(ctx, "cf-ad9361-lpc");
 	assert(dev);
 	for (unsigned int i = 0; i < iio_device_get_channels_count(dev); ++i) {

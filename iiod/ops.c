@@ -1196,6 +1196,7 @@ retry:
 
 	if (metadata_enabled) {
 		ret = iiod_buffer_metadata_open(dev, samples_count, words, len,
+				thd->sample_size,
 				metadata_request, metadata_request_bytes,
 				&entry->metadata_provider_context,
 				&entry->metadata_extra_samples);

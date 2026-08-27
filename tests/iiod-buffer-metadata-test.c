@@ -30,6 +30,7 @@ struct test_context {
 
 int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
+		size_t scan_bytes,
 		const void *request, size_t request_bytes,
 		void **provider_context, size_t *extra_samples)
 {
@@ -38,6 +39,7 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	(void)samples_count;
 	(void)mask;
 	(void)words;
+	(void)scan_bytes;
 	if (!request || request_bytes != sizeof(expected_session_request) ||
 		(memcmp(request, expected_session_request, request_bytes) &&
 		 memcmp(request, failure_session_request, request_bytes)) ||
