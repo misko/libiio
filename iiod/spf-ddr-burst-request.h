@@ -9,7 +9,12 @@
 #define SPF_DDR_BURST_REQUEST_VERSION UINT16_C(1)
 #define SPF_DDR_BURST_REQUEST_BYTES 32U
 #define SPF_DDR_BURST_FEATURE_CACHE_IQ UINT32_C(1)
-#define SPF_DDR_BURST_MIN_FRAME_DURATION_US UINT32_C(8000)
+/*
+ * Hardware qualification found intermittent whole-frame loss at 8 ms while
+ * 10 ms was the first passing boundary.  Keep 50% headroom over the observed
+ * failure boundary so admission does not depend on best-case iiOD scheduling.
+ */
+#define SPF_DDR_BURST_MIN_FRAME_DURATION_US UINT32_C(12000)
 
 struct spf_ddr_burst_request {
 	uint32_t required_features;
