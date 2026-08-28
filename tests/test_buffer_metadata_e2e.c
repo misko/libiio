@@ -88,7 +88,7 @@ int main(int argc, char **argv)
 		assert(!strcmp(iio_context_get_attr_value(ctx,
 			"iio,buffer-ddr-burst"), "1"));
 		assert(!strcmp(iio_context_get_attr_value(ctx,
-			"iio,buffer-ddr-burst-max-iq-bytes"), "200000000"));
+			"iio,buffer-ddr-burst-max-iq-bytes"), "300000000"));
 	}
 	struct iio_device *dev = iio_context_find_device(ctx, "cf-ad9361-lpc");
 	assert(dev);

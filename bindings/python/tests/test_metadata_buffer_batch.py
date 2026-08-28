@@ -18,9 +18,13 @@ class BurstFakeDevice(FakeDevice):
     _ctx = SimpleNamespace(
         attrs={
             "iio,buffer-ddr-burst": "1",
-            "iio,buffer-ddr-burst-max-iq-bytes": "200000000",
+            "iio,buffer-ddr-burst-max-iq-bytes": "300000000",
         }
     )
+
+
+class SingleRxBurstFakeDevice(BurstFakeDevice):
+    sample_size = 4
 
 
 def test_metadata_batch_attestation_and_cleanup(monkeypatch):
@@ -103,6 +107,23 @@ def test_device_ddr_burst_appends_versioned_request(monkeypatch):
     buffer.close()
 
 
+@pytest.mark.parametrize("ddr_burst_bytes", [250_000_000, 300_000_000])
+def test_device_ddr_burst_accepts_capacity_candidate_sizes(monkeypatch, ddr_burst_bytes):
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: object())
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+
+    buffer = iio.MetadataBuffer(
+        SingleRxBurstFakeDevice(),
+        500_000,
+        b"provider",
+        ddr_burst_bytes=ddr_burst_bytes,
+    )
+    assert buffer.ddr_burst_requested_bytes == ddr_burst_bytes
+    assert buffer.ddr_burst_admitted_bytes == ddr_burst_bytes
+    buffer.close()
+
+
 @pytest.mark.parametrize("ddr_burst_bytes", [True, 1.5, "8192"])
 def test_device_ddr_burst_type_is_exact(monkeypatch, ddr_burst_bytes):
     monkeypatch.setattr(
@@ -116,7 +137,7 @@ def test_device_ddr_burst_type_is_exact(monkeypatch, ddr_burst_bytes):
         )
 
 
-@pytest.mark.parametrize("ddr_burst_bytes", [-1, 8191, 200000001])
+@pytest.mark.parametrize("ddr_burst_bytes", [-1, 8191, 300000001])
 def test_device_ddr_burst_bounds_precede_creation(monkeypatch, ddr_burst_bytes):
     monkeypatch.setattr(
         iio,

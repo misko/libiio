@@ -44,10 +44,10 @@ int main(void)
 	uint8_t wire[SPF_DDR_BURST_REQUEST_BYTES];
 	struct spf_ddr_burst_request request;
 
-	build_request(wire, UINT64_C(200000000));
+	build_request(wire, UINT64_C(300000000));
 	assert(spf_ddr_burst_request_decode(&request, wire, sizeof(wire)) == 0);
 	assert(request.required_features == SPF_DDR_BURST_FEATURE_CACHE_IQ);
-	assert(request.requested_iq_bytes == UINT64_C(200000000));
+	assert(request.requested_iq_bytes == UINT64_C(300000000));
 	assert(spf_ddr_burst_request_decode(NULL, wire, sizeof(wire)) == -EINVAL);
 	assert(spf_ddr_burst_request_decode(&request, wire, sizeof(wire) - 1U) ==
 		-EINVAL);
