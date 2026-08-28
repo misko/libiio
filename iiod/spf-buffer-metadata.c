@@ -3,6 +3,7 @@
 
 #include "buffer-metadata.h"
 #include "spf-buffer-layout.h"
+#include "spf-ddr-burst-request.h"
 #include "spf-tandem-metadata.h"
 #include "spf-tandem-session.h"
 #include "spf-temperature-cache.h"
@@ -47,6 +48,7 @@ struct spf_iiod_metadata_context {
 	bool temperature_sampler_started;
 	bool timestamp_configured;
 	bool tandem_initialized;
+	bool burst_enabled;
 };
 
 static uint64_t make_stream_id(const void *address)
@@ -74,25 +76,41 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
 		size_t scan_bytes,
 		const void *request, size_t request_bytes,
-		void **provider_context, size_t *extra_samples)
+		void **provider_context, size_t *extra_samples,
+		struct iiod_buffer_burst_plan *burst_plan)
 {
+	struct spf_ddr_burst_request burst_request;
 	struct spf_iiod_metadata_context *ctx;
 	const struct iio_context *iio_ctx;
+	size_t tandem_request_bytes = request_bytes;
 	uint32_t timestamp_control;
 	int ret;
 
 	if (!dev || !request || !request_bytes || !provider_context ||
-		!extra_samples)
+		!extra_samples || !burst_plan)
 		return -EINVAL;
+	memset(burst_plan, 0, sizeof(*burst_plan));
+	if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
+			SPF_DDR_BURST_REQUEST_BYTES) {
+		ret = spf_ddr_burst_request_decode(&burst_request,
+			(const uint8_t *)request + sizeof(struct adi_tandem_agc_request_v1),
+			SPF_DDR_BURST_REQUEST_BYTES);
+		if (ret)
+			return ret;
+		tandem_request_bytes = sizeof(struct adi_tandem_agc_request_v1);
+	}
 	struct spf_buffer_layout layout;
 	ret = spf_buffer_layout_resolve(samples_count, mask, words, scan_bytes,
 		&layout);
 	if (ret)
 		return ret;
+	if (tandem_request_bytes != request_bytes && layout.receiver_count != 1U)
+		return -EINVAL;
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
 		return -ENOMEM;
-	ret = spf_tandem_session_init(&ctx->tandem, request, request_bytes, NULL);
+	ret = spf_tandem_session_init(&ctx->tandem, request,
+		tandem_request_bytes, NULL);
 	if (ret) {
 		free(ctx);
 		return ret;
@@ -107,6 +125,7 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		return -ENOSPC;
 	}
 	ctx->tandem_initialized = true;
+	ctx->burst_enabled = tandem_request_bytes != request_bytes;
 	ctx->layout = layout;
 	ctx->rx = (struct iio_device *)dev;
 	iio_ctx = iio_device_get_context(dev);
@@ -146,6 +165,17 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 
 	*provider_context = ctx;
 	*extra_samples = ctx->layout.extra_samples;
+	if (ctx->burst_enabled) {
+		burst_plan->requested_iq_bytes = burst_request.requested_iq_bytes;
+		burst_plan->metadata_capacity = spf_radio_frame_v5_header_bytes(
+			(uint16_t)ctx->tandem.request.observation_capacity,
+			(uint16_t)ctx->tandem.request.event_capacity);
+		if (!burst_plan->metadata_capacity) {
+			iiod_buffer_metadata_close(ctx);
+			*provider_context = NULL;
+			return -EOVERFLOW;
+		}
+	}
 	return 0;
 }
 
@@ -270,6 +300,8 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		first_sample_sequence, ctx->samples_per_channel, observations,
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		&observation_overflow_count);
+	if (ctx->burst_enabled && observation_overflow_count)
+		return -EOVERFLOW;
 	if (ctx->tandem.request.mode == ADI_TANDEM_AGC_MODE_AUTO)
 		observation_count = spf_tandem_compact_coherent_observations(
 			observations, observation_count);
@@ -293,9 +325,11 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (ret)
 		return ret;
 	ret = spf_buffer_sequence_resolve(&ctx->sequence, first_sample_sequence,
-		ctx->samples_per_channel, &sequence);
+			ctx->samples_per_channel, &sequence);
 	if (ret)
 		return ret;
+	if (ctx->burst_enabled && sequence.missing_samples_before)
+		return -EOVERFLOW;
 	const spf_radio_frame_v6_args_t args = {
 		.frame = {
 			.metadata_features = SPF_META_REQUIRED_FEATURES_V6,

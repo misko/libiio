@@ -13,15 +13,19 @@
 #include "../debug.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <unistd.h>
 
 int yyparse(yyscan_t scanner);
 
@@ -47,6 +51,45 @@ struct ThdEntry {
 };
 
 #define IIOD_MAX_BUFFER_METADATA_BYTES (64U * 1024U)
+#define IIOD_BURST_MAX_IQ_BYTES UINT64_C(200000000)
+#define IIOD_BURST_MEMORY_RESERVE_BYTES (UINT64_C(128) * 1024U * 1024U)
+#define IIOD_BURST_CMA_RESERVE_BYTES (UINT64_C(16) * 1024U * 1024U)
+#define IIOD_BURST_MAX_STARTUP_DISCARDS 8U
+#define IIOD_BURST_SEALED_IDLE_SECONDS 30
+
+enum iiod_burst_state {
+	IIOD_BURST_OFF = 0,
+	IIOD_BURST_RESERVED,
+	IIOD_BURST_CAPTURING,
+	IIOD_BURST_SEALED,
+	IIOD_BURST_DRAINED,
+	IIOD_BURST_FAILED,
+};
+
+struct iiod_burst_frame {
+	size_t metadata_bytes;
+};
+
+struct iiod_burst_cache {
+	enum iiod_burst_state state;
+	struct iiod_burst_frame *frames;
+	uint8_t *metadata;
+	uint8_t *iq;
+	void *mapping;
+	size_t mapping_bytes;
+	size_t frame_count;
+	size_t captured_frames;
+	size_t next_frame;
+	size_t frame_iq_bytes;
+	size_t metadata_capacity;
+	uint64_t requested_iq_bytes;
+	uint64_t admitted_iq_bytes;
+	int error;
+	bool reservation_held;
+};
+
+static pthread_mutex_t burst_reservation_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool burst_reserved;
 
 static void thd_entry_event_signal(struct ThdEntry *thd)
 {
@@ -92,6 +135,232 @@ static int thd_entry_event_wait(struct ThdEntry *thd, pthread_mutex_t *mutex,
 	return 0;
 }
 
+static bool size_mul(size_t left, size_t right, size_t *result)
+{
+	if (right && left > SIZE_MAX / right)
+		return false;
+	*result = left * right;
+	return true;
+}
+
+static bool size_add(size_t left, size_t right, size_t *result)
+{
+	if (left > SIZE_MAX - right)
+		return false;
+	*result = left + right;
+	return true;
+}
+
+static bool align_size(size_t value, size_t alignment, size_t *result)
+{
+	size_t rounded;
+
+	if (!alignment || !size_add(value, alignment - 1U, &rounded))
+		return false;
+	*result = rounded / alignment * alignment;
+	return true;
+}
+
+static int read_memory_available(uint64_t *available_bytes,
+	uint64_t *cma_free_bytes, bool *has_cma)
+{
+	char line[160];
+	uint64_t available_kib = 0;
+	uint64_t cma_free_kib = 0;
+	bool found_available = false;
+	FILE *stream;
+
+	if (!available_bytes || !cma_free_bytes || !has_cma)
+		return -EINVAL;
+	stream = fopen("/proc/meminfo", "r");
+	if (!stream)
+		return -errno;
+	while (fgets(line, sizeof(line), stream)) {
+		uint64_t value;
+
+		if (sscanf(line, "MemAvailable: %" SCNu64 " kB", &value) == 1) {
+			available_kib = value;
+			found_available = true;
+		} else if (sscanf(line, "CmaFree: %" SCNu64 " kB", &value) == 1) {
+			cma_free_kib = value;
+			*has_cma = true;
+		}
+	}
+	if (ferror(stream)) {
+		int ret = errno ? -errno : -EIO;
+		fclose(stream);
+		return ret;
+	}
+	fclose(stream);
+	if (!found_available)
+		return -ENODATA;
+	if (available_kib > UINT64_MAX / 1024U ||
+		cma_free_kib > UINT64_MAX / 1024U)
+		return -EOVERFLOW;
+	*available_bytes = available_kib * 1024U;
+	*cma_free_bytes = cma_free_kib * 1024U;
+	return 0;
+}
+
+static int burst_reservation_acquire(struct iiod_burst_cache *cache)
+{
+	int ret = 0;
+
+	pthread_mutex_lock(&burst_reservation_lock);
+	if (burst_reserved)
+		ret = -EBUSY;
+	else {
+		burst_reserved = true;
+		cache->reservation_held = true;
+	}
+	pthread_mutex_unlock(&burst_reservation_lock);
+	return ret;
+}
+
+static void burst_release_storage(struct iiod_burst_cache *cache)
+{
+	if (!cache)
+		return;
+	if (cache->mapping)
+		munmap(cache->mapping, cache->mapping_bytes);
+	cache->mapping = NULL;
+	cache->frames = NULL;
+	cache->metadata = NULL;
+	cache->iq = NULL;
+	cache->mapping_bytes = 0;
+	if (cache->reservation_held) {
+		pthread_mutex_lock(&burst_reservation_lock);
+		burst_reserved = false;
+		cache->reservation_held = false;
+		pthread_mutex_unlock(&burst_reservation_lock);
+	}
+}
+
+static void burst_fail(struct iiod_burst_cache *cache, int error)
+{
+	burst_release_storage(cache);
+	cache->error = error < 0 ? error : -EIO;
+	cache->state = IIOD_BURST_FAILED;
+}
+
+static int burst_prepare(struct iiod_burst_cache *cache,
+	const struct iiod_buffer_burst_plan *plan, size_t frame_iq_bytes,
+	size_t raw_frame_bytes, unsigned int kernel_buffers)
+{
+	uint64_t available_bytes, cma_free_bytes;
+	uint64_t required_available, required_cma;
+	size_t descriptor_bytes, metadata_bytes, iq_bytes;
+	size_t mapping_bytes, offset;
+	long page_size;
+	bool has_cma = false;
+	volatile uint8_t *pages;
+	int ret;
+
+	if (!cache || !plan)
+		return -EINVAL;
+	if (!plan->requested_iq_bytes) {
+		cache->state = IIOD_BURST_OFF;
+		return 0;
+	}
+	if (!frame_iq_bytes || !raw_frame_bytes || !kernel_buffers ||
+		!plan->metadata_capacity ||
+		plan->metadata_capacity > IIOD_MAX_BUFFER_METADATA_BYTES)
+		return -EINVAL;
+	if (plan->requested_iq_bytes > IIOD_BURST_MAX_IQ_BYTES)
+		return -E2BIG;
+	if (plan->requested_iq_bytes > SIZE_MAX)
+		return -EOVERFLOW;
+	cache->frame_count = (size_t)plan->requested_iq_bytes / frame_iq_bytes;
+	if (!cache->frame_count)
+		return -ENOSPC;
+	if (!size_mul(cache->frame_count, sizeof(*cache->frames),
+			&descriptor_bytes) ||
+		!align_size(descriptor_bytes, 64U, &descriptor_bytes) ||
+		!size_mul(cache->frame_count, plan->metadata_capacity,
+			&metadata_bytes) ||
+		!size_mul(cache->frame_count, frame_iq_bytes, &iq_bytes) ||
+		!size_add(descriptor_bytes, metadata_bytes, &offset) ||
+		!size_add(offset, iq_bytes, &mapping_bytes))
+		return -EOVERFLOW;
+	if ((uint64_t)mapping_bytes > UINT64_MAX -
+			IIOD_BURST_MEMORY_RESERVE_BYTES)
+		return -EOVERFLOW;
+	required_available = (uint64_t)mapping_bytes +
+		IIOD_BURST_MEMORY_RESERVE_BYTES;
+	if ((uint64_t)raw_frame_bytes > UINT64_MAX / kernel_buffers)
+		return -EOVERFLOW;
+	required_cma = (uint64_t)raw_frame_bytes * kernel_buffers;
+	if (required_cma > UINT64_MAX - IIOD_BURST_CMA_RESERVE_BYTES)
+		return -EOVERFLOW;
+	required_cma += IIOD_BURST_CMA_RESERVE_BYTES;
+
+	ret = burst_reservation_acquire(cache);
+	if (ret)
+		return ret;
+	ret = read_memory_available(&available_bytes, &cma_free_bytes, &has_cma);
+	if (ret)
+		goto fail;
+	if (available_bytes < required_available ||
+		(has_cma && cma_free_bytes < required_cma)) {
+		ret = -ENOMEM;
+		goto fail;
+	}
+	cache->mapping = mmap(NULL, mapping_bytes, PROT_READ | PROT_WRITE,
+		MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (cache->mapping == MAP_FAILED) {
+		cache->mapping = NULL;
+		ret = -errno;
+		goto fail;
+	}
+	cache->mapping_bytes = mapping_bytes;
+#ifdef MADV_DONTDUMP
+	(void)madvise(cache->mapping, mapping_bytes, MADV_DONTDUMP);
+#endif
+	page_size = sysconf(_SC_PAGESIZE);
+	if (page_size <= 0) {
+		ret = -EIO;
+		goto fail;
+	}
+	pages = cache->mapping;
+	for (offset = 0; offset < mapping_bytes; offset += (size_t)page_size)
+		pages[offset] = 0;
+	pages[mapping_bytes - 1U] = 0;
+
+	has_cma = false;
+	ret = read_memory_available(&available_bytes, &cma_free_bytes, &has_cma);
+	if (ret)
+		goto fail;
+	if (available_bytes < IIOD_BURST_MEMORY_RESERVE_BYTES ||
+		(has_cma && cma_free_bytes < required_cma)) {
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	cache->frames = cache->mapping;
+	cache->metadata = (uint8_t *)cache->mapping + descriptor_bytes;
+	cache->iq = cache->metadata + metadata_bytes;
+	cache->frame_iq_bytes = frame_iq_bytes;
+	cache->metadata_capacity = plan->metadata_capacity;
+	cache->requested_iq_bytes = plan->requested_iq_bytes;
+	cache->admitted_iq_bytes = iq_bytes;
+	cache->state = IIOD_BURST_RESERVED;
+	return 0;
+
+fail:
+	burst_release_storage(cache);
+	return ret;
+}
+
+static void *burst_metadata_slot(struct iiod_burst_cache *cache, size_t frame)
+{
+	return cache->metadata + frame * cache->metadata_capacity;
+}
+
+static void *burst_iq_slot(struct iiod_burst_cache *cache, size_t frame)
+{
+	return cache->iq + frame * cache->frame_iq_bytes;
+}
+
 /* Corresponds to an opened device */
 struct DevEntry {
 	unsigned int ref_count;
@@ -102,6 +371,8 @@ struct DevEntry {
 	unsigned int samples_count;
 	size_t metadata_extra_samples;
 	void *metadata_provider_context;
+	struct iiod_buffer_burst_plan burst_plan;
+	struct iiod_burst_cache burst;
 	bool update_mask;
 	bool cyclic;
 	bool closed;
@@ -536,6 +807,147 @@ out_free_metadata:
 	return ret;
 }
 
+static int capture_burst(struct DevEntry *entry)
+{
+	struct iiod_burst_cache *cache = &entry->burst;
+	unsigned int startup_discards = 0;
+
+	while (cache->captured_frames < cache->frame_count) {
+		ssize_t metadata_len;
+		size_t iq_offset = 0;
+		size_t iq_bytes = 0;
+		ssize_t raw_bytes;
+		int ret;
+
+		pthread_mutex_lock(&entry->thdlist_lock);
+		if (entry->cancelled || SLIST_EMPTY(&entry->thdlist_head)) {
+			pthread_mutex_unlock(&entry->thdlist_lock);
+			return -ECANCELED;
+		}
+		pthread_mutex_unlock(&entry->thdlist_lock);
+
+		ret = iiod_buffer_metadata_before_refill(
+			entry->metadata_provider_context);
+		if (ret)
+			return ret;
+		raw_bytes = iio_buffer_refill(entry->buf);
+		ret = iiod_buffer_metadata_after_refill(
+			entry->metadata_provider_context);
+		if (raw_bytes < 0)
+			return (int)raw_bytes;
+		if (ret)
+			return ret;
+		metadata_len = iiod_buffer_metadata_get(
+			entry->metadata_provider_context, entry->dev, entry->buf,
+			(size_t)raw_bytes,
+			burst_metadata_slot(cache, cache->captured_frames),
+			cache->metadata_capacity, &iq_offset, &iq_bytes);
+		if (metadata_len == -EAGAIN) {
+			if (++startup_discards > IIOD_BURST_MAX_STARTUP_DISCARDS)
+				return -ETIMEDOUT;
+			continue;
+		}
+		if (metadata_len < 0)
+			return (int)metadata_len;
+		if (!metadata_len || metadata_len > (ssize_t)cache->metadata_capacity ||
+			iq_bytes != cache->frame_iq_bytes ||
+			iq_offset > (size_t)raw_bytes ||
+			iq_bytes > (size_t)raw_bytes - iq_offset)
+			return -EIO;
+		memcpy(burst_iq_slot(cache, cache->captured_frames),
+			(uint8_t *)iio_buffer_start(entry->buf) + iq_offset, iq_bytes);
+		cache->frames[cache->captured_frames].metadata_bytes =
+			(size_t)metadata_len;
+		cache->captured_frames++;
+	}
+	return 0;
+}
+
+static void finish_burst_capture(struct DevEntry *entry, int capture_error)
+{
+	struct iio_buffer *buffer;
+	void *provider_context;
+
+	pthread_mutex_lock(&entry->thdlist_lock);
+	buffer = entry->buf;
+	entry->buf = NULL;
+	provider_context = entry->metadata_provider_context;
+	entry->metadata_provider_context = NULL;
+	pthread_mutex_unlock(&entry->thdlist_lock);
+
+	if (buffer)
+		iio_buffer_destroy(buffer);
+	if (provider_context)
+		iiod_buffer_metadata_close(provider_context);
+
+	pthread_mutex_lock(&entry->thdlist_lock);
+	if (capture_error ||
+		entry->burst.captured_frames != entry->burst.frame_count)
+		burst_fail(&entry->burst, capture_error ? capture_error : -EIO);
+	else
+		entry->burst.state = IIOD_BURST_SEALED;
+	pthread_cond_broadcast(&entry->rw_ready_cond);
+	pthread_mutex_unlock(&entry->thdlist_lock);
+}
+
+static ssize_t send_burst_data(struct DevEntry *entry, struct ThdEntry *thd)
+{
+	struct iiod_burst_cache *cache = &entry->burst;
+	struct parser_pdata *pdata = thd->pdata;
+	struct iiod_burst_frame *frame;
+	void *metadata;
+	void *iq;
+	ssize_t ret;
+
+	if (cache->state == IIOD_BURST_FAILED)
+		return cache->error ? cache->error : -EIO;
+	if (cache->state == IIOD_BURST_DRAINED)
+		return -ENODATA;
+	if (cache->state != IIOD_BURST_SEALED ||
+		cache->next_frame >= cache->frame_count)
+		return -EIO;
+	frame = &cache->frames[cache->next_frame];
+	if (thd->nb != cache->frame_iq_bytes ||
+		thd->metadata_capacity < frame->metadata_bytes)
+		return -ENOSPC;
+	metadata = burst_metadata_slot(cache, cache->next_frame);
+	iq = burst_iq_slot(cache, cache->next_frame);
+
+	print_value(pdata, cache->frame_iq_bytes);
+	if (thd->new_client) {
+		unsigned int i;
+		char mask[129], *ptr = mask;
+		ssize_t remaining = sizeof(mask);
+
+		for (i = entry->nb_words; i > 0 && ptr < mask + sizeof(mask);
+				i--, ptr += 8) {
+			snprintf(ptr, (size_t)remaining, "%08x", entry->mask[i - 1]);
+			remaining -= 8;
+		}
+		if (remaining <= 0)
+			return -ENOSPC;
+		*ptr = '\n';
+		ret = write_all(pdata, mask, (size_t)(ptr + 1 - mask));
+		if (ret < 0)
+			return ret;
+		thd->new_client = false;
+	}
+	print_value(pdata, frame->metadata_bytes);
+	ret = write_all(pdata, metadata, frame->metadata_bytes);
+	if (ret < 0)
+		return ret;
+	ret = write_all(pdata, iq, cache->frame_iq_bytes);
+	if (ret < 0)
+		return ret;
+
+	cache->next_frame++;
+	if (cache->next_frame == cache->frame_count) {
+		burst_release_storage(cache);
+		cache->state = IIOD_BURST_DRAINED;
+	}
+	return (ssize_t)cache->frame_iq_bytes;
+}
+
 static ssize_t receive_data(struct DevEntry *dev, struct ThdEntry *thd)
 {
 	struct parser_pdata *pdata = thd->pdata;
@@ -609,7 +1021,7 @@ static void rw_thd(struct thread_pool *pool, void *d)
 
 	while (true) {
 		bool has_readers = false, has_writers = false,
-		     mask_updated = false;
+		     mask_updated = false, capture_burst_now = false;
 		unsigned int sample_size;
 
 		/* NOTE: this while loop must exit with thdlist_lock locked. */
@@ -647,6 +1059,27 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				else
 					iio_channel_disable(chn);
 			}
+			entry->sample_size = iio_device_get_sample_size(dev);
+			if (entry->burst_plan.requested_iq_bytes) {
+				size_t frame_iq_bytes, raw_samples, raw_frame_bytes;
+				unsigned int kernel_buffers =
+					iio_device_get_kernel_buffers_count(dev);
+
+				if (!entry->sample_size ||
+					!size_mul(samples_count, entry->sample_size,
+						&frame_iq_bytes) ||
+					!size_add(samples_count, entry->metadata_extra_samples,
+						&raw_samples) ||
+					!size_mul(raw_samples, entry->sample_size,
+						&raw_frame_bytes)) {
+					ret = -EOVERFLOW;
+					break;
+				}
+				ret = burst_prepare(&entry->burst, &entry->burst_plan,
+					frame_iq_bytes, raw_frame_bytes, kernel_buffers);
+				if (ret)
+					break;
+			}
 
 			entry->buf = iio_device_create_buffer(dev,
 					samples_count + entry->metadata_extra_samples,
@@ -666,6 +1099,8 @@ static void rw_thd(struct thread_pool *pool, void *d)
 					break;
 				}
 			}
+			if (entry->burst.state == IIOD_BURST_RESERVED)
+				entry->burst.state = IIOD_BURST_CAPTURING;
 			entry->cancelled = false;
 
 			/* Signal the threads that we opened the device */
@@ -682,7 +1117,6 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				IIO_DEBUG("Mask[%i] = 0x%08x\n", i, entry->mask[i]);
 			entry->update_mask = false;
 
-			entry->sample_size = iio_device_get_sample_size(dev);
 			entry->samples_count = samples_count;
 			mask_updated = true;
 		}
@@ -699,19 +1133,67 @@ static void rw_thd(struct thread_pool *pool, void *d)
 			else
 				has_readers |= thd->active;
 		}
+		capture_burst_now = entry->burst.state == IIOD_BURST_CAPTURING;
 
-		if (!has_readers && !has_writers) {
-			pthread_cond_wait(&entry->rw_ready_cond,
-					&entry->thdlist_lock);
+		if (!has_readers && !has_writers && !capture_burst_now) {
+			if (entry->burst.state == IIOD_BURST_SEALED) {
+				struct timespec deadline;
+				int wait_ret;
+
+				if (clock_gettime(CLOCK_REALTIME, &deadline)) {
+					ret = -errno;
+					break;
+				}
+				deadline.tv_sec += IIOD_BURST_SEALED_IDLE_SECONDS;
+				wait_ret = pthread_cond_timedwait(&entry->rw_ready_cond,
+					&entry->thdlist_lock, &deadline);
+				if (wait_ret == ETIMEDOUT &&
+						entry->burst.state == IIOD_BURST_SEALED)
+					burst_fail(&entry->burst, -ETIMEDOUT);
+				else if (wait_ret && wait_ret != ETIMEDOUT) {
+					ret = -wait_ret;
+					break;
+				}
+			} else {
+				pthread_cond_wait(&entry->rw_ready_cond,
+						&entry->thdlist_lock);
+			}
 		}
 
 		pthread_mutex_unlock(&entry->thdlist_lock);
+
+		if (capture_burst_now) {
+			ret = capture_burst(entry);
+			finish_burst_capture(entry, (int)ret);
+			continue;
+		}
 
 		if (!has_readers && !has_writers)
 			continue;
 
 		if (has_readers) {
 			ssize_t nb_bytes;
+
+			if (entry->burst.state != IIOD_BURST_OFF) {
+				pthread_mutex_lock(&entry->thdlist_lock);
+				for (thd = SLIST_FIRST(&entry->thdlist_head);
+						thd; thd = next_thd) {
+					next_thd = SLIST_NEXT(thd, dev_list_entry);
+					if (!thd->active || thd->is_writer)
+						continue;
+					ret = send_burst_data(entry, thd);
+					if (ret > 0)
+						thd->nb -= (unsigned int)ret;
+					else if (ret < 0 &&
+						entry->burst.state == IIOD_BURST_SEALED)
+						burst_fail(&entry->burst, (int)ret);
+					if (ret < 0 || thd->nb < sample_size)
+						signal_thread(thd, ret < 0 ? ret :
+							(ssize_t)thd->nb);
+				}
+				pthread_mutex_unlock(&entry->thdlist_lock);
+				continue;
+			}
 
 			if (entry->metadata_enabled) {
 				ret = iiod_buffer_metadata_before_refill(
@@ -862,6 +1344,7 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		iiod_buffer_metadata_close(entry->metadata_provider_context);
 		entry->metadata_provider_context = NULL;
 	}
+	burst_release_storage(&entry->burst);
 	entry->closed = true;
 	pthread_cond_broadcast(&entry->rw_ready_cond);
 	pthread_mutex_unlock(&entry->thdlist_lock);
@@ -1199,7 +1682,8 @@ retry:
 				thd->sample_size,
 				metadata_request, metadata_request_bytes,
 				&entry->metadata_provider_context,
-				&entry->metadata_extra_samples);
+				&entry->metadata_extra_samples,
+				&entry->burst_plan);
 		if (ret < 0) {
 			pthread_mutex_unlock(&devlist_lock);
 			goto err_free_entry_mask;

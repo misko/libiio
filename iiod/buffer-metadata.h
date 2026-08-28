@@ -9,6 +9,11 @@
 struct iio_buffer;
 struct iio_device;
 
+struct iiod_buffer_burst_plan {
+	uint64_t requested_iq_bytes;
+	size_t metadata_capacity;
+};
+
 /*
  * Firmware may replace the default implementation at build time. Requests and
  * records are deliberately opaque to iiOD: the provider alone owns their
@@ -21,7 +26,8 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
 		size_t scan_bytes,
 		const void *request, size_t request_bytes,
-		void **provider_context, size_t *extra_samples);
+		void **provider_context, size_t *extra_samples,
+		struct iiod_buffer_burst_plan *burst_plan);
 int iiod_buffer_metadata_buffer_opened(void *provider_context,
 		unsigned int kernel_buffers_count);
 int iiod_buffer_metadata_before_refill(void *provider_context);

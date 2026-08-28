@@ -39,6 +39,7 @@ from enum import Enum
 from os import strerror as _strerror
 from platform import system as _system
 import abc
+import struct as _struct
 
 if "Windows" in _system():
     from ctypes import get_last_error
@@ -1140,6 +1141,7 @@ class MetadataBuffer(Buffer):
         request,
         metadata_capacity=64 * 1024,
         batch_frames=1,
+        ddr_burst_bytes=0,
     ):
         self._buffer = None
         if metadata_capacity <= 0:
@@ -1157,12 +1159,56 @@ class MetadataBuffer(Buffer):
             )
         if batch_cache_bytes > 64 * 1024 * 1024:
             raise ValueError("metadata batch cache exceeds the 64 MiB limit")
+        # Device DDR burst and host-side metadata batching are separate cache
+        # owners. Combining them would prequeue reads beyond the sealed device
+        # burst and make teardown ambiguous.
+        if isinstance(ddr_burst_bytes, bool) or not isinstance(
+            ddr_burst_bytes, int
+        ):
+            raise TypeError("ddr_burst_bytes must be an integer")
+        if ddr_burst_bytes < 0:
+            raise ValueError("ddr_burst_bytes must not be negative")
+        if ddr_burst_bytes and batch_frames != 1:
+            raise ValueError("device DDR burst requires batch_frames=1")
         try:
             request = bytes(request)
         except (TypeError, ValueError) as exc:
             raise TypeError("request must be bytes-like") from exc
         if not request:
             raise ValueError("request must not be empty")
+        ddr_burst_frames = 0
+        ddr_burst_admitted_bytes = 0
+        if ddr_burst_bytes:
+            context_attrs = getattr(getattr(device, "_ctx", None), "attrs", {})
+            if context_attrs.get("iio,buffer-ddr-burst") != "1":
+                raise OSError("IIO context does not advertise device DDR burst v1")
+            try:
+                maximum_bytes = int(
+                    context_attrs["iio,buffer-ddr-burst-max-iq-bytes"]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise OSError(
+                    "IIO context has an invalid DDR burst byte limit"
+                ) from exc
+            frame_bytes = int(samples_count) * int(device.sample_size)
+            if frame_bytes <= 0 or ddr_burst_bytes < frame_bytes:
+                raise ValueError(
+                    "ddr_burst_bytes must hold at least one complete frame"
+                )
+            if ddr_burst_bytes > maximum_bytes:
+                raise ValueError("ddr_burst_bytes exceeds the advertised device limit")
+            ddr_burst_frames = ddr_burst_bytes // frame_bytes
+            ddr_burst_admitted_bytes = ddr_burst_frames * frame_bytes
+            request += _struct.pack(
+                "<IHHIIQQ",
+                0x42524653,
+                1,
+                32,
+                1,
+                0,
+                ddr_burst_bytes,
+                0,
+            )
         if len(request) > 4096:
             raise ValueError("request exceeds the 4096-byte libiio limit")
         request_storage = create_string_buffer(request, len(request))
@@ -1181,6 +1227,9 @@ class MetadataBuffer(Buffer):
         self._metadata_capacity = int(metadata_capacity)
         self._batch_frames = batch_frames
         self._batch_cache_bytes = batch_cache_bytes
+        self._ddr_burst_requested_bytes = ddr_burst_bytes
+        self._ddr_burst_admitted_bytes = ddr_burst_admitted_bytes
+        self._ddr_burst_frames = ddr_burst_frames
         self._metadata = None
         self._dev = device
 
@@ -1216,6 +1265,26 @@ class MetadataBuffer(Buffer):
     def batch_cache_bytes(self):
         """Configured retained-cache bound (zero when batching is disabled)."""
         return self._batch_cache_bytes
+
+    @property
+    def ddr_burst_enabled(self):
+        """Whether this buffer uses the opt-in device DDR burst cache."""
+        return self._ddr_burst_requested_bytes > 0
+
+    @property
+    def ddr_burst_requested_bytes(self):
+        """User-requested device IQ-cache byte budget."""
+        return self._ddr_burst_requested_bytes
+
+    @property
+    def ddr_burst_admitted_bytes(self):
+        """IQ bytes admitted after rounding down to complete IIO frames."""
+        return self._ddr_burst_admitted_bytes
+
+    @property
+    def ddr_burst_frames(self):
+        """Number of complete frames retained in device DDR."""
+        return self._ddr_burst_frames
 
 
 class _DeviceOrTrigger(object):

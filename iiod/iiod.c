@@ -588,6 +588,23 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
 	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-ddr-burst", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-ddr-burst-max-iq-bytes",
+		"200000000");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-ddr-burst-reserve-bytes",
+		"134217728");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
 #endif
 
 	xml_zstd = get_xml_zstd_data(ctx, &xml_zstd_len);

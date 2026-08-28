@@ -31,6 +31,42 @@ static const uint8_t failure_session_request[] = {
 	0x01, 0x00, 0x08, 0x01,
 };
 
+#define TEST_BURST_REQUEST_BYTES 32U
+
+static void put_le16(uint8_t *destination, uint16_t value)
+{
+	destination[0] = (uint8_t)value;
+	destination[1] = (uint8_t)(value >> 8);
+}
+
+static void put_le32(uint8_t *destination, uint32_t value)
+{
+	destination[0] = (uint8_t)value;
+	destination[1] = (uint8_t)(value >> 8);
+	destination[2] = (uint8_t)(value >> 16);
+	destination[3] = (uint8_t)(value >> 24);
+}
+
+static void put_le64(uint8_t *destination, uint64_t value)
+{
+	put_le32(destination, (uint32_t)value);
+	put_le32(destination + 4, (uint32_t)(value >> 32));
+}
+
+static void build_burst_request(uint8_t *wire, const uint8_t *base,
+	size_t base_bytes, uint64_t requested_iq_bytes)
+{
+	uint8_t *burst = wire + base_bytes;
+
+	memcpy(wire, base, base_bytes);
+	memset(burst, 0, TEST_BURST_REQUEST_BYTES);
+	put_le32(burst, UINT32_C(0x42524653));
+	put_le16(burst + 4, 1);
+	put_le16(burst + 6, TEST_BURST_REQUEST_BYTES);
+	put_le32(burst + 8, 1);
+	put_le64(burst + 16, requested_iq_bytes);
+}
+
 int main(int argc, char **argv)
 {
 	const char *host = argc > 1 ? argv[1] : "127.0.0.1:30432";
@@ -49,6 +85,10 @@ int main(int argc, char **argv)
 			"iio,buffer-metadata-layouts");
 		assert(layouts && !strcmp(layouts,
 			"00000003:1:4:2,0000000c:1:4:2,0000000f:2:8:1"));
+		assert(!strcmp(iio_context_get_attr_value(ctx,
+			"iio,buffer-ddr-burst"), "1"));
+		assert(!strcmp(iio_context_get_attr_value(ctx,
+			"iio,buffer-ddr-burst-max-iq-bytes"), "200000000"));
 	}
 	struct iio_device *dev = iio_context_find_device(ctx, "cf-ad9361-lpc");
 	assert(dev);
@@ -131,6 +171,51 @@ int main(int argc, char **argv)
 	assert(record->sequence == 3);
 	/* Response 4 was drained into host memory. Destroying now discards only
 	 * cached data, so CLOSE is not queued behind an unread wire response. */
+	iio_buffer_destroy(buffer);
+
+	/* A burst request captures every admitted frame before the first refill,
+	 * then drains through the ordinary metadata refill contract. */
+	uint8_t burst_request[sizeof(session_request) + TEST_BURST_REQUEST_BYTES];
+	build_burst_request(burst_request, session_request,
+		sizeof(session_request), UINT64_C(4) * 1024U * 8U);
+	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+		burst_request, sizeof(burst_request));
+	assert(buffer);
+	for (uint64_t sequence = 0; sequence < 4; ++sequence) {
+		metadata_bytes = 0;
+		iq_bytes = iio_buffer_refill_with_metadata(buffer,
+			metadata, sizeof(metadata), &metadata_bytes);
+		assert(iq_bytes == 1024 * 8);
+		assert(metadata_bytes == sizeof(struct test_metadata));
+		record = (const struct test_metadata *)metadata;
+		assert(record->sequence == sequence);
+	}
+	metadata_bytes = 123;
+	assert(iio_buffer_refill_with_metadata(buffer,
+		metadata, sizeof(metadata), &metadata_bytes) == -ENODATA);
+	assert(metadata_bytes == 0);
+	iio_buffer_destroy(buffer);
+
+	/* Burst capture failure is atomic: no first frame is exposed, teardown is
+	 * reusable, and a fresh ordinary session starts at sequence zero. */
+	build_burst_request(burst_request, failure_session_request,
+		sizeof(failure_session_request), UINT64_C(3) * 1024U * 8U);
+	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+		burst_request, sizeof(burst_request));
+	assert(buffer);
+	metadata_bytes = 0;
+	assert(iio_buffer_refill_with_metadata(buffer,
+		metadata, sizeof(metadata), &metadata_bytes) == -EIO);
+	assert(metadata_bytes == 0);
+	iio_buffer_destroy(buffer);
+	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+		session_request, sizeof(session_request));
+	assert(buffer);
+	metadata_bytes = 0;
+	assert(iio_buffer_refill_with_metadata(buffer,
+		metadata, sizeof(metadata), &metadata_bytes) == 1024 * 8);
+	record = (const struct test_metadata *)metadata;
+	assert(record->sequence == 0);
 	iio_buffer_destroy(buffer);
 
 	/* A new buffer gets a new provider context. This proves the old session
