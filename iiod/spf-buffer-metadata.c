@@ -23,7 +23,15 @@
 #define SPF_IIOD_OBSERVATION_CAPACITY UINT16_C(64)
 #define SPF_IIOD_OBSERVATION_INTERVAL_MAX UINT32_C(32768)
 #define SPF_IIOD_OBSERVATION_INTERVAL_MIN UINT32_C(1024)
-#define SPF_IIOD_SAMPLER_START_TIMEOUT_MS UINT32_C(100)
+/*
+ * The sampler performs several AD9361 control-plane reads before it can
+ * acknowledge a capture fence.  Those reads normally finish just below
+ * 100 ms on Pluto+, leaving effectively no scheduler or network-daemon
+ * margin.  Keep the fence finite, but allow one bounded 500 ms control-plane
+ * interval so an otherwise valid metadata refill is not rejected solely by
+ * transient device-side scheduling latency.
+ */
+#define SPF_IIOD_SAMPLER_SYNC_TIMEOUT_MS UINT32_C(500)
 
 struct spf_iiod_metadata_context {
 	struct iio_device *rx;
@@ -155,7 +163,7 @@ int iiod_buffer_metadata_before_refill(void *provider_context)
 	if (ctx->refills_started != 0 &&
 		!spf_gain_sampler_limit_and_wait_started(&ctx->sampler,
 			(uint64_t)ctx->samples_per_channel * 2U,
-			SPF_IIOD_SAMPLER_START_TIMEOUT_MS))
+			SPF_IIOD_SAMPLER_SYNC_TIMEOUT_MS))
 		return -ETIMEDOUT;
 	ctx->refills_started++;
 	return 0;
@@ -170,7 +178,7 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 	if (ctx->refills_started <= 1)
 		return 0;
 	return spf_gain_sampler_finish_capture(
-		&ctx->sampler, SPF_IIOD_SAMPLER_START_TIMEOUT_MS) ? 0 : -ETIMEDOUT;
+		&ctx->sampler, SPF_IIOD_SAMPLER_SYNC_TIMEOUT_MS) ? 0 : -ETIMEDOUT;
 }
 
 void iiod_buffer_metadata_close(void *provider_context)
