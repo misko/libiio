@@ -5,11 +5,18 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
 #define SPF_TANDEM_STATUS_CATCHUP_ATTEMPTS 4
+#define SPF_TANDEM_TRANSITION_COUNTER_BITS 8U
+#define SPF_TANDEM_TRANSITION_COUNTER_MASK \
+	((1U << SPF_TANDEM_TRANSITION_COUNTER_BITS) - 1U)
+#define SPF_TANDEM_TRANSITION_COUNTER_HALF_RANGE \
+	(1U << (SPF_TANDEM_TRANSITION_COUNTER_BITS - 1U))
 
 _Static_assert(sizeof(struct adi_tandem_agc_request_v1) == 104,
 	"unexpected tandem request ABI size");
@@ -105,6 +112,31 @@ int spf_tandem_request_decode(struct adi_tandem_agc_request_v1 *destination,
 	return 0;
 }
 
+int spf_tandem_request_validate_event_window(
+	const struct adi_tandem_agc_request_v1 *request,
+	uint32_t samples_per_channel)
+{
+	uint64_t minimum_transition_samples;
+	uint64_t retention_samples;
+	uint64_t maximum_retained_events;
+
+	if (!request || !samples_per_channel ||
+		!request->power_measurement_samples || !request->event_capacity)
+		return -EINVAL;
+	if (request->mode == ADI_TANDEM_AGC_MODE_HOLD)
+		return 0;
+	if (request->mode != ADI_TANDEM_AGC_MODE_AUTO)
+		return -EINVAL;
+	minimum_transition_samples =
+		(uint64_t)request->power_measurement_samples *
+		((uint64_t)request->cooldown_periods + 1U);
+	retention_samples = (uint64_t)samples_per_channel *
+		SPF_TANDEM_EVENT_RETENTION_FRAMES;
+	maximum_retained_events = 1U +
+		(retention_samples - 1U) / minimum_transition_samples;
+	return maximum_retained_events <= request->event_capacity ? 0 : -ENOSPC;
+}
+
 int spf_tandem_session_init(struct spf_tandem_session *session,
 	const void *wire_request, size_t wire_bytes,
 	const struct spf_tandem_syscalls *syscalls)
@@ -165,21 +197,40 @@ static int refresh_status_at_least(struct spf_tandem_session *session,
 	/*
 	 * Event FIFO data and the coherent status snapshot cross independently
 	 * into AXI.  A newly visible event can therefore precede the matching
-	 * transition counter by one snapshot.  Accept only bounded convergence;
-	 * a persistent disagreement remains a fail-closed EILSEQ.
+	 * transition counter by one snapshot.  The public AXI status counter is
+	 * only eight bits wide even though the kernel ABI zero-extends it into a
+	 * u32.  Compare it in its native modulo-256 sequence space while keeping
+	 * the software count cumulative for metadata consumers.
+	 *
+	 * At most 64 events can be outstanding (the hardware FIFO depth), so a
+	 * modular delta in the forward half-range is unambiguously at or after
+	 * the consumed event count.  Accept only bounded convergence; a
+	 * persistent disagreement remains a fail-closed EILSEQ.
 	 */
 	for (attempt = 0; attempt < SPF_TANDEM_STATUS_CATCHUP_ATTEMPTS;
 			++attempt) {
+		uint32_t delta;
+
 		ret = refresh_status(session);
 		if (ret)
 			return ret;
-		if (session->status.transition_count >= transition_count)
+		delta = (session->status.transition_count - transition_count) &
+			SPF_TANDEM_TRANSITION_COUNTER_MASK;
+		if (delta < SPF_TANDEM_TRANSITION_COUNTER_HALF_RANGE)
 			return 0;
 	}
 	/* The event itself is authoritative for the single in-flight status
 	 * snapshot.  A larger disagreement can indicate lost FIFO data. */
-	if (session->status.transition_count == transition_count - 1U)
+	if (((session->status.transition_count - transition_count) &
+			SPF_TANDEM_TRANSITION_COUNTER_MASK) ==
+		SPF_TANDEM_TRANSITION_COUNTER_MASK)
 		return 0;
+	fprintf(stderr,
+		"SPF tandem status did not catch up: expected=%" PRIu32
+		" observed=%" PRIu32 " attempts=%u epoch=%" PRIu32 "\n",
+		transition_count, session->status.transition_count,
+		SPF_TANDEM_STATUS_CATCHUP_ATTEMPTS,
+		session->status.ownership_epoch);
 	return -EILSEQ;
 }
 
@@ -304,11 +355,23 @@ process_queue:
 		if (event->sample_sequence >= end)
 			break;
 		if (session->sequence_valid &&
-			event->event_sequence != session->expected_event_sequence)
+			event->event_sequence != session->expected_event_sequence) {
+			fprintf(stderr,
+				"SPF tandem event sequence gap: expected=%" PRIu32
+				" observed=%" PRIu32 " sample=%" PRIu64 "\n",
+				session->expected_event_sequence, event->event_sequence,
+				(uint64_t)event->sample_sequence);
 			return -EILSEQ;
+		}
 		if (session->sample_sequence_valid && event->sample_sequence <
-			session->last_event_sample_sequence)
+			session->last_event_sample_sequence) {
+			fprintf(stderr,
+				"SPF tandem event sample regression: previous=%" PRIu64
+				" observed=%" PRIu64 " event=%" PRIu32 "\n",
+				session->last_event_sample_sequence,
+				(uint64_t)event->sample_sequence, event->event_sequence);
 			return -EILSEQ;
+		}
 		if (event->rx1_gain_index != event->rx2_gain_index ||
 			event->rx1_gain_index > 0x7f || event->flags & 0xffc0 ||
 			((event->flags >> 4) & 0x3) < 1 ||

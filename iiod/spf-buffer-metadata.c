@@ -19,6 +19,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -123,6 +124,18 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			SPF_TANDEM_EVENT_QUEUE_CAPACITY) {
 		free(ctx);
 		return -ENOSPC;
+	}
+	ret = spf_tandem_request_validate_event_window(&ctx->tandem.request,
+		(uint32_t)samples_count);
+	if (ret) {
+		fprintf(stderr,
+			"SPF tandem request cannot retain the refill arm window: "
+			"samples=%zu events=%u cooldown=%u measurement=%u error=%d\n",
+			samples_count, ctx->tandem.request.event_capacity,
+			ctx->tandem.request.cooldown_periods,
+			ctx->tandem.request.power_measurement_samples, ret);
+		free(ctx);
+		return ret;
 	}
 	ctx->tandem_initialized = true;
 	ctx->burst_enabled = tandem_request_bytes != request_bytes;
@@ -289,8 +302,15 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		(uint16_t)ctx->tandem.request.event_capacity);
 	if (!header_bytes || metadata_capacity < header_bytes)
 		return -ENOSPC;
-	if (raw_bytes != ctx->layout.raw_bytes)
+	if (raw_bytes != ctx->layout.raw_bytes) {
+		fprintf(stderr,
+			"SPF metadata raw frame mismatch: expected=%zu observed=%zu "
+			"frame=%llu burst=%u\n",
+			ctx->layout.raw_bytes, raw_bytes,
+			(unsigned long long)ctx->frames_emitted,
+			ctx->burst_enabled ? 1U : 0U);
 		return -EIO;
+	}
 
 	raw = iio_buffer_start(buffer);
 	if (!raw)
@@ -300,8 +320,13 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		first_sample_sequence, ctx->samples_per_channel, observations,
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		&observation_overflow_count);
-	if (ctx->burst_enabled && observation_overflow_count)
+	if (ctx->burst_enabled && observation_overflow_count) {
+		fprintf(stderr,
+			"SPF metadata gain observation overflow: count=%u frame=%llu\n",
+			observation_overflow_count,
+			(unsigned long long)ctx->frames_emitted);
 		return -EOVERFLOW;
+	}
 	if (ctx->tandem.request.mode == ADI_TANDEM_AGC_MODE_AUTO)
 		observation_count = spf_tandem_compact_coherent_observations(
 			observations, observation_count);
@@ -311,25 +336,58 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		ctx->startup_frames_discarded++;
 		return -EAGAIN;
 	}
-	if (frame_decision != SPF_GAIN_FRAME_ACCEPT)
+	if (frame_decision != SPF_GAIN_FRAME_ACCEPT) {
+		fprintf(stderr,
+			"SPF metadata frame has no gain coverage: frame=%llu "
+			"observations=%u startup_discards=%u burst=%u\n",
+			(unsigned long long)ctx->frames_emitted, observation_count,
+			ctx->startup_frames_discarded,
+			ctx->burst_enabled ? 1U : 0U);
 		return -ENODATA;
+	}
 	if (!spf_gain_sampler_collect_rssi(&ctx->sampler,
 			first_sample_sequence, ctx->samples_per_channel,
-			&rssi_start, &rssi_end, &rssi_overflow_count))
+			&rssi_start, &rssi_end, &rssi_overflow_count)) {
+		fprintf(stderr,
+			"SPF metadata frame has no RSSI coverage: frame=%llu "
+			"first_sample=%llu samples=%u observations=%u burst=%u\n",
+			(unsigned long long)ctx->frames_emitted,
+			(unsigned long long)first_sample_sequence,
+			ctx->samples_per_channel, observation_count,
+			ctx->burst_enabled ? 1U : 0U);
 		return -ENODATA;
-	if (rssi_overflow_count)
+	}
+	if (rssi_overflow_count) {
+		fprintf(stderr,
+			"SPF metadata RSSI observation overflow: count=%u frame=%llu\n",
+			rssi_overflow_count, (unsigned long long)ctx->frames_emitted);
 		return -EOVERFLOW;
+	}
 	ret = spf_tandem_session_collect(&ctx->tandem, first_sample_sequence,
 			ctx->samples_per_channel, events,
 			ctx->tandem.request.event_capacity, &event_count);
-	if (ret)
+	if (ret) {
+		fprintf(stderr,
+			"SPF metadata tandem collection failed: error=%d frame=%llu "
+			"first_sample=%llu samples=%u\n",
+			ret, (unsigned long long)ctx->frames_emitted,
+			(unsigned long long)first_sample_sequence,
+			ctx->samples_per_channel);
 		return ret;
+	}
 	ret = spf_buffer_sequence_resolve(&ctx->sequence, first_sample_sequence,
 			ctx->samples_per_channel, &sequence);
 	if (ret)
 		return ret;
-	if (ctx->burst_enabled && sequence.missing_samples_before)
+	if (ctx->burst_enabled && sequence.missing_samples_before) {
+		fprintf(stderr,
+			"SPF metadata burst counter gap: frame=%llu first_sample=%llu "
+			"missing=%llu\n",
+			(unsigned long long)ctx->frames_emitted,
+			(unsigned long long)first_sample_sequence,
+			(unsigned long long)sequence.missing_samples_before);
 		return -EOVERFLOW;
+	}
 	const spf_radio_frame_v6_args_t args = {
 		.frame = {
 			.metadata_features = SPF_META_REQUIRED_FEATURES_V6,
