@@ -83,6 +83,8 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	struct spf_ddr_burst_request burst_request;
 	struct spf_iiod_metadata_context *ctx;
 	const struct iio_context *iio_ctx;
+	struct iio_channel *rx0;
+	long long sample_rate_hz;
 	size_t tandem_request_bytes = request_bytes;
 	uint32_t timestamp_control;
 	int ret;
@@ -147,6 +149,26 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		!spf_gain_is_digital_gain_disabled(ctx->phy)) {
 		free(ctx);
 		return -ENOTSUP;
+	}
+	if (ctx->burst_enabled) {
+		rx0 = iio_device_find_channel(ctx->phy, "voltage0", false);
+		if (!rx0 || iio_channel_attr_read_longlong(rx0,
+				"sampling_frequency", &sample_rate_hz) != 0 ||
+			sample_rate_hz <= 0 || sample_rate_hz > UINT32_MAX) {
+			free(ctx);
+			return -EIO;
+		}
+		ret = spf_ddr_burst_validate_frame_period((uint32_t)samples_count,
+			(uint32_t)sample_rate_hz);
+		if (ret) {
+			fprintf(stderr,
+				"SPF DDR burst frame period is unsupported: samples=%zu "
+				"rate=%lld minimum_us=%u error=%d\n",
+				samples_count, sample_rate_hz,
+				SPF_DDR_BURST_MIN_FRAME_DURATION_US, ret);
+			free(ctx);
+			return ret;
+		}
 	}
 
 	if (iio_device_reg_read(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
