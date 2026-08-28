@@ -103,6 +103,16 @@ ssize_t iiod_client_read_with_metadata_unlocked(
 				  void *metadata, size_t metadata_capacity,
 				  size_t *metadata_bytes);
 
+ssize_t iiod_client_read_with_metadata_batch_unlocked(
+				  struct iiod_client *client,
+				  struct iiod_client_pdata *desc,
+				  const struct iio_device *dev,
+				  void *dst, size_t len,
+				  uint32_t *mask, size_t words,
+				  void *metadata, size_t metadata_capacity,
+				  size_t *metadata_bytes,
+				  unsigned int request_frames);
+
 ssize_t iiod_client_write_unlocked(struct iiod_client *client,
 				   struct iiod_client_pdata *desc,
 				   const struct iio_device *dev,

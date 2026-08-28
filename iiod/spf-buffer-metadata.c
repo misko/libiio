@@ -2,8 +2,11 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "buffer-metadata.h"
+#include "spf-buffer-layout.h"
+#include "spf-ddr-burst-request.h"
 #include "spf-tandem-metadata.h"
 #include "spf-tandem-session.h"
+#include "spf-temperature-cache.h"
 
 #include <spf_gain_metadata.h>
 #include <spf_gain_read.h>
@@ -21,7 +24,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#define SPF_IIOD_SCAN_MASK UINT32_C(0x0f)
 #define SPF_IIOD_OBSERVATION_CAPACITY UINT16_C(64)
 #define SPF_IIOD_OBSERVATION_INTERVAL_MAX UINT32_C(32768)
 #define SPF_IIOD_OBSERVATION_INTERVAL_MIN UINT32_C(1024)
@@ -31,19 +33,22 @@ struct spf_iiod_metadata_context {
 	struct iio_device *rx;
 	struct iio_device *phy;
 	spf_gain_sampler_t sampler;
+	struct spf_temperature_sampler temperature_sampler;
 	struct spf_tandem_session tandem;
+	struct spf_buffer_layout layout;
 	uint32_t timestamp_control_previous;
 	uint32_t samples_per_channel;
 	uint32_t observation_interval_samples;
 	uint64_t stream_id;
-	uint64_t stream_first_sample_sequence;
+	struct spf_buffer_sequence_state sequence;
 	uint64_t frames_emitted;
 	uint64_t refills_started;
 	uint32_t startup_frames_discarded;
-	bool stream_origin_valid;
 	bool sampler_started;
+	bool temperature_sampler_started;
 	bool timestamp_configured;
 	bool tandem_initialized;
+	bool burst_enabled;
 };
 
 static uint64_t make_stream_id(const void *address)
@@ -69,23 +74,43 @@ static uint32_t observation_interval(size_t samples_count)
 
 int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
+		size_t scan_bytes,
 		const void *request, size_t request_bytes,
-		void **provider_context, size_t *extra_samples)
+		void **provider_context, size_t *extra_samples,
+		struct iiod_buffer_burst_plan *burst_plan)
 {
+	struct spf_ddr_burst_request burst_request;
 	struct spf_iiod_metadata_context *ctx;
 	const struct iio_context *iio_ctx;
+	size_t tandem_request_bytes = request_bytes;
 	uint32_t timestamp_control;
 	int ret;
 
-	if (!dev || !mask || words != 1 || mask[0] != SPF_IIOD_SCAN_MASK ||
-		!request || !request_bytes ||
-		!provider_context || !extra_samples || samples_count == 0 ||
-		samples_count > (UINT32_MAX >> 1))
+	if (!dev || !request || !request_bytes || !provider_context ||
+		!extra_samples || !burst_plan)
+		return -EINVAL;
+	memset(burst_plan, 0, sizeof(*burst_plan));
+	if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
+			SPF_DDR_BURST_REQUEST_BYTES) {
+		ret = spf_ddr_burst_request_decode(&burst_request,
+			(const uint8_t *)request + sizeof(struct adi_tandem_agc_request_v1),
+			SPF_DDR_BURST_REQUEST_BYTES);
+		if (ret)
+			return ret;
+		tandem_request_bytes = sizeof(struct adi_tandem_agc_request_v1);
+	}
+	struct spf_buffer_layout layout;
+	ret = spf_buffer_layout_resolve(samples_count, mask, words, scan_bytes,
+		&layout);
+	if (ret)
+		return ret;
+	if (tandem_request_bytes != request_bytes && layout.receiver_count != 1U)
 		return -EINVAL;
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
 		return -ENOMEM;
-	ret = spf_tandem_session_init(&ctx->tandem, request, request_bytes, NULL);
+	ret = spf_tandem_session_init(&ctx->tandem, request,
+		tandem_request_bytes, NULL);
 	if (ret) {
 		free(ctx);
 		return ret;
@@ -100,6 +125,8 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		return -ENOSPC;
 	}
 	ctx->tandem_initialized = true;
+	ctx->burst_enabled = tandem_request_bytes != request_bytes;
+	ctx->layout = layout;
 	ctx->rx = (struct iio_device *)dev;
 	iio_ctx = iio_device_get_context(dev);
 	ctx->phy = iio_context_find_device(iio_ctx, "ad9361-phy");
@@ -114,7 +141,7 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		free(ctx);
 		return -EIO;
 	}
-	timestamp_control = ((uint32_t)samples_count << 1) |
+	timestamp_control = (ctx->layout.timestamp_words << 1) |
 		(ctx->timestamp_control_previous & UINT32_C(1));
 	if (iio_device_reg_write(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
 			timestamp_control) != 0) {
@@ -133,9 +160,22 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		return -EIO;
 	}
 	ctx->sampler_started = true;
+	ctx->temperature_sampler_started =
+		spf_temperature_sampler_start(&ctx->temperature_sampler);
 
 	*provider_context = ctx;
-	*extra_samples = 1;
+	*extra_samples = ctx->layout.extra_samples;
+	if (ctx->burst_enabled) {
+		burst_plan->requested_iq_bytes = burst_request.requested_iq_bytes;
+		burst_plan->metadata_capacity = spf_radio_frame_v5_header_bytes(
+			(uint16_t)ctx->tandem.request.observation_capacity,
+			(uint16_t)ctx->tandem.request.event_capacity);
+		if (!burst_plan->metadata_capacity) {
+			iiod_buffer_metadata_close(ctx);
+			*provider_context = NULL;
+			return -EOVERFLOW;
+		}
+	}
 	return 0;
 }
 
@@ -212,6 +252,8 @@ void iiod_buffer_metadata_close(void *provider_context)
 		spf_tandem_session_close(&ctx->tandem);
 	if (ctx->sampler_started)
 		spf_gain_sampler_stop(&ctx->sampler);
+	if (ctx->temperature_sampler_started)
+		spf_temperature_sampler_stop(&ctx->temperature_sampler);
 	if (ctx->timestamp_configured)
 		(void)iio_device_reg_write(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
 				ctx->timestamp_control_previous);
@@ -228,8 +270,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	struct adi_tandem_agc_event events[SPF_TANDEM_EVENT_QUEUE_CAPACITY];
 	uint32_t observation_overflow_count = 0;
 	uint64_t first_sample_sequence;
-	uint64_t capture_index;
-	uint64_t sample_delta;
+	struct spf_buffer_sequence_result sequence;
 	spf_rssi_pair_t rssi_start;
 	spf_rssi_pair_t rssi_end;
 	uint32_t rssi_overflow_count = 0;
@@ -243,20 +284,24 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (!ctx || dev != ctx->rx || !buffer || !metadata || !iq_offset ||
 		!iq_bytes)
 		return -EINVAL;
-	header_bytes = spf_radio_frame_v4_header_bytes(
+	header_bytes = spf_radio_frame_v5_header_bytes(
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		(uint16_t)ctx->tandem.request.event_capacity);
 	if (!header_bytes || metadata_capacity < header_bytes)
 		return -ENOSPC;
-	if (raw_bytes != ((size_t)ctx->samples_per_channel + 1U) * 8U)
+	if (raw_bytes != ctx->layout.raw_bytes)
 		return -EIO;
 
 	raw = iio_buffer_start(buffer);
+	if (!raw)
+		return -EIO;
 	memcpy(&first_sample_sequence, raw, sizeof(first_sample_sequence));
 	observation_count = spf_gain_sampler_collect(&ctx->sampler,
 		first_sample_sequence, ctx->samples_per_channel, observations,
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		&observation_overflow_count);
+	if (ctx->burst_enabled && observation_overflow_count)
+		return -EOVERFLOW;
 	if (ctx->tandem.request.mode == ADI_TANDEM_AGC_MODE_AUTO)
 		observation_count = spf_tandem_compact_coherent_observations(
 			observations, observation_count);
@@ -279,25 +324,21 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			ctx->tandem.request.event_capacity, &event_count);
 	if (ret)
 		return ret;
-	if (!ctx->stream_origin_valid) {
-		ctx->stream_first_sample_sequence = first_sample_sequence;
-		ctx->stream_origin_valid = true;
-	}
-	if (first_sample_sequence < ctx->stream_first_sample_sequence)
-		return -ERANGE;
-	sample_delta = first_sample_sequence - ctx->stream_first_sample_sequence;
-	if (sample_delta % ctx->samples_per_channel)
-		return -EIO;
-	capture_index = sample_delta / ctx->samples_per_channel;
-	const spf_radio_frame_v4_args_t args = {
+	ret = spf_buffer_sequence_resolve(&ctx->sequence, first_sample_sequence,
+			ctx->samples_per_channel, &sequence);
+	if (ret)
+		return ret;
+	if (ctx->burst_enabled && sequence.missing_samples_before)
+		return -EOVERFLOW;
+	const spf_radio_frame_v6_args_t args = {
 		.frame = {
-			.metadata_features = SPF_META_REQUIRED_FEATURES_V4,
+			.metadata_features = SPF_META_REQUIRED_FEATURES_V6,
 			.stream_id = ctx->stream_id,
-			.buffer_sequence = capture_index,
+			.buffer_sequence = sequence.buffer_sequence,
 			.first_sample_sequence = first_sample_sequence,
 			.samples_per_channel = ctx->samples_per_channel,
-			.iq_payload_bytes = ctx->samples_per_channel * UINT32_C(8),
-			.enabled_scan_mask = SPF_IIOD_SCAN_MASK,
+			.iq_payload_bytes = (uint32_t)ctx->layout.iq_bytes,
+			.enabled_scan_mask = ctx->layout.enabled_scan_mask,
 			.gain_observation_interval_samples =
 				ctx->observation_interval_samples,
 			.gain_observations = observations,
@@ -325,12 +366,17 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			.device_iio_overflow = false,
 		},
 		.tandem_status = &ctx->tandem.status,
+		.ad9361_temperature_mdeg_c = ctx->temperature_sampler_started ?
+			spf_temperature_sampler_get(&ctx->temperature_sampler) :
+			SPF_TEMPERATURE_INVALID,
+		.missing_samples_before = sequence.missing_samples_before,
 	};
-	if (!spf_radio_frame_v4_build(metadata, metadata_capacity, &args))
+	if (!spf_radio_frame_v6_build(metadata, metadata_capacity, &args))
 		return -EIO;
 
+	spf_buffer_sequence_commit(&ctx->sequence, &sequence);
 	ctx->frames_emitted++;
 	*iq_offset = sizeof(first_sample_sequence);
-	*iq_bytes = (size_t)ctx->samples_per_channel * 8U;
+	*iq_bytes = ctx->layout.iq_bytes;
 	return (ssize_t)header_bytes;
 }

@@ -421,7 +421,8 @@ static int network_open_with_metadata(const struct iio_device *dev,
 
 	if (cyclic)
 		return -EINVAL;
-	if (!capability || strcmp(capability, "2"))
+	if (!capability || (strcmp(capability, "2") &&
+		strcmp(capability, "3")))
 		return -ENOSYS;
 	iio_mutex_lock(ppdata->lock);
 	if (ppdata->io_ctx.fd >= 0)
@@ -534,6 +535,25 @@ static ssize_t network_read_with_metadata(const struct iio_device *dev,
 	ret = iiod_client_read_with_metadata_unlocked(ctx_pdata->iiod_client,
 			&pdata->io_ctx, dev, dst, len, mask, words,
 			metadata, metadata_capacity, metadata_bytes);
+	iio_mutex_unlock(pdata->lock);
+
+	return ret;
+}
+
+static ssize_t network_read_with_metadata_batch(const struct iio_device *dev,
+		void *dst, size_t len, uint32_t *mask, size_t words,
+		void *metadata, size_t metadata_capacity, size_t *metadata_bytes,
+		unsigned int request_frames)
+{
+	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *pdata = dev->pdata;
+	ssize_t ret;
+
+	iio_mutex_lock(pdata->lock);
+	ret = iiod_client_read_with_metadata_batch_unlocked(
+			ctx_pdata->iiod_client, &pdata->io_ctx, dev, dst, len,
+			mask, words, metadata, metadata_capacity, metadata_bytes,
+			request_frames);
 	iio_mutex_unlock(pdata->lock);
 
 	return ret;
@@ -864,9 +884,10 @@ err_unlock:
 	return ret;
 }
 
-static ssize_t network_get_buffer_with_metadata(const struct iio_device *dev,
+static ssize_t network_get_buffer_with_metadata_common(const struct iio_device *dev,
 		void **addr_ptr, size_t bytes_used, uint32_t *mask, size_t words,
-		void *metadata, size_t metadata_capacity, size_t *metadata_bytes)
+		void *metadata, size_t metadata_capacity, size_t *metadata_bytes,
+		unsigned int request_frames)
 {
 	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
 	struct iio_device_pdata *pdata = dev->pdata;
@@ -895,9 +916,10 @@ static ssize_t network_get_buffer_with_metadata(const struct iio_device *dev,
 	}
 
 	iio_mutex_lock(pdata->lock);
-	ret = iiod_client_read_with_metadata_unlocked(ctx_pdata->iiod_client,
-			&pdata->io_ctx, dev, mapping, pdata->mmap_len, mask, words,
-			metadata, metadata_capacity, metadata_bytes);
+	ret = iiod_client_read_with_metadata_batch_unlocked(
+			ctx_pdata->iiod_client, &pdata->io_ctx, dev, mapping,
+			pdata->mmap_len, mask, words, metadata, metadata_capacity,
+			metadata_bytes, request_frames);
 	iio_mutex_unlock(pdata->lock);
 	if (ret < 0)
 		goto err_unmap;
@@ -916,6 +938,25 @@ err_unmap:
 err_close_memfd:
 	close(memfd);
 	return ret;
+}
+
+static ssize_t network_get_buffer_with_metadata(const struct iio_device *dev,
+		void **addr_ptr, size_t bytes_used, uint32_t *mask, size_t words,
+		void *metadata, size_t metadata_capacity, size_t *metadata_bytes)
+{
+	return network_get_buffer_with_metadata_common(dev, addr_ptr, bytes_used,
+		mask, words, metadata, metadata_capacity, metadata_bytes, 1);
+}
+
+static ssize_t network_get_buffer_with_metadata_batch(
+		const struct iio_device *dev, void **addr_ptr, size_t bytes_used,
+		uint32_t *mask, size_t words, void *metadata,
+		size_t metadata_capacity, size_t *metadata_bytes,
+		unsigned int request_frames)
+{
+	return network_get_buffer_with_metadata_common(dev, addr_ptr, bytes_used,
+		mask, words, metadata, metadata_capacity, metadata_bytes,
+		request_frames);
 }
 #endif
 
@@ -1059,10 +1100,12 @@ static const struct iio_backend_ops network_ops = {
 	.close = network_close,
 	.read = network_read,
 	.read_with_metadata = network_read_with_metadata,
+	.read_with_metadata_batch = network_read_with_metadata_batch,
 	.write = network_write,
 #ifdef WITH_NETWORK_GET_BUFFER
 	.get_buffer = network_get_buffer,
 	.get_buffer_with_metadata = network_get_buffer_with_metadata,
+	.get_buffer_with_metadata_batch = network_get_buffer_with_metadata_batch,
 #endif
 	.read_device_attr = network_read_dev_attr,
 	.write_device_attr = network_write_dev_attr,
@@ -1387,7 +1430,7 @@ struct iio_context * network_create_context(const char *hostname)
 	 * with those corresponding to the network context */
 	ctx->name = "network";
 	ctx->ops = &network_ops;
-	ctx->backend_api_version = IIO_BACKEND_API_V3;
+	ctx->backend_api_version = IIO_BACKEND_API_V4;
 	ctx->pdata = pdata;
 
 	uri_len = strlen(description);

@@ -9,6 +9,7 @@
 #include "debug.h"
 #include "iiod-client.h"
 #include "iio-config.h"
+#include "iiod-command-batch.h"
 #include "iio-lock.h"
 #include "iio-private.h"
 
@@ -787,14 +788,13 @@ ssize_t iiod_client_read_unlocked(struct iiod_client *client,
 	return read;
 }
 
-ssize_t iiod_client_read_with_metadata_unlocked(
+static ssize_t iiod_client_read_metadata_response_unlocked(
 		struct iiod_client *client, struct iiod_client_pdata *desc,
 		const struct iio_device *dev, void *dst, size_t len,
 		uint32_t *mask, size_t words, void *metadata,
 		size_t metadata_capacity, size_t *metadata_bytes)
 {
 	unsigned int nb_channels = iio_device_get_channels_count(dev);
-	char command[1024];
 	int iq_bytes, meta_bytes;
 	ssize_t ret;
 
@@ -803,13 +803,6 @@ ssize_t iiod_client_read_with_metadata_unlocked(
 		return -EINVAL;
 
 	*metadata_bytes = 0;
-	iio_snprintf(command, sizeof(command), "READBUFM %s %lu %lu\r\n",
-			iio_device_get_id(dev), (unsigned long)len,
-			(unsigned long)metadata_capacity);
-
-	ret = iiod_client_write_all(client, desc, command, strlen(command));
-	if (ret < 0)
-		return ret;
 
 	ret = iiod_client_read_integer(client, desc, &iq_bytes);
 	if (ret < 0)
@@ -845,6 +838,68 @@ ssize_t iiod_client_read_with_metadata_unlocked(
 	}
 
 	return iq_bytes;
+}
+
+struct command_batch_write_context {
+	struct iiod_client *client;
+	struct iiod_client_pdata *desc;
+};
+
+static ssize_t write_command_batch_once(void *opaque,
+		const char *src, size_t len)
+{
+	struct command_batch_write_context *context = opaque;
+
+	return context->client->ops->write(context->client->pdata,
+		context->desc, src, len);
+}
+
+ssize_t iiod_client_read_with_metadata_batch_unlocked(
+		struct iiod_client *client, struct iiod_client_pdata *desc,
+		const struct iio_device *dev, void *dst, size_t len,
+		uint32_t *mask, size_t words, void *metadata,
+		size_t metadata_capacity, size_t *metadata_bytes,
+		unsigned int request_frames)
+{
+	char command[1024];
+	ssize_t ret;
+
+	if (request_frames > IIO_BUFFER_METADATA_BATCH_MAX)
+		return -E2BIG;
+	if (request_frames) {
+		struct command_batch_write_context context = {
+			.client = client,
+			.desc = desc,
+		};
+
+		iio_snprintf(command, sizeof(command), "READBUFM %s %lu %lu\r\n",
+			iio_device_get_id(dev), (unsigned long)len,
+			(unsigned long)metadata_capacity);
+		/* The complete train must reach the exclusive data endpoint before
+		 * response 1 is read. Separate synchronous writes can deadlock after
+		 * iiOD begins sending that first response. */
+		if (request_frames == 1)
+			ret = iiod_client_write_all(client, desc, command,
+				strlen(command));
+		else
+			ret = iiod_command_batch_write(write_command_batch_once,
+				&context, command, request_frames);
+		if (ret < 0)
+			return ret;
+	}
+
+	return iiod_client_read_metadata_response_unlocked(client, desc, dev,
+		dst, len, mask, words, metadata, metadata_capacity, metadata_bytes);
+}
+
+ssize_t iiod_client_read_with_metadata_unlocked(
+		struct iiod_client *client, struct iiod_client_pdata *desc,
+		const struct iio_device *dev, void *dst, size_t len,
+		uint32_t *mask, size_t words, void *metadata,
+		size_t metadata_capacity, size_t *metadata_bytes)
+{
+	return iiod_client_read_with_metadata_batch_unlocked(client, desc, dev,
+		dst, len, mask, words, metadata, metadata_capacity, metadata_bytes, 1);
 }
 
 ssize_t iiod_client_write_unlocked(struct iiod_client *client,

@@ -577,7 +577,30 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 	}
 
 #ifdef IIOD_HAS_BUFFER_METADATA
-	ret = iio_context_add_attr(ctx, "iio,buffer-metadata", "2");
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata", "3");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-layouts",
+		"00000003:1:4:2,0000000c:1:4:2,0000000f:2:8:1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-ddr-burst", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-ddr-burst-max-iq-bytes",
+		"200000000");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-ddr-burst-reserve-bytes",
+		"134217728");
 	if (ret < 0) {
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;

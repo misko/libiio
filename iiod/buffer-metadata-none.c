@@ -5,17 +5,21 @@
 
 int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
+		size_t scan_bytes,
 		const void *request, size_t request_bytes,
-		void **provider_context, size_t *extra_samples)
+		void **provider_context, size_t *extra_samples,
+		struct iiod_buffer_burst_plan *burst_plan)
 {
 	(void)dev;
 	(void)samples_count;
 	(void)mask;
 	(void)words;
+	(void)scan_bytes;
 	(void)request;
 	(void)request_bytes;
 	(void)provider_context;
 	(void)extra_samples;
+	(void)burst_plan;
 	return -ENOSYS;
 }
 

@@ -38,6 +38,17 @@ add_executable(iio_reg     iio_reg.c      ${GETOPT_C_FILE} ${LIBIIO_RC})
 add_executable(iio_writedev iio_writedev.c  ${GETOPT_C_FILE} ${LIBIIO_RC})
 add_executable(test_buffer_metadata_e2e test_buffer_metadata_e2e.c)
 target_link_libraries(test_buffer_metadata_e2e iio)
+add_executable(test_iiod_command_batch test_iiod_command_batch.c
+	../iiod-command-batch.c)
+target_include_directories(test_iiod_command_batch PRIVATE ..)
+add_executable(test_metadata_batch_core test_metadata_batch_core.c)
+target_include_directories(test_metadata_batch_core PRIVATE ..)
+target_link_libraries(test_metadata_batch_core iio)
+if((PTHREAD_LIBRARIES OR ANDROID) AND NOT WIN32 AND NOT NO_THREADS)
+	target_compile_definitions(test_metadata_batch_core PRIVATE
+		METADATA_BATCH_TEST_PTHREAD=1)
+	target_link_libraries(test_metadata_batch_core ${PTHREAD_LIBRARIES})
+endif()
 
 if (MSVC)
 	target_link_options(iio_tests_helper PUBLIC /DEBUG)
@@ -56,27 +67,49 @@ target_link_libraries(iio_readdev iio iio_tests_helper)
 target_link_libraries(iio_reg     iio iio_tests_helper)
 target_link_libraries(iio_writedev iio iio_tests_helper)
 
-set(IIO_TESTS_TARGETS iio_genxml iio_info iio_attr iio_readdev iio_reg iio_writedev)
+set(IIO_TESTS_TARGETS iio_genxml iio_info iio_attr iio_readdev iio_reg
+	iio_writedev)
 
 if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	set(SPF_RADIO_FRAME_V3_SOURCE "")
+	set(SPF_THREAD_JOIN_SOURCE "")
 	foreach(SPF_PROVIDER_SOURCE ${IIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES})
 		if(SPF_PROVIDER_SOURCE MATCHES "spf_radio_frame_v3\\.c$")
 			set(SPF_RADIO_FRAME_V3_SOURCE ${SPF_PROVIDER_SOURCE})
+		endif()
+		if(SPF_PROVIDER_SOURCE MATCHES "spf_thread_join\\.c$")
+			set(SPF_THREAD_JOIN_SOURCE ${SPF_PROVIDER_SOURCE})
 		endif()
 	endforeach()
 	if(NOT SPF_RADIO_FRAME_V3_SOURCE)
 		message(FATAL_ERROR "SPF tandem tests require spf_radio_frame_v3.c")
 	endif()
+	if(NOT SPF_THREAD_JOIN_SOURCE)
+		message(FATAL_ERROR "SPF temperature tests require spf_thread_join.c")
+	endif()
 	add_executable(test_spf_tandem_session test_spf_tandem_session.c
 		../iiod/spf-tandem-session.c)
 	add_executable(test_spf_tandem_metadata test_spf_tandem_metadata.c
 		../iiod/spf-tandem-metadata.c ${SPF_RADIO_FRAME_V3_SOURCE})
-	target_include_directories(test_spf_tandem_session PRIVATE ../iiod)
+	add_executable(test_spf_temperature_cache test_spf_temperature_cache.c
+		../iiod/spf-temperature-cache.c ${SPF_THREAD_JOIN_SOURCE})
+	add_executable(test_spf_buffer_layout test_spf_buffer_layout.c
+		../iiod/spf-buffer-layout.c)
+	add_executable(test_spf_ddr_burst_request test_spf_ddr_burst_request.c
+		../iiod/spf-ddr-burst-request.c)
+	target_include_directories(test_spf_tandem_session PRIVATE ../iiod
+		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
 	target_include_directories(test_spf_tandem_metadata PRIVATE ../iiod
 		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+	target_include_directories(test_spf_temperature_cache PRIVATE ../iiod
+		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+	target_include_directories(test_spf_buffer_layout PRIVATE ../iiod)
+	target_include_directories(test_spf_ddr_burst_request PRIVATE ../iiod)
+	target_link_libraries(test_spf_temperature_cache iio ${PTHREAD_LIBRARIES})
 	set(IIO_TESTS_TARGETS ${IIO_TESTS_TARGETS}
-		test_spf_tandem_session test_spf_tandem_metadata)
+		test_spf_tandem_session test_spf_tandem_metadata
+		test_spf_temperature_cache test_spf_buffer_layout)
+	list(APPEND IIO_TESTS_TARGETS test_spf_ddr_burst_request)
 endif()
 
 if(PTHREAD_LIBRARIES OR ANDROID)
@@ -90,6 +123,11 @@ if(PTHREAD_LIBRARIES OR ANDROID)
 endif()
 
 set_target_properties(${IIO_TESTS_TARGETS} iio_tests_helper PROPERTIES
+	C_STANDARD 99
+	C_STANDARD_REQUIRED ON
+	C_EXTENSIONS OFF
+)
+set_target_properties(test_iiod_command_batch test_metadata_batch_core PROPERTIES
 	C_STANDARD 99
 	C_STANDARD_REQUIRED ON
 	C_EXTENSIONS OFF

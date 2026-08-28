@@ -17,6 +17,7 @@ enum iio_backend_api_ver {
 	IIO_BACKEND_API_V1 = 1,
 	IIO_BACKEND_API_V2 = 2,
 	IIO_BACKEND_API_V3 = 3,
+	IIO_BACKEND_API_V4 = 4,
 };
 
 enum iio_attr_type {
@@ -80,6 +81,20 @@ struct iio_backend_ops {
 			uint32_t *mask, size_t words,
 			void *metadata, size_t metadata_capacity,
 			size_t *metadata_bytes);
+
+	/* API v4: prequeue existing metadata reads without changing their wire
+	 * response. request_frames is nonzero for the first response in a bounded
+	 * batch and zero while consuming the remaining prequeued responses. A v4
+	 * backend exposing these operations must also expose cancel(). */
+	ssize_t (*read_with_metadata_batch)(const struct iio_device *dev,
+			void *dst, size_t len, uint32_t *mask, size_t words,
+			void *metadata, size_t metadata_capacity,
+			size_t *metadata_bytes, unsigned int request_frames);
+	ssize_t (*get_buffer_with_metadata_batch)(const struct iio_device *dev,
+			void **addr_ptr, size_t bytes_used,
+			uint32_t *mask, size_t words,
+			void *metadata, size_t metadata_capacity,
+			size_t *metadata_bytes, unsigned int request_frames);
 };
 
 /**
