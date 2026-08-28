@@ -71,8 +71,10 @@ int main(void)
 
 	assert(spf_ddr_burst_validate_frame_period(0, 25000000) == -EINVAL);
 	assert(spf_ddr_burst_validate_frame_period(200000, 0) == -EINVAL);
-	assert(spf_ddr_burst_validate_frame_period(200000, 25000000) == 0);
-	assert(spf_ddr_burst_validate_frame_period(199999, 25000000) ==
+	assert(spf_ddr_burst_validate_frame_period(300000, 25000000) == 0);
+	assert(spf_ddr_burst_validate_frame_period(299999, 25000000) ==
+		-EOPNOTSUPP);
+	assert(spf_ddr_burst_validate_frame_period(250000, 25000000) ==
 		-EOPNOTSUPP);
 	assert(spf_ddr_burst_validate_frame_period(125000, 5000000) == 0);
 	assert(spf_ddr_burst_validate_frame_period(125000, 20500000) ==
