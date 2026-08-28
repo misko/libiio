@@ -17,6 +17,7 @@ struct mock_device {
 	uint32_t epoch;
 	uint32_t faults;
 	uint32_t overflow;
+	uint32_t acquire_transitions;
 	uint32_t transitions;
 	uint32_t lagged_transitions;
 	unsigned int lagged_status_reads;
@@ -90,7 +91,8 @@ static void fill_status(struct mock_device *mock,
 	status->ownership_epoch = mock->epoch;
 	status->fault_flags = mock->faults;
 	status->overflow_count = mock->overflow;
-	status->transition_count = mock->acquire_count ? mock->transitions : 0;
+	status->transition_count = mock->acquire_count ? mock->transitions :
+		mock->acquire_transitions;
 	status->minimum_gain_db = -20;
 	status->maximum_gain_db = 71;
 	status->initial_gain_db = 20;
@@ -190,6 +192,14 @@ static void test_request_decoder(void)
 	assert(decoded.magic == ADI_TANDEM_AGC_REQUEST_MAGIC);
 	assert(decoded.minimum_gain_db == -20);
 	assert(decoded.event_capacity == 16);
+	assert(spf_tandem_request_validate_event_window(&decoded, 65U * 1024U) ==
+		-ENOSPC);
+	decoded.cooldown_periods = 8;
+	assert(spf_tandem_request_validate_event_window(&decoded, 65U * 1024U) ==
+		0);
+	decoded.mode = ADI_TANDEM_AGC_MODE_HOLD;
+	assert(spf_tandem_request_validate_event_window(&decoded, UINT32_MAX) == 0);
+	assert(spf_tandem_request_validate_event_window(&decoded, 0) == -EINVAL);
 	assert(spf_tandem_request_decode(&decoded, wire, sizeof(wire) - 1) ==
 		-EINVAL);
 	wire[103] = 1;
@@ -316,12 +326,56 @@ static void test_status_snapshot_catches_up_to_event_fifo(void)
 	spf_tandem_session_close(&session);
 }
 
+static void test_status_counter_wraps_without_losing_continuity(void)
+{
+	uint8_t wire[104];
+	struct mock_device mock = {
+		.epoch = 14,
+		.acquire_transitions = 254,
+	};
+	struct spf_tandem_syscalls calls = mock_syscalls(&mock);
+	struct spf_tandem_session session;
+	struct adi_tandem_agc_event output[4];
+	size_t count;
+
+	valid_request(wire);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	mock.events[0] = (struct adi_tandem_agc_event){10, 255, 0x13, 20, 20};
+	mock.events[1] = (struct adi_tandem_agc_event){11, 256, 0x13, 21, 21};
+	mock.event_count = 2;
+	mock.transitions = 0;
+	assert(spf_tandem_session_collect(&session, 0, 100,
+		output, 4, &count) == 0);
+	assert(count == 2);
+	assert(session.status.transition_count == 256);
+	spf_tandem_session_close(&session);
+
+	memset(&mock, 0, sizeof(mock));
+	mock.epoch = 15;
+	mock.acquire_transitions = 255;
+	calls = mock_syscalls(&mock);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	mock.events[0] = (struct adi_tandem_agc_event){10, 256, 0x13, 20, 20};
+	mock.event_count = 1;
+	mock.transitions = 255;
+	mock.lagged_transitions = 255;
+	mock.lagged_status_reads = 5;
+	assert(spf_tandem_session_collect(&session, 0, 100,
+		output, 4, &count) == 0);
+	assert(count == 1 && mock.status_count == 4);
+	assert(session.status.transition_count == 256);
+	spf_tandem_session_close(&session);
+}
+
 int main(void)
 {
 	test_request_decoder();
 	test_lifecycle_and_partition();
 	test_sequence_and_status_faults_fail_closed();
 	test_status_snapshot_catches_up_to_event_fifo();
+	test_status_counter_wraps_without_losing_continuity();
 	puts("SPF tandem session tests passed");
 	return 0;
 }
