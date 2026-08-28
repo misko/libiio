@@ -11,9 +11,11 @@
 
 #include <errno.h>
 #include <iio.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -24,12 +26,11 @@
 #define SPF_IIOD_OBSERVATION_INTERVAL_MAX UINT32_C(32768)
 #define SPF_IIOD_OBSERVATION_INTERVAL_MIN UINT32_C(1024)
 /*
- * The sampler performs several AD9361 control-plane reads before it can
- * acknowledge a capture fence.  Those reads normally finish just below
- * 100 ms on Pluto+, leaving effectively no scheduler or network-daemon
- * margin.  Keep the fence finite, but allow one bounded 500 ms control-plane
- * interval so an otherwise valid metadata refill is not rejected solely by
- * transient device-side scheduling latency.
+ * The sampler acknowledges a new capture only after its SCHED_OTHER worker
+ * reaches the next observation boundary.  A preceding AD9361 control-plane
+ * observation or radio CPU contention can delay that acknowledgement, so the
+ * original 100 ms fence had no adequate scheduling margin under a maximum-size
+ * network refill.  Keep the fence finite, but allow a bounded 500 ms interval.
  */
 #define SPF_IIOD_SAMPLER_SYNC_TIMEOUT_MS UINT32_C(500)
 
@@ -59,6 +60,31 @@ static uint64_t make_stream_id(const void *address)
 	value ^= (uint64_t)(uintptr_t)address;
 	value ^= (uint64_t)(unsigned int)getpid() << 32;
 	return value ? value : UINT64_C(1);
+}
+
+static uint64_t monotonic_now_ns(void)
+{
+	struct timespec now = {0, 0};
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return 0;
+	return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+		(uint64_t)now.tv_nsec;
+}
+
+static int sampler_sync_failed(const struct spf_iiod_metadata_context *ctx,
+		const char *phase, uint64_t started_ns)
+{
+	const uint64_t finished_ns = monotonic_now_ns();
+	const uint64_t elapsed_us = started_ns && finished_ns >= started_ns ?
+		(finished_ns - started_ns) / UINT64_C(1000) : 0;
+
+	fprintf(stderr,
+		"iiod metadata sampler %s synchronization failed: refill=%" PRIu64
+		" samples_per_channel=%u elapsed_us=%" PRIu64 " deadline_ms=%u\n",
+		phase, ctx->refills_started, ctx->samples_per_channel, elapsed_us,
+		SPF_IIOD_SAMPLER_SYNC_TIMEOUT_MS);
+	fflush(stderr);
+	return -ETIMEDOUT;
 }
 
 static uint32_t observation_interval(size_t samples_count)
@@ -153,6 +179,7 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 int iiod_buffer_metadata_before_refill(void *provider_context)
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
+	uint64_t started_ns;
 
 	if (!ctx)
 		return -EINVAL;
@@ -160,11 +187,13 @@ int iiod_buffer_metadata_before_refill(void *provider_context)
 	 * re-enqueues exactly one consumed block before dequeuing another. Reset,
 	 * rather than accumulate, one frame plus one bounded arm-safety window.
 	 */
-	if (ctx->refills_started != 0 &&
-		!spf_gain_sampler_limit_and_wait_started(&ctx->sampler,
-			(uint64_t)ctx->samples_per_channel * 2U,
-			SPF_IIOD_SAMPLER_SYNC_TIMEOUT_MS))
-		return -ETIMEDOUT;
+	if (ctx->refills_started != 0) {
+		started_ns = monotonic_now_ns();
+		if (!spf_gain_sampler_limit_and_wait_started(&ctx->sampler,
+				(uint64_t)ctx->samples_per_channel * 2U,
+				SPF_IIOD_SAMPLER_SYNC_TIMEOUT_MS))
+			return sampler_sync_failed(ctx, "start", started_ns);
+	}
 	ctx->refills_started++;
 	return 0;
 }
@@ -172,13 +201,17 @@ int iiod_buffer_metadata_before_refill(void *provider_context)
 int iiod_buffer_metadata_after_refill(void *provider_context)
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
+	uint64_t started_ns;
 
 	if (!ctx)
 		return -EINVAL;
 	if (ctx->refills_started <= 1)
 		return 0;
-	return spf_gain_sampler_finish_capture(
-		&ctx->sampler, SPF_IIOD_SAMPLER_SYNC_TIMEOUT_MS) ? 0 : -ETIMEDOUT;
+	started_ns = monotonic_now_ns();
+	if (!spf_gain_sampler_finish_capture(
+			&ctx->sampler, SPF_IIOD_SAMPLER_SYNC_TIMEOUT_MS))
+		return sampler_sync_failed(ctx, "finish", started_ns);
+	return 0;
 }
 
 void iiod_buffer_metadata_close(void *provider_context)
