@@ -151,6 +151,14 @@ static bool size_add(size_t left, size_t right, size_t *result)
 	return true;
 }
 
+static bool uint64_add(uint64_t left, uint64_t right, uint64_t *result)
+{
+	if (left > UINT64_MAX - right)
+		return false;
+	*result = left + right;
+	return true;
+}
+
 static bool align_size(size_t value, size_t alignment, size_t *result)
 {
 	size_t rounded;
@@ -282,11 +290,9 @@ static int burst_prepare(struct iiod_burst_cache *cache,
 		!size_add(descriptor_bytes, metadata_bytes, &offset) ||
 		!size_add(offset, iq_bytes, &mapping_bytes))
 		return -EOVERFLOW;
-	if ((uint64_t)mapping_bytes > UINT64_MAX -
-			IIOD_BURST_MEMORY_RESERVE_BYTES)
+	if (!uint64_add((uint64_t)mapping_bytes,
+			IIOD_BURST_MEMORY_RESERVE_BYTES, &required_available))
 		return -EOVERFLOW;
-	required_available = (uint64_t)mapping_bytes +
-		IIOD_BURST_MEMORY_RESERVE_BYTES;
 	if ((uint64_t)raw_frame_bytes > UINT64_MAX / kernel_buffers)
 		return -EOVERFLOW;
 	required_cma = (uint64_t)raw_frame_bytes * kernel_buffers;
