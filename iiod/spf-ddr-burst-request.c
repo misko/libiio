@@ -44,3 +44,17 @@ int spf_ddr_burst_request_decode(struct spf_ddr_burst_request *destination,
 		return -EINVAL;
 	return 0;
 }
+
+int spf_ddr_burst_validate_frame_period(uint32_t samples_per_channel,
+	uint32_t sample_rate_hz)
+{
+	uint64_t frame_sample_us;
+	uint64_t minimum_sample_us;
+
+	if (!samples_per_channel || !sample_rate_hz)
+		return -EINVAL;
+	frame_sample_us = (uint64_t)samples_per_channel * UINT64_C(1000000);
+	minimum_sample_us = (uint64_t)sample_rate_hz *
+		SPF_DDR_BURST_MIN_FRAME_DURATION_US;
+	return frame_sample_us >= minimum_sample_us ? 0 : -EOPNOTSUPP;
+}

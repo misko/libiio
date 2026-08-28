@@ -68,5 +68,15 @@ int main(void)
 	assert(spf_ddr_burst_request_decode(&request, wire, sizeof(wire)) == -EINVAL);
 	build_request(wire, 0);
 	assert(spf_ddr_burst_request_decode(&request, wire, sizeof(wire)) == -EINVAL);
+
+	assert(spf_ddr_burst_validate_frame_period(0, 25000000) == -EINVAL);
+	assert(spf_ddr_burst_validate_frame_period(200000, 0) == -EINVAL);
+	assert(spf_ddr_burst_validate_frame_period(200000, 25000000) == 0);
+	assert(spf_ddr_burst_validate_frame_period(199999, 25000000) ==
+		-EOPNOTSUPP);
+	assert(spf_ddr_burst_validate_frame_period(125000, 5000000) == 0);
+	assert(spf_ddr_burst_validate_frame_period(125000, 20500000) ==
+		-EOPNOTSUPP);
+	assert(spf_ddr_burst_validate_frame_period(1000000, 61440000) == 0);
 	return 0;
 }
