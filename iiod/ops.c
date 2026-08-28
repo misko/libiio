@@ -47,6 +47,41 @@ struct ThdEntry {
 };
 
 #define IIOD_MAX_BUFFER_METADATA_BYTES (64U * 1024U)
+/*
+ * The local context is shared by every IIOD connection.  Each newly created
+ * network context sends its default timeout to that shared context, so an
+ * unrelated connection can otherwise shorten an active metadata refill to
+ * 1-2.5 seconds.  ABI-1 accepts up to 4,194,304 samples/channel; at the lowest
+ * supported AD9361 rate one frame spans just over eight seconds.  Keep active
+ * metadata DMA dequeues above that duration while retaining a finite 15-second
+ * stuck-device bound.  Client disconnect still cancels the buffer immediately.
+ */
+#define IIOD_METADATA_LOCAL_IO_TIMEOUT_MIN_MS 15000U
+
+static pthread_mutex_t metadata_timeout_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned int metadata_timeout_floor_users;
+
+static int metadata_timeout_floor_acquire(struct iio_context *ctx)
+{
+	int ret;
+
+	pthread_mutex_lock(&metadata_timeout_lock);
+	ret = iio_context_set_timeout(ctx,
+		IIOD_METADATA_LOCAL_IO_TIMEOUT_MIN_MS);
+	if (ret == 0)
+		metadata_timeout_floor_users++;
+	pthread_mutex_unlock(&metadata_timeout_lock);
+
+	return ret;
+}
+
+static void metadata_timeout_floor_release(void)
+{
+	pthread_mutex_lock(&metadata_timeout_lock);
+	if (metadata_timeout_floor_users != 0U)
+		metadata_timeout_floor_users--;
+	pthread_mutex_unlock(&metadata_timeout_lock);
+}
 
 static void thd_entry_event_signal(struct ThdEntry *thd)
 {
@@ -107,6 +142,7 @@ struct DevEntry {
 	bool closed;
 	bool cancelled;
 	bool metadata_enabled;
+	bool metadata_timeout_floor_active;
 
 	/* Linked list of ThdEntry structures corresponding
 	 * to all the threads who opened the device */
@@ -862,6 +898,10 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		iiod_buffer_metadata_close(entry->metadata_provider_context);
 		entry->metadata_provider_context = NULL;
 	}
+	if (entry->metadata_timeout_floor_active) {
+		metadata_timeout_floor_release();
+		entry->metadata_timeout_floor_active = false;
+	}
 	entry->closed = true;
 	pthread_mutex_unlock(&entry->thdlist_lock);
 
@@ -1200,6 +1240,13 @@ retry:
 			pthread_mutex_unlock(&devlist_lock);
 			goto err_free_entry_mask;
 		}
+		ret = metadata_timeout_floor_acquire(
+			(struct iio_context *)iio_device_get_context(dev));
+		if (ret < 0) {
+			pthread_mutex_unlock(&devlist_lock);
+			goto err_free_entry_mask;
+		}
+		entry->metadata_timeout_floor_active = true;
 	}
 
 	pthread_mutex_init(&entry->thdlist_lock, NULL);
@@ -1235,6 +1282,10 @@ retry:
 err_free_entry_mask:
 	if (entry->metadata_provider_context)
 		iiod_buffer_metadata_close(entry->metadata_provider_context);
+	if (entry->metadata_timeout_floor_active) {
+		metadata_timeout_floor_release();
+		entry->metadata_timeout_floor_active = false;
+	}
 	free(entry->mask);
 err_free_entry:
 	free(entry);
@@ -1482,7 +1533,15 @@ ssize_t get_trigger(struct parser_pdata *pdata, struct iio_device *dev)
 
 int set_timeout(struct parser_pdata *pdata, unsigned int timeout)
 {
-	int ret = iio_context_set_timeout(pdata->ctx, timeout);
+	unsigned int effective = timeout;
+	int ret;
+
+	pthread_mutex_lock(&metadata_timeout_lock);
+	if (metadata_timeout_floor_users != 0U &&
+			effective < IIOD_METADATA_LOCAL_IO_TIMEOUT_MIN_MS)
+		effective = IIOD_METADATA_LOCAL_IO_TIMEOUT_MIN_MS;
+	ret = iio_context_set_timeout(pdata->ctx, effective);
+	pthread_mutex_unlock(&metadata_timeout_lock);
 	print_value(pdata, ret);
 	return ret;
 }

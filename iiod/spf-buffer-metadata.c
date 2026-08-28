@@ -25,14 +25,10 @@
 #define SPF_IIOD_OBSERVATION_CAPACITY UINT16_C(64)
 #define SPF_IIOD_OBSERVATION_INTERVAL_MAX UINT32_C(32768)
 #define SPF_IIOD_OBSERVATION_INTERVAL_MIN UINT32_C(1024)
-/*
- * The sampler acknowledges a new capture only after its SCHED_OTHER worker
- * reaches the next observation boundary.  A preceding AD9361 control-plane
- * observation or radio CPU contention can delay that acknowledgement, so the
- * original 100 ms fence had no adequate scheduling margin under a maximum-size
- * network refill.  Keep the fence finite, but allow a bounded 500 ms interval.
+/* Sampler start/finish are short control-plane fences, independent of the
+ * longer DMA block-dequeue bound enforced by iiod/ops.c.
  */
-#define SPF_IIOD_SAMPLER_SYNC_TIMEOUT_MS UINT32_C(500)
+#define SPF_IIOD_SAMPLER_SYNC_TIMEOUT_MS UINT32_C(100)
 
 struct spf_iiod_metadata_context {
 	struct iio_device *rx;
