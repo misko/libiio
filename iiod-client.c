@@ -902,6 +902,32 @@ ssize_t iiod_client_read_with_metadata_unlocked(
 		dst, len, mask, words, metadata, metadata_capacity, metadata_bytes, 1);
 }
 
+ssize_t iiod_client_get_buffer_metadata_status_unlocked(
+		struct iiod_client *client, struct iiod_client_pdata *desc,
+		const struct iio_device *dev, void *status, size_t status_capacity)
+{
+	char command[1024];
+	int response_bytes;
+	ssize_t ret;
+
+	if (!status || !status_capacity)
+		return -EINVAL;
+	iio_snprintf(command, sizeof(command), "READBUFMSTAT %s %lu\r\n",
+		iio_device_get_id(dev), (unsigned long)status_capacity);
+	ret = iiod_client_write_all(client, desc, command, strlen(command));
+	if (ret < 0)
+		return ret;
+	ret = iiod_client_read_integer(client, desc, &response_bytes);
+	if (ret < 0)
+		return ret;
+	if (response_bytes < 0)
+		return response_bytes;
+	if (!response_bytes || (size_t)response_bytes > status_capacity)
+		return -EOVERFLOW;
+	ret = iiod_client_read_all(client, desc, status, (size_t)response_bytes);
+	return ret < 0 ? ret : response_bytes;
+}
+
 ssize_t iiod_client_write_unlocked(struct iiod_client *client,
 				   struct iiod_client_pdata *desc,
 				   const struct iio_device *dev,

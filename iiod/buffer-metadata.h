@@ -11,6 +11,9 @@ struct iio_device;
 
 struct iiod_buffer_burst_plan {
 	uint64_t requested_iq_bytes;
+	uint64_t ring_capacity_iq_bytes;
+	uint64_t ring_capture_frames;
+	uint32_t ring_flags;
 	size_t metadata_capacity;
 };
 

@@ -4,6 +4,7 @@
 #include "buffer-metadata.h"
 #include "spf-buffer-layout.h"
 #include "spf-ddr-burst-request.h"
+#include "spf-ddr-ring-request.h"
 #include "spf-tandem-metadata.h"
 #include "spf-tandem-session.h"
 #include "spf-temperature-cache.h"
@@ -50,6 +51,7 @@ struct spf_iiod_metadata_context {
 	bool timestamp_configured;
 	bool tandem_initialized;
 	bool burst_enabled;
+	bool ring_enabled;
 };
 
 static uint64_t make_stream_id(const void *address)
@@ -81,6 +83,7 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		struct iiod_buffer_burst_plan *burst_plan)
 {
 	struct spf_ddr_burst_request burst_request;
+	struct spf_ddr_ring_request ring_request;
 	struct spf_iiod_metadata_context *ctx;
 	const struct iio_context *iio_ctx;
 	struct iio_channel *rx0;
@@ -98,6 +101,14 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		ret = spf_ddr_burst_request_decode(&burst_request,
 			(const uint8_t *)request + sizeof(struct adi_tandem_agc_request_v1),
 			SPF_DDR_BURST_REQUEST_BYTES);
+		if (ret)
+			return ret;
+		tandem_request_bytes = sizeof(struct adi_tandem_agc_request_v1);
+	} else if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
+			SPF_DDR_RING_REQUEST_BYTES) {
+		ret = spf_ddr_ring_request_decode(&ring_request,
+			(const uint8_t *)request + sizeof(struct adi_tandem_agc_request_v1),
+			SPF_DDR_RING_REQUEST_BYTES);
 		if (ret)
 			return ret;
 		tandem_request_bytes = sizeof(struct adi_tandem_agc_request_v1);
@@ -140,7 +151,10 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		return ret;
 	}
 	ctx->tandem_initialized = true;
-	ctx->burst_enabled = tandem_request_bytes != request_bytes;
+	ctx->burst_enabled = request_bytes == tandem_request_bytes +
+		SPF_DDR_BURST_REQUEST_BYTES;
+	ctx->ring_enabled = request_bytes == tandem_request_bytes +
+		SPF_DDR_RING_REQUEST_BYTES;
 	ctx->layout = layout;
 	ctx->rx = (struct iio_device *)dev;
 	iio_ctx = iio_device_get_context(dev);
@@ -150,7 +164,7 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		free(ctx);
 		return -ENOTSUP;
 	}
-	if (ctx->burst_enabled) {
+	if (ctx->burst_enabled || ctx->ring_enabled) {
 		rx0 = iio_device_find_channel(ctx->phy, "voltage0", false);
 		if (!rx0 || iio_channel_attr_read_longlong(rx0,
 				"sampling_frequency", &sample_rate_hz) != 0 ||
@@ -162,7 +176,7 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			(uint32_t)sample_rate_hz);
 		if (ret) {
 			fprintf(stderr,
-				"SPF DDR burst frame period is unsupported: samples=%zu "
+				"SPF DDR buffered frame period is unsupported: samples=%zu "
 				"rate=%lld minimum_us=%u error=%d\n",
 				samples_count, sample_rate_hz,
 				SPF_DDR_BURST_MIN_FRAME_DURATION_US, ret);
@@ -200,8 +214,15 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 
 	*provider_context = ctx;
 	*extra_samples = ctx->layout.extra_samples;
-	if (ctx->burst_enabled) {
-		burst_plan->requested_iq_bytes = burst_request.requested_iq_bytes;
+	if (ctx->burst_enabled || ctx->ring_enabled) {
+		if (ctx->burst_enabled) {
+			burst_plan->requested_iq_bytes =
+				burst_request.requested_iq_bytes;
+		} else {
+			burst_plan->ring_capacity_iq_bytes = ring_request.capacity_iq_bytes;
+			burst_plan->ring_capture_frames = ring_request.capture_frames;
+			burst_plan->ring_flags = ring_request.flags;
+		}
 		burst_plan->metadata_capacity = spf_radio_frame_v5_header_bytes(
 			(uint16_t)ctx->tandem.request.observation_capacity,
 			(uint16_t)ctx->tandem.request.event_capacity);
@@ -327,10 +348,10 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (raw_bytes != ctx->layout.raw_bytes) {
 		fprintf(stderr,
 			"SPF metadata raw frame mismatch: expected=%zu observed=%zu "
-			"frame=%llu burst=%u\n",
+			"frame=%llu buffered=%u\n",
 			ctx->layout.raw_bytes, raw_bytes,
 			(unsigned long long)ctx->frames_emitted,
-			ctx->burst_enabled ? 1U : 0U);
+			(ctx->burst_enabled || ctx->ring_enabled) ? 1U : 0U);
 		return -EIO;
 	}
 
@@ -342,7 +363,8 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		first_sample_sequence, ctx->samples_per_channel, observations,
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		&observation_overflow_count);
-	if (ctx->burst_enabled && observation_overflow_count) {
+	if ((ctx->burst_enabled || ctx->ring_enabled) &&
+			observation_overflow_count) {
 		fprintf(stderr,
 			"SPF metadata gain observation overflow: count=%u frame=%llu\n",
 			observation_overflow_count,
@@ -361,10 +383,10 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (frame_decision != SPF_GAIN_FRAME_ACCEPT) {
 		fprintf(stderr,
 			"SPF metadata frame has no gain coverage: frame=%llu "
-			"observations=%u startup_discards=%u burst=%u\n",
+			"observations=%u startup_discards=%u buffered=%u\n",
 			(unsigned long long)ctx->frames_emitted, observation_count,
 			ctx->startup_frames_discarded,
-			ctx->burst_enabled ? 1U : 0U);
+			(ctx->burst_enabled || ctx->ring_enabled) ? 1U : 0U);
 		return -ENODATA;
 	}
 	if (!spf_gain_sampler_collect_rssi(&ctx->sampler,
@@ -372,11 +394,11 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			&rssi_start, &rssi_end, &rssi_overflow_count)) {
 		fprintf(stderr,
 			"SPF metadata frame has no RSSI coverage: frame=%llu "
-			"first_sample=%llu samples=%u observations=%u burst=%u\n",
+			"first_sample=%llu samples=%u observations=%u buffered=%u\n",
 			(unsigned long long)ctx->frames_emitted,
 			(unsigned long long)first_sample_sequence,
 			ctx->samples_per_channel, observation_count,
-			ctx->burst_enabled ? 1U : 0U);
+			(ctx->burst_enabled || ctx->ring_enabled) ? 1U : 0U);
 		return -ENODATA;
 	}
 	if (rssi_overflow_count) {
@@ -401,7 +423,8 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			ctx->samples_per_channel, &sequence);
 	if (ret)
 		return ret;
-	if (ctx->burst_enabled && sequence.missing_samples_before) {
+	if ((ctx->burst_enabled || ctx->ring_enabled) &&
+			sequence.missing_samples_before) {
 		fprintf(stderr,
 			"SPF metadata burst counter gap: frame=%llu first_sample=%llu "
 			"missing=%llu\n",

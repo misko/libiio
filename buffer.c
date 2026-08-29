@@ -223,6 +223,23 @@ int iio_buffer_set_metadata_batch_size(struct iio_buffer *buffer,
 	return 0;
 }
 
+ssize_t iio_buffer_get_metadata_status(struct iio_buffer *buffer,
+		void *status, size_t status_capacity)
+{
+	const struct iio_backend_ops *ops;
+
+	if (!buffer || !status || !status_capacity)
+		return -EINVAL;
+	if (!buffer->metadata_enabled)
+		return -EINVAL;
+	ops = buffer->dev->ctx->ops;
+	if (buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V5 ||
+		!ops->get_buffer_metadata_status)
+		return -ENOSYS;
+	return ops->get_buffer_metadata_status(buffer->dev, status,
+		status_capacity);
+}
+
 void iio_buffer_destroy(struct iio_buffer *buffer)
 {
 	iio_device_close(buffer->dev);
