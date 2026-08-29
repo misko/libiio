@@ -106,13 +106,9 @@ struct iiod_ddr_ring {
 	size_t metadata_capacity;
 	uint64_t requested_iq_bytes;
 	uint64_t admitted_iq_bytes;
-	uint64_t last_contiguous_sample_sequence;
-	uint64_t first_unavailable_sample_sequence;
 	bool reservation_held;
 	bool producer_started;
 	bool producer_exited;
-	bool last_contiguous_valid;
-	bool first_unavailable_valid;
 };
 
 static pthread_mutex_t burst_reservation_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -1322,18 +1318,19 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 	while (!thread_pool_is_stopped(pool)) {
 		ssize_t metadata_len;
 		uint64_t first_sample_sequence = 0;
-		uint64_t exclusive_boundary = 0;
 		void *raw_start;
 		size_t iq_offset = 0;
 		size_t iq_bytes = 0;
 		ssize_t raw_bytes;
 		size_t slot;
 		int ret;
+		bool prefix_complete;
 
 		pthread_mutex_lock(&entry->ring_lock);
 		while ((ret = iiod_ddr_ring_core_producer_reserve(
 				&ring->core, &slot)) == -EAGAIN)
 			pthread_cond_wait(&entry->ring_ready_cond, &entry->ring_lock);
+		prefix_complete = iiod_ddr_ring_core_prefix_complete(&ring->core);
 		pthread_mutex_unlock(&entry->ring_lock);
 		if (ret == -ESHUTDOWN || ret == -ENODATA)
 			break;
@@ -1341,6 +1338,8 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 			error = ret;
 			break;
 		}
+		iiod_buffer_metadata_ring_prefix_complete(
+			entry->metadata_provider_context, prefix_complete);
 
 		ret = iiod_buffer_metadata_before_refill(
 			entry->metadata_provider_context);
@@ -1384,9 +1383,8 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 			error = (int)metadata_len;
 			if (entry->metadata_extra_samples) {
 				pthread_mutex_lock(&entry->ring_lock);
-				ring->first_unavailable_sample_sequence =
-					first_sample_sequence;
-				ring->first_unavailable_valid = true;
+				iiod_ddr_ring_core_mark_unavailable(&ring->core,
+					first_sample_sequence);
 				pthread_mutex_unlock(&entry->ring_lock);
 			}
 			goto abort_slot;
@@ -1404,12 +1402,9 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 
 		pthread_mutex_lock(&entry->ring_lock);
 		ret = iiod_ddr_ring_core_producer_commit(&ring->core);
-		if (!ret && entry->metadata_extra_samples &&
-				!spf_ddr_ring_exclusive_boundary(first_sample_sequence,
-					entry->samples_count, &exclusive_boundary)) {
-			ring->last_contiguous_sample_sequence = exclusive_boundary;
-			ring->last_contiguous_valid = true;
-		}
+		if (!ret && entry->metadata_extra_samples)
+			ret = iiod_ddr_ring_core_observe_samples(&ring->core,
+				first_sample_sequence, entry->samples_count);
 		pthread_cond_broadcast(&entry->ring_ready_cond);
 		pthread_mutex_unlock(&entry->ring_lock);
 		if (ret) {
@@ -1689,7 +1684,8 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				pthread_mutex_lock(&entry->ring_lock);
 				while (entry->ring.core.state ==
 						SPF_DDR_RING_STATE_RUNNING &&
-						!entry->ring.core.occupied)
+						!iiod_ddr_ring_core_consumer_ready(
+							&entry->ring.core))
 					pthread_cond_wait(&entry->ring_ready_cond,
 						&entry->ring_lock);
 				pthread_mutex_unlock(&entry->ring_lock);
@@ -1701,6 +1697,8 @@ static void rw_thd(struct thread_pool *pool, void *d)
 					if (!thd->active || thd->is_writer)
 						continue;
 					ret = send_ring_data(entry, thd);
+					if (ret == -EAGAIN)
+						continue;
 					if (ret > 0)
 						thd->nb -= (unsigned int)ret;
 					if (ret < 0 || thd->nb < sample_size)
@@ -2467,17 +2465,17 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 			status.wrap_count = entry->ring.core.wrap_count;
 			status.producer_position = entry->ring.core.producer_position;
 			status.consumer_position = entry->ring.core.consumer_position;
-			if (entry->ring.last_contiguous_valid) {
+			if (entry->ring.core.last_contiguous_valid) {
 				status.valid_fields |=
 					SPF_DDR_RING_STATUS_VALID_LAST_CONTIGUOUS;
 				status.last_contiguous_sample_sequence =
-					entry->ring.last_contiguous_sample_sequence;
+					entry->ring.core.last_contiguous_sample_sequence;
 			}
-			if (entry->ring.first_unavailable_valid) {
+			if (entry->ring.core.first_unavailable_valid) {
 				status.valid_fields |=
 					SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE;
 				status.first_unavailable_sample_sequence =
-					entry->ring.first_unavailable_sample_sequence;
+					entry->ring.core.first_unavailable_sample_sequence;
 			}
 			ret = spf_ddr_ring_status_encode(wire_status,
 				sizeof(wire_status), &status);

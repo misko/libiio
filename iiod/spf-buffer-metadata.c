@@ -52,7 +52,15 @@ struct spf_iiod_metadata_context {
 	bool tandem_initialized;
 	bool burst_enabled;
 	bool ring_enabled;
+	bool ring_prefix_complete;
 };
+
+static bool buffered_capture_is_strict(
+	const struct spf_iiod_metadata_context *ctx)
+{
+	return ctx->burst_enabled ||
+		(ctx->ring_enabled && !ctx->ring_prefix_complete);
+}
 
 static uint64_t make_stream_id(const void *address)
 {
@@ -299,6 +307,15 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 	return spf_tandem_session_heartbeat(&ctx->tandem);
 }
 
+void iiod_buffer_metadata_ring_prefix_complete(void *provider_context,
+	bool complete)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+
+	if (ctx && ctx->ring_enabled)
+		ctx->ring_prefix_complete = complete;
+}
+
 void iiod_buffer_metadata_close(void *provider_context)
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
@@ -363,7 +380,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		first_sample_sequence, ctx->samples_per_channel, observations,
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		&observation_overflow_count);
-	if ((ctx->burst_enabled || ctx->ring_enabled) &&
+	if (buffered_capture_is_strict(ctx) &&
 			observation_overflow_count) {
 		fprintf(stderr,
 			"SPF metadata gain observation overflow: count=%u frame=%llu\n",
@@ -423,15 +440,25 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			ctx->samples_per_channel, &sequence);
 	if (ret)
 		return ret;
-	if ((ctx->burst_enabled || ctx->ring_enabled) &&
+	if (buffered_capture_is_strict(ctx) &&
 			sequence.missing_samples_before) {
 		fprintf(stderr,
-			"SPF metadata burst counter gap: frame=%llu first_sample=%llu "
+			"SPF metadata strict buffered counter gap: frame=%llu "
+			"first_sample=%llu "
 			"missing=%llu\n",
 			(unsigned long long)ctx->frames_emitted,
 			(unsigned long long)first_sample_sequence,
 			(unsigned long long)sequence.missing_samples_before);
 		return -EOVERFLOW;
+	}
+	if (sequence.missing_samples_before) {
+		fprintf(stderr,
+			"SPF metadata streaming counter gap accounted: frame=%llu "
+			"first_sample=%llu missing=%llu ring_prefix_complete=%u\n",
+			(unsigned long long)ctx->frames_emitted,
+			(unsigned long long)first_sample_sequence,
+			(unsigned long long)sequence.missing_samples_before,
+			ctx->ring_prefix_complete ? 1U : 0U);
 	}
 	const spf_radio_frame_v6_args_t args = {
 		.frame = {
@@ -466,7 +493,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 				.valid = rssi_end.valid,
 				.duration_ns = rssi_end.duration_ns,
 			},
-			.device_iio_overflow = false,
+			.device_iio_overflow = sequence.missing_samples_before != 0,
 		},
 		.tandem_status = &ctx->tandem.status,
 		.ad9361_temperature_mdeg_c = ctx->temperature_sampler_started ?
