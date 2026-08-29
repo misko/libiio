@@ -51,6 +51,9 @@ struct spf_ddr_ring_status {
 	uint64_t first_unavailable_sample_sequence;
 };
 
+int spf_ddr_ring_exclusive_boundary(uint64_t first_sample_sequence,
+	uint64_t samples_per_frame, uint64_t *exclusive_boundary);
+
 int spf_ddr_ring_status_encode(void *wire_status, size_t wire_bytes,
 	const struct spf_ddr_ring_status *source);
 int spf_ddr_ring_status_decode(struct spf_ddr_ring_status *destination,

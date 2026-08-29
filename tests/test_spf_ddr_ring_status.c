@@ -11,6 +11,7 @@
 int main(void)
 {
 	uint8_t wire[SPF_DDR_RING_STATUS_BYTES];
+	uint64_t exclusive_boundary;
 	struct spf_ddr_ring_status decoded;
 	const struct spf_ddr_ring_status status = {
 		.state = SPF_DDR_RING_STATE_FAILED,
@@ -47,5 +48,16 @@ int main(void)
 			.produced_frames = 1,
 			.consumed_frames = 2,
 		}) == -EINVAL);
+	assert(spf_ddr_ring_exclusive_boundary(1000, 1000000,
+		&exclusive_boundary) == 0);
+	assert(exclusive_boundary == UINT64_C(1001000));
+	assert(spf_ddr_ring_exclusive_boundary(UINT64_MAX - 3U, 3,
+		&exclusive_boundary) == 0);
+	assert(exclusive_boundary == UINT64_MAX);
+	assert(spf_ddr_ring_exclusive_boundary(UINT64_MAX - 3U, 4,
+		&exclusive_boundary) == -EOVERFLOW);
+	assert(spf_ddr_ring_exclusive_boundary(0, 0, &exclusive_boundary) ==
+		-EINVAL);
+	assert(spf_ddr_ring_exclusive_boundary(0, 1, NULL) == -EINVAL);
 	return 0;
 }

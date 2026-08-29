@@ -55,6 +55,17 @@ static bool status_values_valid(const struct spf_ddr_ring_status *status)
 	return true;
 }
 
+int spf_ddr_ring_exclusive_boundary(uint64_t first_sample_sequence,
+	uint64_t samples_per_frame, uint64_t *exclusive_boundary)
+{
+	if (!exclusive_boundary || !samples_per_frame)
+		return -EINVAL;
+	if (first_sample_sequence > UINT64_MAX - samples_per_frame)
+		return -EOVERFLOW;
+	*exclusive_boundary = first_sample_sequence + samples_per_frame;
+	return 0;
+}
+
 int spf_ddr_ring_status_encode(void *wire_status, size_t wire_bytes,
 	const struct spf_ddr_ring_status *source)
 {

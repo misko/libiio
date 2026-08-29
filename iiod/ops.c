@@ -1322,6 +1322,7 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 	while (!thread_pool_is_stopped(pool)) {
 		ssize_t metadata_len;
 		uint64_t first_sample_sequence = 0;
+		uint64_t exclusive_boundary = 0;
 		void *raw_start;
 		size_t iq_offset = 0;
 		size_t iq_bytes = 0;
@@ -1403,11 +1404,10 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 
 		pthread_mutex_lock(&entry->ring_lock);
 		ret = iiod_ddr_ring_core_producer_commit(&ring->core);
-		if (!ret && entry->metadata_extra_samples && entry->samples_count &&
-				first_sample_sequence <= UINT64_MAX -
-					((uint64_t)entry->samples_count - 1U)) {
-			ring->last_contiguous_sample_sequence = first_sample_sequence +
-				(uint64_t)entry->samples_count - 1U;
+		if (!ret && entry->metadata_extra_samples &&
+				!spf_ddr_ring_exclusive_boundary(first_sample_sequence,
+					entry->samples_count, &exclusive_boundary)) {
+			ring->last_contiguous_sample_sequence = exclusive_boundary;
 			ring->last_contiguous_valid = true;
 		}
 		pthread_cond_broadcast(&entry->ring_ready_cond);
