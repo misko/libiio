@@ -2,6 +2,7 @@
 #ifndef __IIOD_BUFFER_METADATA_H__
 #define __IIOD_BUFFER_METADATA_H__
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -35,6 +36,12 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 		unsigned int kernel_buffers_count);
 int iiod_buffer_metadata_before_refill(void *provider_context);
 int iiod_buffer_metadata_after_refill(void *provider_context);
+/* A finite DDR ring calls this with true only after its strict admitted prefix
+ * is committed. Providers may then encode source gaps instead of rejecting the
+ * remaining pressure-limited stream; sealed bursts remain strict throughout.
+ */
+void iiod_buffer_metadata_ring_prefix_complete(void *provider_context,
+	bool complete);
 void iiod_buffer_metadata_close(void *provider_context);
 ssize_t iiod_buffer_metadata_get(void *provider_context,
 		const struct iio_device *dev, const struct iio_buffer *buffer,
