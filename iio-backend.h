@@ -18,6 +18,7 @@ enum iio_backend_api_ver {
 	IIO_BACKEND_API_V2 = 2,
 	IIO_BACKEND_API_V3 = 3,
 	IIO_BACKEND_API_V4 = 4,
+	IIO_BACKEND_API_V5 = 5,
 };
 
 enum iio_attr_type {
@@ -95,6 +96,11 @@ struct iio_backend_ops {
 			uint32_t *mask, size_t words,
 			void *metadata, size_t metadata_capacity,
 			size_t *metadata_bytes, unsigned int request_frames);
+
+	/* API v5: retrieve the provider-owned status blob for an open metadata
+	 * buffer without changing the refill stream. */
+	ssize_t (*get_buffer_metadata_status)(const struct iio_device *dev,
+			void *status, size_t status_capacity);
 };
 
 /**

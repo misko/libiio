@@ -113,6 +113,8 @@ ssize_t rw_dev(struct parser_pdata *pdata, struct iio_device *dev,
 ssize_t rw_dev_with_metadata(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t nb,
 		size_t metadata_capacity);
+ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t status_capacity);
 
 ssize_t read_dev_attr(struct parser_pdata *pdata, struct iio_device *dev,
 		const char *attr, enum iio_attr_type type);

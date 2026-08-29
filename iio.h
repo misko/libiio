@@ -1525,6 +1525,17 @@ iio_device_create_buffer_with_metadata(const struct iio_device *dev,
 __api __check_ret int iio_buffer_set_metadata_batch_size(
 		struct iio_buffer *buf, unsigned int frames);
 
+/** @brief Read the provider-owned status blob for an open metadata buffer.
+ * @param buf A metadata-enabled input buffer
+ * @param status Destination for the opaque, provider-versioned status bytes
+ * @param status_capacity Size of the destination
+ * @return Number of status bytes written, or a negative errno code
+ *
+ * This operation does not consume IQ or metadata frames. Backends or servers
+ * without status support return -ENOSYS. */
+__api __check_ret ssize_t iio_buffer_get_metadata_status(
+		struct iio_buffer *buf, void *status, size_t status_capacity);
+
 
 /** @brief Destroy the given buffer
  * @param buf A pointer to an iio_buffer structure

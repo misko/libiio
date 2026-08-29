@@ -32,6 +32,7 @@ static const uint8_t failure_session_request[] = {
 };
 
 #define TEST_BURST_REQUEST_BYTES 32U
+#define TEST_RING_REQUEST_BYTES 48U
 
 static void put_le16(uint8_t *destination, uint16_t value)
 {
@@ -53,6 +54,22 @@ static void put_le64(uint8_t *destination, uint64_t value)
 	put_le32(destination + 4, (uint32_t)(value >> 32));
 }
 
+static uint16_t get_le16(const uint8_t *source)
+{
+	return (uint16_t)source[0] | (uint16_t)source[1] << 8;
+}
+
+static uint32_t get_le32(const uint8_t *source)
+{
+	return (uint32_t)source[0] | (uint32_t)source[1] << 8 |
+		(uint32_t)source[2] << 16 | (uint32_t)source[3] << 24;
+}
+
+static uint64_t get_le64(const uint8_t *source)
+{
+	return (uint64_t)get_le32(source) | (uint64_t)get_le32(source + 4) << 32;
+}
+
 static void build_burst_request(uint8_t *wire, const uint8_t *base,
 	size_t base_bytes, uint64_t requested_iq_bytes)
 {
@@ -65,6 +82,22 @@ static void build_burst_request(uint8_t *wire, const uint8_t *base,
 	put_le16(burst + 6, TEST_BURST_REQUEST_BYTES);
 	put_le32(burst + 8, 1);
 	put_le64(burst + 16, requested_iq_bytes);
+}
+
+static void build_ring_request(uint8_t *wire, const uint8_t *base,
+	size_t base_bytes, uint64_t capacity_iq_bytes, uint64_t capture_frames)
+{
+	uint8_t *ring = wire + base_bytes;
+
+	memcpy(wire, base, base_bytes);
+	memset(ring, 0, TEST_RING_REQUEST_BYTES);
+	put_le32(ring, UINT32_C(0x52524653));
+	put_le16(ring + 4, 1);
+	put_le16(ring + 6, TEST_RING_REQUEST_BYTES);
+	put_le32(ring + 8, 1);
+	put_le32(ring + 12, capture_frames ? 1 : 2);
+	put_le64(ring + 16, capacity_iq_bytes);
+	put_le64(ring + 24, capture_frames);
 }
 
 int main(int argc, char **argv)
@@ -89,6 +122,12 @@ int main(int argc, char **argv)
 			"iio,buffer-ddr-burst"), "1"));
 		assert(!strcmp(iio_context_get_attr_value(ctx,
 			"iio,buffer-ddr-burst-max-iq-bytes"), "200000000"));
+		assert(!strcmp(iio_context_get_attr_value(ctx,
+			"iio,buffer-ddr-ring"), "1"));
+		assert(!strcmp(iio_context_get_attr_value(ctx,
+			"iio,buffer-ddr-ring-max-iq-bytes"), "200000000"));
+		assert(!strcmp(iio_context_get_attr_value(ctx,
+			"iio,buffer-metadata-status"), "1"));
 	}
 	struct iio_device *dev = iio_context_find_device(ctx, "cf-ad9361-lpc");
 	assert(dev);
@@ -180,6 +219,9 @@ int main(int argc, char **argv)
 		sizeof(session_request), UINT64_C(4) * 1024U * 8U);
 	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
 		burst_request, sizeof(burst_request));
+	if (!buffer)
+		fprintf(stderr, "burst buffer open failed: %s (%d)\n",
+			strerror(errno), errno);
 	assert(buffer);
 	for (uint64_t sequence = 0; sequence < 4; ++sequence) {
 		metadata_bytes = 0;
@@ -194,6 +236,85 @@ int main(int argc, char **argv)
 	assert(iio_buffer_refill_with_metadata(buffer,
 		metadata, sizeof(metadata), &metadata_bytes) == -ENODATA);
 	assert(metadata_bytes == 0);
+	iio_buffer_destroy(buffer);
+
+	/* The ring streams immediately, wraps without overwrite, and terminates
+	 * only after the finite target has been delivered. */
+	uint8_t ring_request[sizeof(session_request) + TEST_RING_REQUEST_BYTES];
+	build_ring_request(ring_request, session_request,
+		sizeof(session_request), UINT64_C(2) * 1024U * 8U, 5);
+	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+		ring_request, sizeof(ring_request));
+	assert(buffer);
+	uint8_t ring_status[128];
+	assert(iio_buffer_get_metadata_status(buffer, ring_status,
+		sizeof(ring_status)) == (ssize_t)sizeof(ring_status));
+	assert(get_le32(ring_status) == UINT32_C(0x53524653));
+	assert(get_le16(ring_status + 4) == 1 &&
+		get_le16(ring_status + 6) == sizeof(ring_status));
+	assert(get_le64(ring_status + 24) == UINT64_C(2) * 1024U * 8U);
+	assert(get_le64(ring_status + 32) == UINT64_C(2) * 1024U * 8U);
+	assert(get_le64(ring_status + 40) == 5);
+	for (uint64_t sequence = 0; sequence < 5; ++sequence) {
+		metadata_bytes = 0;
+		iq_bytes = iio_buffer_refill_with_metadata(buffer,
+			metadata, sizeof(metadata), &metadata_bytes);
+		assert(iq_bytes == 1024 * 8);
+		assert(metadata_bytes == sizeof(struct test_metadata));
+		record = (const struct test_metadata *)metadata;
+		assert(record->sequence == sequence);
+	}
+	assert(iio_buffer_get_metadata_status(buffer, ring_status,
+		sizeof(ring_status)) == (ssize_t)sizeof(ring_status));
+	assert(get_le32(ring_status + 8) == 4);
+	assert(get_le32(ring_status + 12) == 1);
+	assert(get_le64(ring_status + 48) == 5);
+	assert(get_le64(ring_status + 56) == 5);
+	assert(get_le64(ring_status + 64) <= 2);
+	assert(get_le64(ring_status + 72) == 2);
+	metadata_bytes = 123;
+	assert(iio_buffer_refill_with_metadata(buffer,
+		metadata, sizeof(metadata), &metadata_bytes) == -ENODATA);
+	assert(metadata_bytes == 0);
+	iio_buffer_destroy(buffer);
+
+	/* A producer failure is ordered after every already-committed frame. */
+	build_ring_request(ring_request, failure_session_request,
+		sizeof(failure_session_request), UINT64_C(2) * 1024U * 8U, 3);
+	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+		ring_request, sizeof(ring_request));
+	assert(buffer);
+	metadata_bytes = 0;
+	assert(iio_buffer_refill_with_metadata(buffer,
+		metadata, sizeof(metadata), &metadata_bytes) == 1024 * 8);
+	record = (const struct test_metadata *)metadata;
+	assert(record->sequence == 0);
+	metadata_bytes = 123;
+	assert(iio_buffer_refill_with_metadata(buffer,
+		metadata, sizeof(metadata), &metadata_bytes) == -EIO);
+	assert(metadata_bytes == 0);
+	assert(iio_buffer_get_metadata_status(buffer, ring_status,
+		sizeof(ring_status)) == (ssize_t)sizeof(ring_status));
+	assert(get_le32(ring_status + 8) == 5);
+	assert((int32_t)get_le32(ring_status + 20) == -EIO);
+	assert(get_le64(ring_status + 48) == 1);
+	assert(get_le64(ring_status + 56) == 1);
+	iio_buffer_destroy(buffer);
+
+	/* Continuous mode remains bounded by the same two-slot ring and CLOSE is
+	 * the explicit cancellation point. */
+	build_ring_request(ring_request, session_request,
+		sizeof(session_request), UINT64_C(2) * 1024U * 8U, 0);
+	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+		ring_request, sizeof(ring_request));
+	assert(buffer);
+	for (uint64_t sequence = 0; sequence < 5; ++sequence) {
+		metadata_bytes = 0;
+		assert(iio_buffer_refill_with_metadata(buffer,
+			metadata, sizeof(metadata), &metadata_bytes) == 1024 * 8);
+		record = (const struct test_metadata *)metadata;
+		assert(record->sequence == sequence);
+	}
 	iio_buffer_destroy(buffer);
 
 	/* Burst capture failure is atomic: no first frame is exposed, teardown is

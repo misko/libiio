@@ -641,6 +641,11 @@ _buffer_set_metadata_batch_size.restype = c_int
 _buffer_set_metadata_batch_size.argtypes = (_BufferPtr, c_uint)
 _buffer_set_metadata_batch_size.errcheck = _check_negative
 
+_buffer_get_metadata_status = _lib.iio_buffer_get_metadata_status
+_buffer_get_metadata_status.restype = c_ssize_t
+_buffer_get_metadata_status.argtypes = (_BufferPtr, c_void_p, c_size_t)
+_buffer_get_metadata_status.errcheck = _check_negative
+
 _buffer_push_partial = _lib.iio_buffer_push_partial
 _buffer_push_partial.restype = c_ssize_t
 _buffer_push_partial.argtypes = (
@@ -1142,6 +1147,9 @@ class MetadataBuffer(Buffer):
         metadata_capacity=64 * 1024,
         batch_frames=1,
         ddr_burst_bytes=0,
+        ddr_ring_bytes=0,
+        ddr_ring_frames=0,
+        ddr_ring_continuous=False,
     ):
         self._buffer = None
         if metadata_capacity <= 0:
@@ -1170,6 +1178,29 @@ class MetadataBuffer(Buffer):
             raise ValueError("ddr_burst_bytes must not be negative")
         if ddr_burst_bytes and batch_frames != 1:
             raise ValueError("device DDR burst requires batch_frames=1")
+        if isinstance(ddr_ring_bytes, bool) or not isinstance(ddr_ring_bytes, int):
+            raise TypeError("ddr_ring_bytes must be an integer")
+        if isinstance(ddr_ring_frames, bool) or not isinstance(ddr_ring_frames, int):
+            raise TypeError("ddr_ring_frames must be an integer")
+        if not isinstance(ddr_ring_continuous, bool):
+            raise TypeError("ddr_ring_continuous must be a bool")
+        if ddr_ring_bytes < 0 or ddr_ring_frames < 0:
+            raise ValueError("DDR ring values must not be negative")
+        if ddr_burst_bytes and ddr_ring_bytes:
+            raise ValueError("DDR burst and DDR ring are mutually exclusive")
+        if ddr_ring_bytes and batch_frames != 1:
+            raise ValueError("device DDR ring requires batch_frames=1")
+        if ddr_ring_bytes:
+            if ddr_ring_continuous and ddr_ring_frames:
+                raise ValueError(
+                    "continuous DDR ring must not specify ddr_ring_frames"
+                )
+            if not ddr_ring_continuous and not ddr_ring_frames:
+                raise ValueError(
+                    "finite DDR ring requires a positive ddr_ring_frames"
+                )
+        elif ddr_ring_frames or ddr_ring_continuous:
+            raise ValueError("DDR ring mode requires positive ddr_ring_bytes")
         try:
             request = bytes(request)
         except (TypeError, ValueError) as exc:
@@ -1178,6 +1209,8 @@ class MetadataBuffer(Buffer):
             raise ValueError("request must not be empty")
         ddr_burst_frames = 0
         ddr_burst_admitted_bytes = 0
+        ddr_ring_admitted_bytes = 0
+        ddr_ring_capacity_frames = 0
         if ddr_burst_bytes:
             context_attrs = getattr(getattr(device, "_ctx", None), "attrs", {})
             if context_attrs.get("iio,buffer-ddr-burst") != "1":
@@ -1209,6 +1242,37 @@ class MetadataBuffer(Buffer):
                 ddr_burst_bytes,
                 0,
             )
+        if ddr_ring_bytes:
+            context_attrs = getattr(getattr(device, "_ctx", None), "attrs", {})
+            if context_attrs.get("iio,buffer-ddr-ring") != "1":
+                raise OSError("IIO context does not advertise device DDR ring v1")
+            try:
+                maximum_bytes = int(
+                    context_attrs["iio,buffer-ddr-ring-max-iq-bytes"]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise OSError("IIO context has an invalid DDR ring byte limit") from exc
+            frame_bytes = int(samples_count) * int(device.sample_size)
+            if frame_bytes <= 0 or ddr_ring_bytes < frame_bytes:
+                raise ValueError(
+                    "ddr_ring_bytes must hold at least one complete frame"
+                )
+            if ddr_ring_bytes > maximum_bytes:
+                raise ValueError("ddr_ring_bytes exceeds the advertised device limit")
+            ddr_ring_capacity_frames = ddr_ring_bytes // frame_bytes
+            ddr_ring_admitted_bytes = ddr_ring_capacity_frames * frame_bytes
+            request += _struct.pack(
+                "<IHHIIQQQQ",
+                0x52524653,
+                1,
+                48,
+                1,
+                2 if ddr_ring_continuous else 1,
+                ddr_ring_bytes,
+                ddr_ring_frames,
+                0,
+                0,
+            )
         if len(request) > 4096:
             raise ValueError("request exceeds the 4096-byte libiio limit")
         request_storage = create_string_buffer(request, len(request))
@@ -1230,6 +1294,11 @@ class MetadataBuffer(Buffer):
         self._ddr_burst_requested_bytes = ddr_burst_bytes
         self._ddr_burst_admitted_bytes = ddr_burst_admitted_bytes
         self._ddr_burst_frames = ddr_burst_frames
+        self._ddr_ring_requested_bytes = ddr_ring_bytes
+        self._ddr_ring_admitted_bytes = ddr_ring_admitted_bytes
+        self._ddr_ring_capacity_frames = ddr_ring_capacity_frames
+        self._ddr_ring_capture_frames = ddr_ring_frames
+        self._ddr_ring_continuous = ddr_ring_continuous
         self._metadata = None
         self._dev = device
 
@@ -1285,6 +1354,92 @@ class MetadataBuffer(Buffer):
     def ddr_burst_frames(self):
         """Number of complete frames retained in device DDR."""
         return self._ddr_burst_frames
+
+    @property
+    def ddr_ring_enabled(self):
+        """Whether this buffer uses the opt-in streaming device DDR ring."""
+        return self._ddr_ring_requested_bytes > 0
+
+    @property
+    def ddr_ring_requested_bytes(self):
+        """User-requested device ring IQ byte budget."""
+        return self._ddr_ring_requested_bytes
+
+    @property
+    def ddr_ring_admitted_bytes(self):
+        """Ring IQ bytes admitted after rounding down to whole frames."""
+        return self._ddr_ring_admitted_bytes
+
+    @property
+    def ddr_ring_capacity_frames(self):
+        """Number of complete IQ frames in the bounded device ring."""
+        return self._ddr_ring_capacity_frames
+
+    @property
+    def ddr_ring_capture_frames(self):
+        """Finite capture target, or zero for continuous mode."""
+        return self._ddr_ring_capture_frames
+
+    @property
+    def ddr_ring_continuous(self):
+        """Whether capture continues until the buffer is closed."""
+        return self._ddr_ring_continuous
+
+    def ddr_ring_status(self):
+        """Return an atomic snapshot of the device DDR ring state."""
+        if not self.ddr_ring_enabled:
+            raise ValueError("this buffer does not use the device DDR ring")
+        storage = create_string_buffer(128)
+        status_bytes = _buffer_get_metadata_status(self._buffer, storage, 128)
+        if status_bytes != 128:
+            raise OSError("IIO server returned an invalid DDR ring status size")
+        values = _struct.unpack("<IHHIIIi13Q", storage.raw)
+        if values[:3] != (0x53524653, 1, 128) or values[-2:] != (0, 0):
+            raise OSError("IIO server returned an invalid DDR ring status")
+        state_names = (
+            "off",
+            "reserved",
+            "running",
+            "draining",
+            "complete",
+            "failed",
+            "cancelled",
+        )
+        reason_names = (
+            "none",
+            "target_complete",
+            "client_cancelled",
+            "client_disconnected",
+            "consumer_stall",
+            "dma_error",
+            "counter_gap",
+            "transport_error",
+            "internal_error",
+        )
+        state, reason, valid_fields, error_code = values[3:7]
+        if state >= len(state_names) or reason >= len(reason_names):
+            raise OSError("IIO server returned an invalid DDR ring state")
+        counters = values[7:-2]
+        return {
+            "state": state_names[state],
+            "terminal_reason": reason_names[reason],
+            "error_code": error_code,
+            "requested_capacity_iq_bytes": counters[0],
+            "admitted_capacity_iq_bytes": counters[1],
+            "target_frames": counters[2],
+            "produced_frames": counters[3],
+            "consumed_frames": counters[4],
+            "high_water_frames": counters[5],
+            "wrap_count": counters[6],
+            "producer_position": counters[7],
+            "consumer_position": counters[8],
+            "last_contiguous_sample_sequence": (
+                counters[9] if valid_fields & 1 else None
+            ),
+            "first_unavailable_sample_sequence": (
+                counters[10] if valid_fields & 2 else None
+            ),
+        }
 
 
 class _DeviceOrTrigger(object):

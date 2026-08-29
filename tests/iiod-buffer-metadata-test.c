@@ -24,6 +24,7 @@ static const uint8_t failure_session_request[] = {
 };
 
 #define TEST_BURST_REQUEST_BYTES 32U
+#define TEST_RING_REQUEST_BYTES 48U
 
 static uint16_t get_le16(const uint8_t *source)
 {
@@ -74,6 +75,24 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			!get_le64(burst + 16) || get_le64(burst + 24))
 			return -EINVAL;
 		burst_plan->requested_iq_bytes = get_le64(burst + 16);
+		burst_plan->metadata_capacity = sizeof(struct test_metadata);
+		base_bytes = sizeof(expected_session_request);
+	} else if (request_bytes == sizeof(expected_session_request) +
+			TEST_RING_REQUEST_BYTES) {
+		const uint8_t *ring = wire + sizeof(expected_session_request);
+		const uint32_t flags = get_le32(ring + 12);
+		const uint64_t capture_frames = get_le64(ring + 24);
+		if (get_le32(ring) != UINT32_C(0x52524653) ||
+			get_le16(ring + 4) != 1 ||
+			get_le16(ring + 6) != TEST_RING_REQUEST_BYTES ||
+			get_le32(ring + 8) != 1 ||
+			(flags != 1 && flags != 2) || !get_le64(ring + 16) ||
+			((flags == 1) != (capture_frames != 0)) ||
+			get_le64(ring + 32) || get_le64(ring + 40))
+			return -EINVAL;
+		burst_plan->ring_capacity_iq_bytes = get_le64(ring + 16);
+		burst_plan->ring_capture_frames = capture_frames;
+		burst_plan->ring_flags = flags;
 		burst_plan->metadata_capacity = sizeof(struct test_metadata);
 		base_bytes = sizeof(expected_session_request);
 	}

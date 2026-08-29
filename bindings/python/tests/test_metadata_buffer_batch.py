@@ -1,6 +1,6 @@
 """MetadataBuffer batching contract tests."""
 
-from ctypes import c_size_t, sizeof
+from ctypes import c_size_t, memmove, sizeof
 import struct
 from types import SimpleNamespace
 
@@ -19,6 +19,16 @@ class BurstFakeDevice(FakeDevice):
         attrs={
             "iio,buffer-ddr-burst": "1",
             "iio,buffer-ddr-burst-max-iq-bytes": "200000000",
+        }
+    )
+
+
+class RingFakeDevice(BurstFakeDevice):
+    _ctx = SimpleNamespace(
+        attrs={
+            **BurstFakeDevice._ctx.attrs,
+            "iio,buffer-ddr-ring": "1",
+            "iio,buffer-ddr-ring-max-iq-bytes": "200000000",
         }
     )
 
@@ -65,6 +75,12 @@ def test_batch_one_preserves_uncached_behavior(monkeypatch):
     assert buffer.ddr_burst_requested_bytes == 0
     assert buffer.ddr_burst_admitted_bytes == 0
     assert buffer.ddr_burst_frames == 0
+    assert buffer.ddr_ring_enabled is False
+    assert buffer.ddr_ring_requested_bytes == 0
+    assert buffer.ddr_ring_admitted_bytes == 0
+    assert buffer.ddr_ring_capacity_frames == 0
+    assert buffer.ddr_ring_capture_frames == 0
+    assert buffer.ddr_ring_continuous is False
     buffer.close()
 
 
@@ -144,6 +160,131 @@ def test_device_ddr_burst_requires_capability_and_single_host_batch(monkeypatch)
             b"provider",
             batch_frames=2,
             ddr_burst_bytes=8192,
+        )
+
+
+@pytest.mark.parametrize(
+    ("continuous", "capture_frames", "expected_flags"),
+    [(False, 17, 1), (True, 0, 2)],
+)
+def test_device_ddr_ring_appends_versioned_request(
+    monkeypatch, continuous, capture_frames, expected_flags
+):
+    calls = []
+    monkeypatch.setattr(
+        iio, "_create_buffer_with_metadata", lambda *args: calls.append(args) or object()
+    )
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+
+    buffer = iio.MetadataBuffer(
+        RingFakeDevice(),
+        1024,
+        b"provider",
+        ddr_ring_bytes=32769,
+        ddr_ring_frames=capture_frames,
+        ddr_ring_continuous=continuous,
+    )
+    assert buffer.ddr_ring_enabled is True
+    assert buffer.ddr_ring_requested_bytes == 32769
+    assert buffer.ddr_ring_admitted_bytes == 32768
+    assert buffer.ddr_ring_capacity_frames == 4
+    assert buffer.ddr_ring_capture_frames == capture_frames
+    assert buffer.ddr_ring_continuous is continuous
+    _, _, storage, request_bytes = calls[0]
+    assert request_bytes == len(b"provider") + 48
+    assert struct.unpack("<IHHIIQQQQ", storage.raw[-48:]) == (
+        0x52524653,
+        1,
+        48,
+        1,
+        expected_flags,
+        32769,
+        capture_frames,
+        0,
+        0,
+    )
+    buffer.close()
+
+
+def test_device_ddr_ring_status_decodes_atomic_snapshot(monkeypatch):
+    wire = struct.pack(
+        "<IHHIIIi13Q",
+        0x53524653,
+        1,
+        128,
+        3,
+        0,
+        1,
+        0,
+        32769,
+        32768,
+        17,
+        9,
+        7,
+        4,
+        2,
+        1,
+        3,
+        123456,
+        0,
+        0,
+        0,
+    )
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: object())
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+    monkeypatch.setattr(
+        iio,
+        "_buffer_get_metadata_status",
+        lambda _buffer, destination, _capacity: memmove(destination, wire, len(wire))
+        and len(wire),
+    )
+    buffer = iio.MetadataBuffer(
+        RingFakeDevice(), 1024, b"provider", ddr_ring_bytes=32769,
+        ddr_ring_frames=17
+    )
+    status = buffer.ddr_ring_status()
+    assert status["state"] == "draining"
+    assert status["produced_frames"] == 9
+    assert status["consumed_frames"] == 7
+    assert status["high_water_frames"] == 4
+    assert status["wrap_count"] == 2
+    assert status["last_contiguous_sample_sequence"] == 123456
+    assert status["first_unavailable_sample_sequence"] is None
+    buffer.close()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"ddr_ring_bytes": 8192},
+        {"ddr_ring_bytes": 8192, "ddr_ring_frames": 1, "ddr_ring_continuous": True},
+        {"ddr_ring_bytes": 0, "ddr_ring_frames": 1},
+        {"ddr_ring_bytes": 8192, "ddr_ring_frames": 1, "ddr_burst_bytes": 8192},
+        {"ddr_ring_bytes": 8192, "ddr_ring_frames": 1, "batch_frames": 2},
+    ],
+)
+def test_device_ddr_ring_rejects_ambiguous_modes(monkeypatch, kwargs):
+    monkeypatch.setattr(
+        iio,
+        "_create_buffer_with_metadata",
+        lambda *args: pytest.fail("validation must happen before buffer creation"),
+    )
+    with pytest.raises(ValueError):
+        iio.MetadataBuffer(RingFakeDevice(), 1024, b"provider", **kwargs)
+
+
+def test_device_ddr_ring_requires_capability(monkeypatch):
+    monkeypatch.setattr(
+        iio,
+        "_create_buffer_with_metadata",
+        lambda *args: pytest.fail("validation must happen before buffer creation"),
+    )
+    with pytest.raises(OSError, match="does not advertise"):
+        iio.MetadataBuffer(
+            BurstFakeDevice(), 1024, b"provider", ddr_ring_bytes=8192,
+            ddr_ring_frames=1
         )
 
 
