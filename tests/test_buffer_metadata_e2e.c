@@ -128,6 +128,8 @@ int main(int argc, char **argv)
 			"iio,buffer-ddr-ring-max-iq-bytes"), "200000000"));
 		assert(!strcmp(iio_context_get_attr_value(ctx,
 			"iio,buffer-metadata-status"), "1"));
+		assert(!strcmp(iio_context_get_attr_value(ctx,
+			"iio,buffer-metadata-timing-log"), "1"));
 	}
 	struct iio_device *dev = iio_context_find_device(ctx, "cf-ad9361-lpc");
 	assert(dev);
