@@ -17,6 +17,9 @@
 	((1U << SPF_TANDEM_TRANSITION_COUNTER_BITS) - 1U)
 #define SPF_TANDEM_TRANSITION_COUNTER_HALF_RANGE \
 	(1U << (SPF_TANDEM_TRANSITION_COUNTER_BITS - 1U))
+#define SPF_TANDEM_HOLD_OBSERVATIONS_PER_FRAME 4U
+#define SPF_TANDEM_OBSERVATION_INTERVAL_MIN 1024U
+#define SPF_TANDEM_AUTO_OBSERVATION_INTERVAL_MAX 32768U
 
 _Static_assert(sizeof(struct adi_tandem_agc_request_v1) == 104,
 	"unexpected tandem request ABI size");
@@ -135,6 +138,33 @@ int spf_tandem_request_validate_event_window(
 	maximum_retained_events = 1U +
 		(retention_samples - 1U) / minimum_transition_samples;
 	return maximum_retained_events <= request->event_capacity ? 0 : -ENOSPC;
+}
+
+int spf_tandem_request_observation_interval(
+	const struct adi_tandem_agc_request_v1 *request,
+	uint32_t samples_per_channel, uint32_t *interval_samples)
+{
+	uint32_t interval;
+
+	if (!request || !samples_per_channel || !interval_samples)
+		return -EINVAL;
+	if (request->mode != ADI_TANDEM_AGC_MODE_HOLD &&
+		request->mode != ADI_TANDEM_AGC_MODE_AUTO)
+		return -EINVAL;
+
+	interval = samples_per_channel /
+		SPF_TANDEM_HOLD_OBSERVATIONS_PER_FRAME;
+	if (interval < SPF_TANDEM_OBSERVATION_INTERVAL_MIN)
+		interval = SPF_TANDEM_OBSERVATION_INTERVAL_MIN;
+	/* AUTO retains the original high-resolution observation cadence for
+	 * transient gain/RSSI evidence. HOLD cannot produce gain transitions, so
+	 * four counter-bounded observations per frame preserve endpoint coverage
+	 * without spending a core repeatedly proving the same held gain. */
+	if (request->mode == ADI_TANDEM_AGC_MODE_AUTO &&
+		interval > SPF_TANDEM_AUTO_OBSERVATION_INTERVAL_MAX)
+		interval = SPF_TANDEM_AUTO_OBSERVATION_INTERVAL_MAX;
+	*interval_samples = interval;
+	return 0;
 }
 
 int spf_tandem_session_init(struct spf_tandem_session *session,
