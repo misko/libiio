@@ -187,6 +187,7 @@ static void test_request_decoder(void)
 {
 	uint8_t wire[104];
 	struct adi_tandem_agc_request_v1 decoded;
+	uint32_t interval = 0;
 	valid_request(wire);
 	assert(spf_tandem_request_decode(&decoded, wire, sizeof(wire)) == 0);
 	assert(decoded.magic == ADI_TANDEM_AGC_REQUEST_MAGIC);
@@ -199,6 +200,28 @@ static void test_request_decoder(void)
 		0);
 	decoded.mode = ADI_TANDEM_AGC_MODE_HOLD;
 	assert(spf_tandem_request_validate_event_window(&decoded, UINT32_MAX) == 0);
+	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
+		&interval) == 0);
+	assert(interval == 250000);
+	assert(spf_tandem_request_observation_interval(&decoded, 2048,
+		&interval) == 0);
+	assert(interval == 1024);
+	decoded.mode = ADI_TANDEM_AGC_MODE_AUTO;
+	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
+		&interval) == 0);
+	assert(interval == 32768);
+	assert(spf_tandem_request_observation_interval(&decoded, 16384,
+		&interval) == 0);
+	assert(interval == 4096);
+	decoded.mode = UINT32_MAX;
+	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
+		&interval) == -EINVAL);
+	assert(spf_tandem_request_observation_interval(NULL, 1000000,
+		&interval) == -EINVAL);
+	assert(spf_tandem_request_observation_interval(&decoded, 0,
+		&interval) == -EINVAL);
+	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
+		NULL) == -EINVAL);
 	assert(spf_tandem_request_validate_event_window(&decoded, 0) == -EINVAL);
 	assert(spf_tandem_request_decode(&decoded, wire, sizeof(wire) - 1) ==
 		-EINVAL);

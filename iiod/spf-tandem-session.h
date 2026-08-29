@@ -46,6 +46,9 @@ int spf_tandem_request_decode(struct adi_tandem_agc_request_v1 *destination,
 int spf_tandem_request_validate_event_window(
 	const struct adi_tandem_agc_request_v1 *request,
 	uint32_t samples_per_channel);
+int spf_tandem_request_observation_interval(
+	const struct adi_tandem_agc_request_v1 *request,
+	uint32_t samples_per_channel, uint32_t *interval_samples);
 int spf_tandem_session_init(struct spf_tandem_session *session,
 	const void *wire_request, size_t wire_bytes,
 	const struct spf_tandem_syscalls *syscalls);

@@ -27,8 +27,6 @@
 #include <unistd.h>
 
 #define SPF_IIOD_OBSERVATION_CAPACITY UINT16_C(64)
-#define SPF_IIOD_OBSERVATION_INTERVAL_MAX UINT32_C(32768)
-#define SPF_IIOD_OBSERVATION_INTERVAL_MIN UINT32_C(1024)
 #define SPF_IIOD_SAMPLER_START_TIMEOUT_MS UINT32_C(100)
 
 struct spf_iiod_metadata_context {
@@ -71,16 +69,6 @@ static uint64_t make_stream_id(const void *address)
 	value ^= (uint64_t)(uintptr_t)address;
 	value ^= (uint64_t)(unsigned int)getpid() << 32;
 	return value ? value : UINT64_C(1);
-}
-
-static uint32_t observation_interval(size_t samples_count)
-{
-	uint32_t interval = (uint32_t)(samples_count / 4U);
-	if (interval < SPF_IIOD_OBSERVATION_INTERVAL_MIN)
-		interval = SPF_IIOD_OBSERVATION_INTERVAL_MIN;
-	if (interval > SPF_IIOD_OBSERVATION_INTERVAL_MAX)
-		interval = SPF_IIOD_OBSERVATION_INTERVAL_MAX;
-	return interval;
 }
 
 int iiod_buffer_metadata_open(const struct iio_device *dev,
@@ -207,7 +195,14 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	}
 	ctx->timestamp_configured = true;
 	ctx->samples_per_channel = (uint32_t)samples_count;
-	ctx->observation_interval_samples = observation_interval(samples_count);
+	ret = spf_tandem_request_observation_interval(&ctx->tandem.request,
+		(uint32_t)samples_count, &ctx->observation_interval_samples);
+	if (ret) {
+		(void)iio_device_reg_write(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
+			ctx->timestamp_control_previous);
+		free(ctx);
+		return ret;
+	}
 	ctx->stream_id = make_stream_id(ctx);
 	if (!spf_gain_sampler_start(&ctx->sampler,
 			ctx->observation_interval_samples)) {
