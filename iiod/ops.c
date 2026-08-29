@@ -111,6 +111,32 @@ struct iiod_ddr_ring {
 	bool producer_exited;
 };
 
+enum iiod_timing_stage {
+	IIOD_TIMING_SAMPLER_ADMIT = 0,
+	IIOD_TIMING_DMA_REFILL,
+	IIOD_TIMING_SAMPLER_FINISH,
+	IIOD_TIMING_METADATA_BUILD,
+	IIOD_TIMING_DDR_COPY,
+	IIOD_TIMING_TRANSPORT_FRAME,
+	IIOD_TIMING_TRANSPORT_IQ,
+	IIOD_TIMING_RING_PRODUCER_WAIT,
+	IIOD_TIMING_RING_CONSUMER_WAIT,
+	IIOD_TIMING_STAGE_COUNT,
+};
+
+struct iiod_timing_accumulator {
+	uint64_t count;
+	uint64_t total_ns;
+	uint64_t max_ns;
+};
+
+struct iiod_stage_timing {
+	pthread_mutex_t lock;
+	uint64_t first_ns;
+	uint64_t last_ns;
+	struct iiod_timing_accumulator stages[IIOD_TIMING_STAGE_COUNT];
+};
+
 static pthread_mutex_t burst_reservation_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool burst_reserved;
 
@@ -607,10 +633,144 @@ struct DevEntry {
 	pthread_cond_t rw_ready_cond;
 	pthread_mutex_t ring_lock;
 	pthread_cond_t ring_ready_cond;
+	struct iiod_stage_timing timing;
 
 	uint32_t *mask;
 	size_t nb_words;
 };
+
+static inline const char *dev_label_or_name_or_id(const struct iio_device *dev);
+
+static const char *const iiod_timing_stage_names[IIOD_TIMING_STAGE_COUNT] = {
+	[IIOD_TIMING_SAMPLER_ADMIT] = "sampler_admit",
+	[IIOD_TIMING_DMA_REFILL] = "dma_refill",
+	[IIOD_TIMING_SAMPLER_FINISH] = "sampler_finish",
+	[IIOD_TIMING_METADATA_BUILD] = "metadata_build",
+	[IIOD_TIMING_DDR_COPY] = "ddr_copy",
+	[IIOD_TIMING_TRANSPORT_FRAME] = "transport_frame",
+	[IIOD_TIMING_TRANSPORT_IQ] = "transport_iq",
+	[IIOD_TIMING_RING_PRODUCER_WAIT] = "ring_producer_wait",
+	[IIOD_TIMING_RING_CONSUMER_WAIT] = "ring_consumer_wait",
+};
+
+static uint64_t iiod_timing_now(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC_RAW, &now))
+		return 0;
+	return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+		(uint64_t)now.tv_nsec;
+}
+
+static void iiod_timing_record(struct DevEntry *entry,
+	enum iiod_timing_stage stage, uint64_t started_ns)
+{
+	struct iiod_timing_accumulator *accumulator;
+	uint64_t finished_ns;
+	uint64_t elapsed_ns;
+
+	if (!started_ns || stage >= IIOD_TIMING_STAGE_COUNT)
+		return;
+	finished_ns = iiod_timing_now();
+	if (!finished_ns || finished_ns < started_ns)
+		return;
+	elapsed_ns = finished_ns - started_ns;
+
+	pthread_mutex_lock(&entry->timing.lock);
+	if (!entry->timing.first_ns || started_ns < entry->timing.first_ns)
+		entry->timing.first_ns = started_ns;
+	if (finished_ns > entry->timing.last_ns)
+		entry->timing.last_ns = finished_ns;
+	accumulator = &entry->timing.stages[stage];
+	accumulator->count++;
+	accumulator->total_ns += elapsed_ns;
+	if (elapsed_ns > accumulator->max_ns)
+		accumulator->max_ns = elapsed_ns;
+	pthread_mutex_unlock(&entry->timing.lock);
+}
+
+static void iiod_timing_log(struct DevEntry *entry)
+{
+	const char *device = dev_label_or_name_or_id(entry->dev);
+	uint64_t wall_ns = 0;
+	unsigned int i;
+
+	pthread_mutex_lock(&entry->timing.lock);
+	if (entry->timing.last_ns >= entry->timing.first_ns)
+		wall_ns = entry->timing.last_ns - entry->timing.first_ns;
+	for (i = 0; i < IIOD_TIMING_STAGE_COUNT; i++) {
+		const struct iiod_timing_accumulator *stage =
+			&entry->timing.stages[i];
+
+		if (!stage->count)
+			continue;
+		fprintf(stderr,
+			"SPF_IIOD_TIMING_V1 dev=%s metadata=%u burst=%u ring=%u "
+			"frame_iq_bytes=%zu wall_ns=%" PRIu64
+			" stage=%s count=%" PRIu64
+			" total_ns=%" PRIu64 " max_ns=%" PRIu64 "\n",
+			device ? device : "unknown", entry->metadata_enabled,
+			entry->burst_plan.requested_iq_bytes != 0,
+			entry->burst_plan.ring_capacity_iq_bytes != 0,
+			(size_t)entry->sample_size * entry->samples_count, wall_ns,
+			iiod_timing_stage_names[i], stage->count, stage->total_ns,
+			stage->max_ns);
+	}
+	fflush(stderr);
+	pthread_mutex_unlock(&entry->timing.lock);
+}
+
+static int iiod_timed_metadata_before_refill(struct DevEntry *entry)
+{
+	uint64_t started_ns = iiod_timing_now();
+	int ret = iiod_buffer_metadata_before_refill(
+		entry->metadata_provider_context);
+
+	iiod_timing_record(entry, IIOD_TIMING_SAMPLER_ADMIT, started_ns);
+	return ret;
+}
+
+static ssize_t iiod_timed_buffer_refill(struct DevEntry *entry)
+{
+	uint64_t started_ns = iiod_timing_now();
+	ssize_t ret = iio_buffer_refill(entry->buf);
+
+	iiod_timing_record(entry, IIOD_TIMING_DMA_REFILL, started_ns);
+	return ret;
+}
+
+static int iiod_timed_metadata_after_refill(struct DevEntry *entry)
+{
+	uint64_t started_ns = iiod_timing_now();
+	int ret = iiod_buffer_metadata_after_refill(
+		entry->metadata_provider_context);
+
+	iiod_timing_record(entry, IIOD_TIMING_SAMPLER_FINISH, started_ns);
+	return ret;
+}
+
+static ssize_t iiod_timed_metadata_get(struct DevEntry *entry, size_t raw_bytes,
+	void *metadata, size_t metadata_capacity, size_t *iq_offset,
+	size_t *iq_bytes)
+{
+	uint64_t started_ns = iiod_timing_now();
+	ssize_t ret = iiod_buffer_metadata_get(entry->metadata_provider_context,
+		entry->dev, entry->buf, raw_bytes, metadata, metadata_capacity,
+		iq_offset, iq_bytes);
+
+	iiod_timing_record(entry, IIOD_TIMING_METADATA_BUILD, started_ns);
+	return ret;
+}
+
+static void iiod_timed_ddr_copy(struct DevEntry *entry, void *destination,
+	const void *source, size_t bytes)
+{
+	uint64_t started_ns = iiod_timing_now();
+
+	memcpy(destination, source, bytes);
+	iiod_timing_record(entry, IIOD_TIMING_DDR_COPY, started_ns);
+}
 
 struct sample_cb_info {
 	struct parser_pdata *pdata;
@@ -957,9 +1117,8 @@ static ssize_t send_data(struct DevEntry *dev, struct ThdEntry *thd, size_t len)
 		metadata = malloc(thd->metadata_capacity);
 		if (!metadata)
 			return -ENOMEM;
-		metadata_len = iiod_buffer_metadata_get(
-				dev->metadata_provider_context, dev->dev, dev->buf, len,
-				metadata, thd->metadata_capacity, &iq_offset, &iq_bytes);
+		metadata_len = iiod_timed_metadata_get(dev, len, metadata,
+			thd->metadata_capacity, &iq_offset, &iq_bytes);
 		if (metadata_len <= 0 ||
 				metadata_len > (ssize_t)thd->metadata_capacity ||
 				iq_offset > len || iq_bytes > len - iq_offset ||
@@ -1011,9 +1170,13 @@ static ssize_t send_data(struct DevEntry *dev, struct ThdEntry *thd, size_t len)
 
 	if (!demux) {
 		/* Short path */
+		uint64_t started_ns = iiod_timing_now();
+
 		start = (void *)((uintptr_t)iio_buffer_start(dev->buf) + iq_offset);
 		ret = write_all(pdata, start, len);
+		iiod_timing_record(dev, IIOD_TIMING_TRANSPORT_IQ, started_ns);
 	} else {
+		uint64_t started_ns = iiod_timing_now();
 		struct sample_cb_info info = {
 			.pdata = pdata,
 			.cpt = 0,
@@ -1022,6 +1185,7 @@ static ssize_t send_data(struct DevEntry *dev, struct ThdEntry *thd, size_t len)
 		};
 
 		ret = iio_buffer_foreach_sample(dev->buf, send_sample, &info);
+		iiod_timing_record(dev, IIOD_TIMING_TRANSPORT_IQ, started_ns);
 	}
 
 out_free_metadata:
@@ -1048,20 +1212,16 @@ static int capture_burst(struct DevEntry *entry)
 		}
 		pthread_mutex_unlock(&entry->thdlist_lock);
 
-		ret = iiod_buffer_metadata_before_refill(
-			entry->metadata_provider_context);
+		ret = iiod_timed_metadata_before_refill(entry);
 		if (ret)
 			return ret;
-		raw_bytes = iio_buffer_refill(entry->buf);
-		ret = iiod_buffer_metadata_after_refill(
-			entry->metadata_provider_context);
+		raw_bytes = iiod_timed_buffer_refill(entry);
+		ret = iiod_timed_metadata_after_refill(entry);
 		if (raw_bytes < 0)
 			return (int)raw_bytes;
 		if (ret)
 			return ret;
-		metadata_len = iiod_buffer_metadata_get(
-			entry->metadata_provider_context, entry->dev, entry->buf,
-			(size_t)raw_bytes,
+		metadata_len = iiod_timed_metadata_get(entry, (size_t)raw_bytes,
 			burst_metadata_slot(cache, cache->captured_frames),
 			cache->metadata_capacity, &iq_offset, &iq_bytes);
 		if (metadata_len == -EAGAIN) {
@@ -1076,7 +1236,8 @@ static int capture_burst(struct DevEntry *entry)
 			iq_offset > (size_t)raw_bytes ||
 			iq_bytes > (size_t)raw_bytes - iq_offset)
 			return -EIO;
-		memcpy(burst_iq_slot(cache, cache->captured_frames),
+		iiod_timed_ddr_copy(entry,
+			burst_iq_slot(cache, cache->captured_frames),
 			(uint8_t *)iio_buffer_start(entry->buf) + iq_offset, iq_bytes);
 		cache->frames[cache->captured_frames].metadata_bytes =
 			(size_t)metadata_len;
@@ -1158,7 +1319,12 @@ static ssize_t send_burst_data(struct DevEntry *entry, struct ThdEntry *thd)
 	ret = write_all(pdata, metadata, frame->metadata_bytes);
 	if (ret < 0)
 		return ret;
-	ret = write_all(pdata, iq, cache->frame_iq_bytes);
+	{
+		uint64_t started_ns = iiod_timing_now();
+
+		ret = write_all(pdata, iq, cache->frame_iq_bytes);
+		iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_IQ, started_ns);
+	}
 	if (ret < 0)
 		return ret;
 
@@ -1224,7 +1390,12 @@ static ssize_t send_ring_data(struct DevEntry *entry, struct ThdEntry *thd)
 	ret = write_all(pdata, metadata, frame->metadata_bytes);
 	if (ret < 0)
 		goto transport_failure;
-	ret = write_all(pdata, iq, ring->frame_iq_bytes);
+	{
+		uint64_t started_ns = iiod_timing_now();
+
+		ret = write_all(pdata, iq, ring->frame_iq_bytes);
+		iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_IQ, started_ns);
+	}
 	if (ret < 0)
 		goto transport_failure;
 
@@ -1287,10 +1458,12 @@ static void dev_entry_put(struct DevEntry *entry)
 	pthread_mutex_unlock(&entry->thdlist_lock);
 
 	if (free_entry) {
+		iiod_timing_log(entry);
 		pthread_mutex_destroy(&entry->thdlist_lock);
 		pthread_cond_destroy(&entry->rw_ready_cond);
 		pthread_mutex_destroy(&entry->ring_lock);
 		pthread_cond_destroy(&entry->ring_ready_cond);
+		pthread_mutex_destroy(&entry->timing.lock);
 
 		free(entry->mask);
 		free(entry);
@@ -1325,6 +1498,7 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 		size_t slot;
 		int ret;
 		bool prefix_complete;
+		uint64_t wait_started_ns = iiod_timing_now();
 
 		pthread_mutex_lock(&entry->ring_lock);
 		while ((ret = iiod_ddr_ring_core_producer_reserve(
@@ -1332,6 +1506,8 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 			pthread_cond_wait(&entry->ring_ready_cond, &entry->ring_lock);
 		prefix_complete = iiod_ddr_ring_core_prefix_complete(&ring->core);
 		pthread_mutex_unlock(&entry->ring_lock);
+		iiod_timing_record(entry, IIOD_TIMING_RING_PRODUCER_WAIT,
+			wait_started_ns);
 		if (ret == -ESHUTDOWN || ret == -ENODATA)
 			break;
 		if (ret) {
@@ -1341,12 +1517,10 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 		iiod_buffer_metadata_ring_prefix_complete(
 			entry->metadata_provider_context, prefix_complete);
 
-		ret = iiod_buffer_metadata_before_refill(
-			entry->metadata_provider_context);
+		ret = iiod_timed_metadata_before_refill(entry);
 		if (ret == 0) {
-			raw_bytes = iio_buffer_refill(entry->buf);
-			ret = iiod_buffer_metadata_after_refill(
-				entry->metadata_provider_context);
+			raw_bytes = iiod_timed_buffer_refill(entry);
+			ret = iiod_timed_metadata_after_refill(entry);
 			if (raw_bytes < 0)
 				ret = (int)raw_bytes;
 		} else {
@@ -1365,9 +1539,8 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 				(size_t)raw_bytes >= sizeof(first_sample_sequence))
 			memcpy(&first_sample_sequence, raw_start,
 				sizeof(first_sample_sequence));
-		metadata_len = iiod_buffer_metadata_get(
-			entry->metadata_provider_context, entry->dev, entry->buf,
-			(size_t)raw_bytes, ring_metadata_slot(ring, slot),
+		metadata_len = iiod_timed_metadata_get(entry, (size_t)raw_bytes,
+			ring_metadata_slot(ring, slot),
 			ring->metadata_capacity, &iq_offset, &iq_bytes);
 		if (metadata_len == -EAGAIN) {
 			pthread_mutex_lock(&entry->ring_lock);
@@ -1396,8 +1569,8 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 			error = -EIO;
 			goto abort_slot;
 		}
-		memcpy(ring_iq_slot(ring, slot), (uint8_t *)raw_start + iq_offset,
-			iq_bytes);
+		iiod_timed_ddr_copy(entry, ring_iq_slot(ring, slot),
+			(uint8_t *)raw_start + iq_offset, iq_bytes);
 		ring->frames[slot].metadata_bytes = (size_t)metadata_len;
 
 		pthread_mutex_lock(&entry->ring_lock);
@@ -1681,6 +1854,8 @@ static void rw_thd(struct thread_pool *pool, void *d)
 			ssize_t nb_bytes;
 
 			if (entry->ring.producer_started) {
+				uint64_t wait_started_ns = iiod_timing_now();
+
 				pthread_mutex_lock(&entry->ring_lock);
 				while (entry->ring.core.state ==
 						SPF_DDR_RING_STATE_RUNNING &&
@@ -1689,6 +1864,8 @@ static void rw_thd(struct thread_pool *pool, void *d)
 					pthread_cond_wait(&entry->ring_ready_cond,
 						&entry->ring_lock);
 				pthread_mutex_unlock(&entry->ring_lock);
+				iiod_timing_record(entry, IIOD_TIMING_RING_CONSUMER_WAIT,
+					wait_started_ns);
 
 				pthread_mutex_lock(&entry->thdlist_lock);
 				for (thd = SLIST_FIRST(&entry->thdlist_head);
@@ -1696,7 +1873,10 @@ static void rw_thd(struct thread_pool *pool, void *d)
 					next_thd = SLIST_NEXT(thd, dev_list_entry);
 					if (!thd->active || thd->is_writer)
 						continue;
+					uint64_t frame_started_ns = iiod_timing_now();
 					ret = send_ring_data(entry, thd);
+					iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_FRAME,
+						frame_started_ns);
 					if (ret == -EAGAIN)
 						continue;
 					if (ret > 0)
@@ -1716,7 +1896,10 @@ static void rw_thd(struct thread_pool *pool, void *d)
 					next_thd = SLIST_NEXT(thd, dev_list_entry);
 					if (!thd->active || thd->is_writer)
 						continue;
+					uint64_t frame_started_ns = iiod_timing_now();
 					ret = send_burst_data(entry, thd);
+					iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_FRAME,
+						frame_started_ns);
 					if (ret > 0)
 						thd->nb -= (unsigned int)ret;
 					else if (ret < 0 &&
@@ -1731,17 +1914,16 @@ static void rw_thd(struct thread_pool *pool, void *d)
 			}
 
 			if (entry->metadata_enabled) {
-				ret = iiod_buffer_metadata_before_refill(
-					entry->metadata_provider_context);
+				ret = iiod_timed_metadata_before_refill(entry);
 				if (ret == 0) {
-					ssize_t refill_ret = iio_buffer_refill(entry->buf);
-					int metadata_ret = iiod_buffer_metadata_after_refill(
-						entry->metadata_provider_context);
+					ssize_t refill_ret = iiod_timed_buffer_refill(entry);
+					int metadata_ret =
+						iiod_timed_metadata_after_refill(entry);
 					ret = refill_ret < 0 ? refill_ret :
 						(metadata_ret < 0 ? metadata_ret : refill_ret);
 				}
 			} else {
-				ret = iio_buffer_refill(entry->buf);
+				ret = iiod_timed_buffer_refill(entry);
 			}
 
 			pthread_mutex_lock(&entry->thdlist_lock);
@@ -1791,7 +1973,10 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				if (!thd->active || thd->is_writer)
 					continue;
 
+				uint64_t frame_started_ns = iiod_timing_now();
 				ret = send_data(entry, thd, nb_bytes);
+				iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_FRAME,
+					frame_started_ns);
 				if (ret > 0)
 					thd->nb -= ret;
 
@@ -2265,10 +2450,12 @@ retry:
 	pthread_cond_init(&entry->rw_ready_cond, NULL);
 	pthread_mutex_init(&entry->ring_lock, NULL);
 	pthread_cond_init(&entry->ring_ready_cond, NULL);
+	pthread_mutex_init(&entry->timing.lock, NULL);
 
 	ret = thread_pool_add_thread(main_thread_pool, rw_thd, entry, "rw_thd");
 	if (ret) {
 		pthread_mutex_unlock(&devlist_lock);
+		pthread_mutex_destroy(&entry->timing.lock);
 		pthread_cond_destroy(&entry->ring_ready_cond);
 		pthread_mutex_destroy(&entry->ring_lock);
 		pthread_cond_destroy(&entry->rw_ready_cond);
