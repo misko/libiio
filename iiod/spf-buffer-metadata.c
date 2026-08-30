@@ -5,6 +5,7 @@
 #include "spf-buffer-layout.h"
 #include "spf-ddr-burst-request.h"
 #include "spf-ddr-ring-request.h"
+#include "spf-metadata-request.h"
 #include "spf-sampler-coverage.h"
 #include "spf-tandem-metadata.h"
 #include "spf-tandem-session.h"
@@ -54,6 +55,7 @@ struct spf_iiod_metadata_context {
 	bool ring_enabled;
 	bool ring_prefix_complete;
 	bool sampler_continuous;
+	bool metadata_v4;
 };
 
 static bool buffered_capture_is_strict(
@@ -83,46 +85,71 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 {
 	struct spf_ddr_burst_request burst_request;
 	struct spf_ddr_ring_request ring_request;
+	struct spf_metadata_request metadata_request;
 	struct spf_iiod_metadata_context *ctx;
 	const struct iio_context *iio_ctx;
 	struct iio_channel *rx0;
 	long long sample_rate_hz;
+	const void *tandem_request = request;
+	const void *transport_request = NULL;
 	size_t tandem_request_bytes = request_bytes;
+	size_t transport_request_bytes = 0;
+	uint16_t transport_kind = SPF_METADATA_TRANSPORT_ORDINARY;
 	uint32_t timestamp_control;
+	bool metadata_v4 = false;
 	int ret;
 
 	if (!dev || !request || !request_bytes || !provider_context ||
 		!extra_samples || !burst_plan)
 		return -EINVAL;
 	memset(burst_plan, 0, sizeof(*burst_plan));
-	if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
-			SPF_DDR_BURST_REQUEST_BYTES) {
-		ret = spf_ddr_burst_request_decode(&burst_request,
-			(const uint8_t *)request + sizeof(struct adi_tandem_agc_request_v1),
-			SPF_DDR_BURST_REQUEST_BYTES);
+	if (spf_metadata_request_is_envelope(request, request_bytes)) {
+		ret = spf_metadata_request_decode(&metadata_request, request,
+			request_bytes);
 		if (ret)
 			return ret;
+		metadata_v4 = true;
+		tandem_request = metadata_request.tandem_request;
+		tandem_request_bytes = metadata_request.tandem_request_bytes;
+		transport_request = metadata_request.transport_request;
+		transport_request_bytes = metadata_request.transport_request_bytes;
+		transport_kind = metadata_request.transport_kind;
+	} else if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
+			SPF_DDR_BURST_REQUEST_BYTES) {
 		tandem_request_bytes = sizeof(struct adi_tandem_agc_request_v1);
+		transport_request = (const uint8_t *)request + tandem_request_bytes;
+		transport_request_bytes = SPF_DDR_BURST_REQUEST_BYTES;
+		transport_kind = SPF_METADATA_TRANSPORT_BURST;
 	} else if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
 			SPF_DDR_RING_REQUEST_BYTES) {
-		ret = spf_ddr_ring_request_decode(&ring_request,
-			(const uint8_t *)request + sizeof(struct adi_tandem_agc_request_v1),
-			SPF_DDR_RING_REQUEST_BYTES);
+		tandem_request_bytes = sizeof(struct adi_tandem_agc_request_v1);
+		transport_request = (const uint8_t *)request + tandem_request_bytes;
+		transport_request_bytes = SPF_DDR_RING_REQUEST_BYTES;
+		transport_kind = SPF_METADATA_TRANSPORT_RING;
+	}
+	if (transport_kind == SPF_METADATA_TRANSPORT_BURST) {
+		ret = spf_ddr_burst_request_decode(&burst_request, transport_request,
+			transport_request_bytes);
 		if (ret)
 			return ret;
-		tandem_request_bytes = sizeof(struct adi_tandem_agc_request_v1);
+	} else if (transport_kind == SPF_METADATA_TRANSPORT_RING) {
+		ret = spf_ddr_ring_request_decode(&ring_request, transport_request,
+			transport_request_bytes);
+		if (ret)
+			return ret;
 	}
 	struct spf_buffer_layout layout;
 	ret = spf_buffer_layout_resolve(samples_count, mask, words, scan_bytes,
 		&layout);
 	if (ret)
 		return ret;
-	if (tandem_request_bytes != request_bytes && layout.receiver_count != 1U)
+	if (transport_kind != SPF_METADATA_TRANSPORT_ORDINARY &&
+			layout.receiver_count != 1U)
 		return -EINVAL;
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
 		return -ENOMEM;
-	ret = spf_tandem_session_init(&ctx->tandem, request,
+	ret = spf_tandem_session_init(&ctx->tandem, tandem_request,
 		tandem_request_bytes, NULL);
 	if (ret) {
 		free(ctx);
@@ -150,10 +177,9 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		return ret;
 	}
 	ctx->tandem_initialized = true;
-	ctx->burst_enabled = request_bytes == tandem_request_bytes +
-		SPF_DDR_BURST_REQUEST_BYTES;
-	ctx->ring_enabled = request_bytes == tandem_request_bytes +
-		SPF_DDR_RING_REQUEST_BYTES;
+	ctx->burst_enabled = transport_kind == SPF_METADATA_TRANSPORT_BURST;
+	ctx->ring_enabled = transport_kind == SPF_METADATA_TRANSPORT_RING;
+	ctx->metadata_v4 = metadata_v4;
 	ctx->layout = layout;
 	ctx->rx = (struct iio_device *)dev;
 	iio_ctx = iio_device_get_context(dev);

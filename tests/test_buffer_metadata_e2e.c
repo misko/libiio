@@ -110,14 +110,19 @@ int main(int argc, char **argv)
 		iio_context_get_attr_value(ctx, "iio,buffer-metadata");
 	if (stock_server)
 		assert(!capability || (strcmp(capability, "2") &&
-			strcmp(capability, "3")));
+			strcmp(capability, "3") && strcmp(capability, "4")));
 	else
-		assert(capability && !strcmp(capability, "3"));
+		assert(capability && !strcmp(capability, "4"));
 	if (!stock_server) {
 		const char *layouts = iio_context_get_attr_value(ctx,
 			"iio,buffer-metadata-layouts");
 		assert(layouts && !strcmp(layouts,
 			"00000003:1:4:2,0000000c:1:4:2,0000000f:2:8:1"));
+		assert(!strcmp(iio_context_get_attr_value(ctx,
+			"iio,buffer-metadata-record"), "7"));
+		assert(!strcmp(iio_context_get_attr_value(ctx,
+			"iio,buffer-metadata-features"),
+			"fpga-gain-timeline,exact-event-sequence,optional-rssi-telemetry,typed-capture-errors"));
 		assert(!strcmp(iio_context_get_attr_value(ctx,
 			"iio,buffer-ddr-burst"), "1"));
 		assert(!strcmp(iio_context_get_attr_value(ctx,

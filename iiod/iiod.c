@@ -654,13 +654,24 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 	}
 
 #ifdef IIOD_HAS_BUFFER_METADATA
-	ret = iio_context_add_attr(ctx, "iio,buffer-metadata", "3");
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata", "4");
 	if (ret < 0) {
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
 	}
 	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-layouts",
 		"00000003:1:4:2,0000000c:1:4:2,0000000f:2:8:1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-record", "7");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-features",
+		"fpga-gain-timeline,exact-event-sequence,optional-rssi-telemetry,typed-capture-errors");
 	if (ret < 0) {
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
