@@ -305,16 +305,17 @@ static int read_status(struct spf_tandem_session *session,
 		return -errno;
 	if (status.version != ADI_TANDEM_AGC_ABI_VERSION ||
 		status.size != sizeof(status) ||
-		status.ownership_epoch != session->status.ownership_epoch ||
-		(session->request.mode == ADI_TANDEM_AGC_MODE_HOLD &&
+		status.ownership_epoch != session->status.ownership_epoch)
+		return -EPROTO;
+	if (status.overflow_count != session->initial_overflow_count)
+		return -EOVERFLOW;
+	if (status.fault_flags)
+		return -EIO;
+	if ((session->request.mode == ADI_TANDEM_AGC_MODE_HOLD &&
 		 status.state != ADI_TANDEM_AGC_STATE_ARMED_HOLD) ||
 		(session->request.mode == ADI_TANDEM_AGC_MODE_AUTO &&
 		 status.state != ADI_TANDEM_AGC_STATE_ARMED_AUTO))
 		return -EPROTO;
-	if (status.fault_flags)
-		return -EIO;
-	if (status.overflow_count != session->initial_overflow_count)
-		return -EOVERFLOW;
 	*result = status;
 	return 0;
 }

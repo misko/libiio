@@ -592,6 +592,28 @@ static void test_authoritative_fence_contract(void)
 		0, 100) == -ETIMEDOUT);
 	assert(!session.pending_watermark_valid);
 	spf_tandem_session_close(&session);
+
+	/* FAIL_SESSION FIFO overflow sets the hardware fault state and overflow
+	 * counter together. Preserve the specific overflow domain before the
+	 * generic fault/state checks so ring status V2 can report it exactly. */
+	memset(&mock, 0, sizeof(mock));
+	mock.epoch = 32;
+	calls = mock_syscalls(&mock);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_enable_authoritative_timeline(&session) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	assert(spf_tandem_session_start_auto(&session) == 0);
+	mock.state = ADI_TANDEM_AGC_STATE_FAULTED;
+	mock.faults = 1;
+	mock.overflow = 1;
+	assert(spf_tandem_session_snapshot_frame_watermark(&session,
+		0, 100) == -EOVERFLOW);
+	assert(!session.pending_watermark_valid);
+	mock.overflow = 0;
+	assert(spf_tandem_session_snapshot_frame_watermark(&session,
+		0, 100) == -EIO);
+	assert(!session.pending_watermark_valid);
+	spf_tandem_session_close(&session);
 }
 
 static void test_frame_boundaries_hold_and_sequence_gap(void)
