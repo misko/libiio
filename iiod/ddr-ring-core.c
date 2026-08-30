@@ -22,10 +22,6 @@ int iiod_ddr_ring_core_init(struct iiod_ddr_ring_core *ring,
 	ring->slots = slots;
 	ring->slot_count = slot_count;
 	ring->target_frames = target_frames;
-	ring->prefill_frames = target_frames && target_frames < slot_count ?
-		(size_t)target_frames : slot_count;
-	ring->low_water_frames = target_frames && target_frames <= slot_count ?
-		0 : slot_count / 2U;
 	ring->state = SPF_DDR_RING_STATE_RESERVED;
 	return 0;
 }
@@ -110,15 +106,6 @@ int iiod_ddr_ring_core_consumer_reserve(struct iiod_ddr_ring_core *ring,
 			return ring->error_code ? ring->error_code : -EIO;
 		return -EAGAIN;
 	}
-	if (ring->state == SPF_DDR_RING_STATE_RUNNING) {
-		if (!ring->consumer_started) {
-			if (ring->occupied < ring->prefill_frames)
-				return -EAGAIN;
-			ring->consumer_started = true;
-		} else if (ring->occupied <= ring->low_water_frames) {
-			return -EAGAIN;
-		}
-	}
 	if (ring->slots[ring->consumer_position] != IIOD_DDR_RING_SLOT_COMMITTED)
 		return -EIO;
 	ring->slots[ring->consumer_position] = IIOD_DDR_RING_SLOT_CONSUMER;
@@ -132,17 +119,7 @@ bool iiod_ddr_ring_core_consumer_ready(
 {
 	if (!ring || !state_allows_drain(ring->state) || !ring->occupied)
 		return false;
-	if (ring->state != SPF_DDR_RING_STATE_RUNNING)
-		return true;
-	if (!ring->consumer_started)
-		return ring->occupied >= ring->prefill_frames;
-	return ring->occupied > ring->low_water_frames;
-}
-
-bool iiod_ddr_ring_core_prefix_complete(
-	const struct iiod_ddr_ring_core *ring)
-{
-	return ring && ring->produced_frames >= ring->prefill_frames;
+	return true;
 }
 
 void iiod_ddr_ring_core_mark_unavailable(struct iiod_ddr_ring_core *ring,

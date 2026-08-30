@@ -55,7 +55,6 @@ struct spf_iiod_metadata_context {
 	bool tandem_initialized;
 	bool burst_enabled;
 	bool ring_enabled;
-	bool ring_prefix_complete;
 	bool sampler_continuous;
 	bool metadata_v4;
 	bool buffer_prepared;
@@ -113,8 +112,7 @@ static void metadata_failure_set_tandem(struct spf_iiod_metadata_context *ctx,
 static bool buffered_capture_is_strict(
 	const struct spf_iiod_metadata_context *ctx)
 {
-	return ctx->burst_enabled ||
-		(ctx->ring_enabled && !ctx->ring_prefix_complete);
+	return ctx->burst_enabled;
 }
 
 static int gain_db_for_index(const struct spf_iiod_metadata_context *ctx,
@@ -506,15 +504,6 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 	return ret;
 }
 
-void iiod_buffer_metadata_ring_prefix_complete(void *provider_context,
-	bool complete)
-{
-	struct spf_iiod_metadata_context *ctx = provider_context;
-
-	if (ctx && ctx->ring_enabled)
-		ctx->ring_prefix_complete = complete;
-}
-
 void iiod_buffer_metadata_close(void *provider_context)
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
@@ -800,11 +789,11 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (sequence.missing_samples_before) {
 		fprintf(stderr,
 			"SPF metadata streaming counter gap accounted: frame=%llu "
-			"first_sample=%llu missing=%llu ring_prefix_complete=%u\n",
+			"first_sample=%llu missing=%llu ring_enabled=%u\n",
 			(unsigned long long)ctx->frames_emitted,
 			(unsigned long long)first_sample_sequence,
 			(unsigned long long)sequence.missing_samples_before,
-			ctx->ring_prefix_complete ? 1U : 0U);
+			ctx->ring_enabled ? 1U : 0U);
 	}
 	const spf_radio_frame_v6_args_t args = {
 		.frame = {

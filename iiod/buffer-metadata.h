@@ -62,8 +62,6 @@ int iiod_buffer_metadata_after_refill(void *provider_context);
  * is committed. Providers may then encode source gaps instead of rejecting the
  * remaining pressure-limited stream; sealed bursts remain strict throughout.
  */
-void iiod_buffer_metadata_ring_prefix_complete(void *provider_context,
-	bool complete);
 void iiod_buffer_metadata_close(void *provider_context);
 ssize_t iiod_buffer_metadata_get(void *provider_context,
 		const struct iio_device *dev, const struct iio_buffer *buffer,

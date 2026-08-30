@@ -1589,14 +1589,12 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 		ssize_t raw_bytes;
 		size_t slot;
 		int ret;
-		bool prefix_complete;
 		uint64_t wait_started_ns = iiod_timing_now();
 
 		pthread_mutex_lock(&entry->ring_lock);
 		while ((ret = iiod_ddr_ring_core_producer_reserve(
 				&ring->core, &slot)) == -EAGAIN)
 			pthread_cond_wait(&entry->ring_ready_cond, &entry->ring_lock);
-		prefix_complete = iiod_ddr_ring_core_prefix_complete(&ring->core);
 		pthread_mutex_unlock(&entry->ring_lock);
 		iiod_timing_record(entry, IIOD_TIMING_RING_PRODUCER_WAIT,
 			wait_started_ns);
@@ -1607,9 +1605,6 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 			terminal_reason = SPF_DDR_RING_REASON_INTERNAL_ERROR;
 			break;
 		}
-		iiod_buffer_metadata_ring_prefix_complete(
-			entry->metadata_provider_context, prefix_complete);
-
 		ret = iiod_timed_metadata_before_refill(entry);
 		if (ret) {
 			error = ret;

@@ -33,8 +33,7 @@ static void test_finite_wrap(void)
 	assert(iiod_ddr_ring_core_start(&ring) == 0);
 	produce(&ring, 0);
 	produce(&ring, 1);
-	assert(!iiod_ddr_ring_core_consumer_ready(&ring));
-	assert(iiod_ddr_ring_core_consumer_reserve(&ring, &slot) == -EAGAIN);
+	assert(iiod_ddr_ring_core_consumer_ready(&ring));
 	produce(&ring, 2);
 	assert(iiod_ddr_ring_core_consumer_ready(&ring));
 	assert(ring.high_water_frames == 3 && ring.wrap_count == 1);
@@ -60,48 +59,51 @@ static void test_finite_wrap(void)
 	assert(iiod_ddr_ring_core_is_terminal(&ring));
 }
 
-static void test_finite_capture_prefills_target(void)
+static void test_finite_capture_drains_first_frame(void)
 {
 	enum iiod_ddr_ring_slot_state slots[4];
 	struct iiod_ddr_ring_core ring;
 	size_t slot;
 
 	assert(iiod_ddr_ring_core_init(&ring, slots, 4, 2) == 0);
-	assert(ring.prefill_frames == 2 && ring.low_water_frames == 0);
 	assert(iiod_ddr_ring_core_start(&ring) == 0);
 	produce(&ring, 0);
+	assert(iiod_ddr_ring_core_consumer_ready(&ring));
+	consume(&ring, 0);
 	assert(!iiod_ddr_ring_core_consumer_ready(&ring));
 	assert(iiod_ddr_ring_core_consumer_reserve(&ring, &slot) == -EAGAIN);
 	produce(&ring, 1);
 	assert(ring.state == SPF_DDR_RING_STATE_DRAINING);
 	assert(iiod_ddr_ring_core_consumer_ready(&ring));
-	consume(&ring, 0);
 	consume(&ring, 1);
 	assert(ring.state == SPF_DDR_RING_STATE_COMPLETE);
 }
 
-static void test_continuous_capture_uses_low_watermark(void)
+static void test_continuous_capture_drains_without_rebuffering(void)
 {
 	enum iiod_ddr_ring_slot_state slots[4];
 	struct iiod_ddr_ring_core ring;
 	size_t slot;
 
 	assert(iiod_ddr_ring_core_init(&ring, slots, 4, 0) == 0);
-	assert(ring.prefill_frames == 4 && ring.low_water_frames == 2);
 	assert(iiod_ddr_ring_core_start(&ring) == 0);
 	produce(&ring, 0);
-	produce(&ring, 1);
-	produce(&ring, 2);
-	assert(!iiod_ddr_ring_core_consumer_ready(&ring));
-	produce(&ring, 3);
 	assert(iiod_ddr_ring_core_consumer_ready(&ring));
 	consume(&ring, 0);
-	consume(&ring, 1);
 	assert(!iiod_ddr_ring_core_consumer_ready(&ring));
 	assert(iiod_ddr_ring_core_consumer_reserve(&ring, &slot) == -EAGAIN);
+	produce(&ring, 1);
+	produce(&ring, 2);
+	produce(&ring, 3);
+	assert(iiod_ddr_ring_core_consumer_ready(&ring));
+	consume(&ring, 1);
+	consume(&ring, 2);
+	assert(iiod_ddr_ring_core_consumer_ready(&ring));
+	consume(&ring, 3);
+	assert(!iiod_ddr_ring_core_consumer_ready(&ring));
 	produce(&ring, 0);
 	assert(iiod_ddr_ring_core_consumer_ready(&ring));
-	consume(&ring, 2);
+	consume(&ring, 0);
 }
 
 static void test_failure_drains_committed(void)
@@ -177,7 +179,6 @@ static void test_sample_continuity_stops_at_first_gap(void)
 	struct iiod_ddr_ring_core ring;
 
 	assert(iiod_ddr_ring_core_init(&ring, slots, 2, 0) == 0);
-	assert(!iiod_ddr_ring_core_prefix_complete(&ring));
 	assert(iiod_ddr_ring_core_observe_samples(&ring, 1000, 100) == 0);
 	assert(ring.last_contiguous_valid);
 	assert(ring.last_contiguous_sample_sequence == 1100);
@@ -197,8 +198,8 @@ static void test_sample_continuity_stops_at_first_gap(void)
 int main(void)
 {
 	test_finite_wrap();
-	test_finite_capture_prefills_target();
-	test_continuous_capture_uses_low_watermark();
+	test_finite_capture_drains_first_frame();
+	test_continuous_capture_drains_without_rebuffering();
 	test_failure_drains_committed();
 	test_abort_and_cancel();
 	test_v2_provider_failure_reasons();

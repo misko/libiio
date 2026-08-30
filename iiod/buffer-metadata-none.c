@@ -49,13 +49,6 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 	return 0;
 }
 
-void iiod_buffer_metadata_ring_prefix_complete(void *provider_context,
-	bool complete)
-{
-	(void)provider_context;
-	(void)complete;
-}
-
 void iiod_buffer_metadata_close(void *provider_context)
 {
 	(void)provider_context;
