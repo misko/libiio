@@ -63,6 +63,9 @@ size_t spf_radio_frame_v5_header_bytes(uint16_t observation_capacity,
 	uint16_t event_capacity);
 uint16_t spf_tandem_compact_coherent_observations(
 	spf_gain_observation_v3_t *observations, uint16_t count);
+uint16_t spf_tandem_compact_v7_observations(
+	spf_gain_observation_v3_t *observations, uint16_t count,
+	uint64_t frame_start, uint32_t samples_per_channel);
 bool spf_radio_frame_v5_build(void *destination, size_t destination_bytes,
 	const spf_radio_frame_v5_args_t *args);
 bool spf_radio_frame_v6_build(void *destination, size_t destination_bytes,

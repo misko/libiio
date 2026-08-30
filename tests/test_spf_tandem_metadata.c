@@ -165,6 +165,38 @@ static void test_auto_observations_drop_torn_pair(void)
 	assert(observations[1].sample_sequence_before == 300);
 }
 
+static void test_v7_observations_keep_only_canonical_overlap(void)
+{
+	const uint16_t valid = SPF_GAIN_OBSERVATION_VALID |
+		SPF_GAIN_OBSERVATION_SAMPLE_INTERVAL_VALID;
+	spf_gain_observation_v3_t observations[] = {
+		{.sample_sequence_before = 90, .sample_sequence_after = 100,
+		 .flags = valid, .rx1_gain_index = 20, .rx2_gain_index = 20,
+		 .rx1_gain_db = 10, .rx2_gain_db = 10},
+		{.sample_sequence_before = 110, .sample_sequence_after = 120,
+		 .flags = SPF_GAIN_OBSERVATION_SAMPLE_INTERVAL_VALID,
+		 .rx1_gain_index = 20, .rx2_gain_index = 20,
+		 .rx1_gain_db = 10, .rx2_gain_db = 10},
+		{.sample_sequence_before = 120, .sample_sequence_after = 130,
+		 .flags = valid, .rx1_gain_index = 20, .rx2_gain_index = 21,
+		 .rx1_gain_db = 10, .rx2_gain_db = 11},
+		{.sample_sequence_before = 130, .sample_sequence_after = 140,
+		 .flags = valid, .rx1_gain_index = 21, .rx2_gain_index = 21,
+		 .rx1_gain_db = 11, .rx2_gain_db = 11, .reserved1 = 1},
+		{.sample_sequence_before = 140, .sample_sequence_after = 150,
+		 .flags = valid, .rx1_gain_index = 21, .rx2_gain_index = 21,
+		 .rx1_gain_db = 11, .rx2_gain_db = 11},
+		{.sample_sequence_before = 200, .sample_sequence_after = 210,
+		 .flags = valid, .rx1_gain_index = 21, .rx2_gain_index = 21,
+		 .rx1_gain_db = 11, .rx2_gain_db = 11},
+	};
+
+	assert(spf_tandem_compact_v7_observations(observations, 6,
+		100, 100) == 2);
+	assert(observations[0].sample_sequence_before == 90);
+	assert(observations[1].sample_sequence_before == 140);
+}
+
 static void test_v6_single_rx_and_exact_gap(void)
 {
 	uint8_t output[512];
@@ -244,6 +276,7 @@ int main(void)
 	test_golden_layout_and_crc();
 	test_invalid_temperature_is_serialized_without_header_growth();
 	test_auto_observations_drop_torn_pair();
+	test_v7_observations_keep_only_canonical_overlap();
 	test_v6_single_rx_and_exact_gap();
 	puts("SPF tandem metadata tests passed");
 	return 0;

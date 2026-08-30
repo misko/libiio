@@ -15,6 +15,7 @@ struct iiod_buffer_burst_plan {
 	uint64_t ring_capacity_iq_bytes;
 	uint64_t ring_capture_frames;
 	uint32_t ring_flags;
+	uint16_t ring_status_version;
 	size_t metadata_capacity;
 };
 

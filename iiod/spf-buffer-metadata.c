@@ -5,6 +5,7 @@
 #include "spf-buffer-layout.h"
 #include "spf-ddr-burst-request.h"
 #include "spf-ddr-ring-request.h"
+#include "spf-ddr-ring-status.h"
 #include "spf-metadata-request.h"
 #include "spf-sampler-coverage.h"
 #include "spf-tandem-metadata.h"
@@ -35,6 +36,7 @@ struct spf_iiod_metadata_context {
 	struct iio_device *rx;
 	struct iio_device *phy;
 	spf_gain_sampler_t sampler;
+	spf_gain_table_t gain_table;
 	struct spf_temperature_sampler temperature_sampler;
 	struct spf_tandem_session tandem;
 	struct spf_buffer_layout layout;
@@ -64,6 +66,16 @@ static bool buffered_capture_is_strict(
 {
 	return ctx->burst_enabled ||
 		(ctx->ring_enabled && !ctx->ring_prefix_complete);
+}
+
+static int gain_db_for_index(const struct spf_iiod_metadata_context *ctx,
+	uint8_t gain_index, int8_t *gain_db)
+{
+	if (!ctx || !gain_db || !ctx->gain_table.valid ||
+		gain_index >= ctx->gain_table.entry_count)
+		return -EPROTO;
+	*gain_db = ctx->gain_table.db_by_index[gain_index];
+	return 0;
 }
 
 static uint64_t make_stream_id(const void *address)
@@ -152,6 +164,8 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		return -ENOMEM;
 	ret = spf_tandem_session_init(&ctx->tandem, tandem_request,
 		tandem_request_bytes, NULL);
+	if (!ret && metadata_v4)
+		ret = spf_tandem_session_enable_authoritative_timeline(&ctx->tandem);
 	if (ret) {
 		free(ctx);
 		return ret;
@@ -165,8 +179,8 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		free(ctx);
 		return -ENOSPC;
 	}
-	ret = spf_tandem_request_validate_event_window(&ctx->tandem.request,
-		(uint32_t)samples_count);
+	ret = metadata_v4 ? 0 : spf_tandem_request_validate_event_window(
+		&ctx->tandem.request, (uint32_t)samples_count);
 	if (ret) {
 		fprintf(stderr,
 			"SPF tandem request cannot retain the refill arm window: "
@@ -181,12 +195,15 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	ctx->burst_enabled = transport_kind == SPF_METADATA_TRANSPORT_BURST;
 	ctx->ring_enabled = transport_kind == SPF_METADATA_TRANSPORT_RING;
 	ctx->metadata_v4 = metadata_v4;
+	burst_plan->ring_status_version = metadata_v4 ?
+		SPF_DDR_RING_STATUS_VERSION_V2 : SPF_DDR_RING_STATUS_VERSION_V1;
 	ctx->layout = layout;
 	ctx->rx = (struct iio_device *)dev;
 	iio_ctx = iio_device_get_context(dev);
 	ctx->phy = iio_context_find_device(iio_ctx, "ad9361-phy");
 	if (!ctx->phy || !spf_gain_is_full_table_mode(ctx->phy) ||
-		!spf_gain_is_digital_gain_disabled(ctx->phy)) {
+		!spf_gain_is_digital_gain_disabled(ctx->phy) ||
+		(metadata_v4 && !spf_gain_table_load(ctx->phy, &ctx->gain_table))) {
 		free(ctx);
 		return -ENOTSUP;
 	}
@@ -233,6 +250,8 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		free(ctx);
 		return ret;
 	}
+	if (metadata_v4 && ctx->observation_interval_samples > samples_count)
+		ctx->observation_interval_samples = (uint32_t)samples_count;
 	ctx->stream_id = make_stream_id(ctx);
 	if (!spf_gain_sampler_start(&ctx->sampler,
 			ctx->observation_interval_samples)) {
@@ -256,9 +275,13 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			burst_plan->ring_capture_frames = ring_request.capture_frames;
 			burst_plan->ring_flags = ring_request.flags;
 		}
-		burst_plan->metadata_capacity = spf_radio_frame_v5_header_bytes(
-			(uint16_t)ctx->tandem.request.observation_capacity,
-			(uint16_t)ctx->tandem.request.event_capacity);
+		burst_plan->metadata_capacity = metadata_v4 ?
+			spf_radio_frame_v7_header_bytes(
+				(uint16_t)ctx->tandem.request.observation_capacity,
+				(uint16_t)ctx->tandem.request.event_capacity) :
+			spf_radio_frame_v5_header_bytes(
+				(uint16_t)ctx->tandem.request.observation_capacity,
+				(uint16_t)ctx->tandem.request.event_capacity);
 		if (!burst_plan->metadata_capacity) {
 			iiod_buffer_metadata_close(ctx);
 			*provider_context = NULL;
@@ -277,6 +300,19 @@ int iiod_buffer_metadata_buffer_opening(void *provider_context,
 
 	if (!ctx || !kernel_buffers_count)
 		return -EINVAL;
+	if (ctx->metadata_v4) {
+		ret = spf_tandem_request_validate_event_window_depth(
+			&ctx->tandem.request, ctx->samples_per_channel,
+			kernel_buffers_count);
+		if (ret) {
+			fprintf(stderr,
+				"SPF tandem v4 request cannot retain the DMA admission "
+				"window: samples=%u kernel_buffers=%u events=%u error=%d\n",
+				ctx->samples_per_channel, kernel_buffers_count,
+				ctx->tandem.request.event_capacity, ret);
+			return ret;
+		}
+	}
 	ctx->sampler_continuous = spf_sampler_requires_continuous_coverage(
 		ctx->burst_enabled, ctx->ring_enabled);
 	if (!ctx->sampler_continuous) {
@@ -289,6 +325,19 @@ int iiod_buffer_metadata_buffer_opening(void *provider_context,
 	ret = spf_tandem_session_acquire(&ctx->tandem);
 	if (ret)
 		return ret;
+	if (ctx->metadata_v4 &&
+		(!ctx->gain_table.valid ||
+		 ctx->tandem.status.minimum_gain_index >=
+			ctx->gain_table.entry_count ||
+		 ctx->tandem.status.maximum_gain_index >=
+			ctx->gain_table.entry_count ||
+		 ctx->gain_table.db_by_index[
+			ctx->tandem.status.minimum_gain_index] !=
+			ctx->tandem.status.minimum_gain_db ||
+		 ctx->gain_table.db_by_index[
+			ctx->tandem.status.maximum_gain_index] !=
+			ctx->tandem.status.maximum_gain_db))
+		return -EPROTO;
 	ctx->buffer_prepared = true;
 	ctx->refills_started = 0;
 	if (ctx->sampler_continuous) {
@@ -354,7 +403,9 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 	/* Every completed refill proves the owner is alive, including frames that
 	 * metadata_get() subsequently discards during sampler startup.
 	 */
-	return spf_tandem_session_heartbeat(&ctx->tandem);
+	return ctx->metadata_v4 ?
+		spf_tandem_session_snapshot_watermark(&ctx->tandem) :
+		spf_tandem_session_heartbeat(&ctx->tandem);
 }
 
 void iiod_buffer_metadata_ring_prefix_complete(void *provider_context,
@@ -391,11 +442,13 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	struct spf_iiod_metadata_context *ctx = provider_context;
 	spf_gain_observation_v3_t observations[SPF_IIOD_OBSERVATION_CAPACITY];
 	struct adi_tandem_agc_event events[SPF_TANDEM_EVENT_QUEUE_CAPACITY];
+	spf_gain_event_v7_t timeline_events[SPF_TANDEM_EVENT_QUEUE_CAPACITY];
+	struct spf_tandem_frame_preview preview;
 	uint32_t observation_overflow_count = 0;
 	uint64_t first_sample_sequence;
 	struct spf_buffer_sequence_result sequence;
-	spf_rssi_pair_t rssi_start;
-	spf_rssi_pair_t rssi_end;
+	spf_rssi_pair_t rssi_start = {0};
+	spf_rssi_pair_t rssi_end = {0};
 	uint32_t rssi_overflow_count = 0;
 	uint16_t observation_count;
 	size_t event_count;
@@ -407,9 +460,12 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (!ctx || dev != ctx->rx || !buffer || !metadata || !iq_offset ||
 		!iq_bytes)
 		return -EINVAL;
-	header_bytes = spf_radio_frame_v5_header_bytes(
-		(uint16_t)ctx->tandem.request.observation_capacity,
-		(uint16_t)ctx->tandem.request.event_capacity);
+	header_bytes = ctx->metadata_v4 ? spf_radio_frame_v7_header_bytes(
+			(uint16_t)ctx->tandem.request.observation_capacity,
+			(uint16_t)ctx->tandem.request.event_capacity) :
+		spf_radio_frame_v5_header_bytes(
+			(uint16_t)ctx->tandem.request.observation_capacity,
+			(uint16_t)ctx->tandem.request.event_capacity);
 	if (!header_bytes || metadata_capacity < header_bytes)
 		return -ENOSPC;
 	if (raw_bytes != ctx->layout.raw_bytes) {
@@ -430,6 +486,139 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		first_sample_sequence, ctx->samples_per_channel, observations,
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		&observation_overflow_count);
+	if (ctx->metadata_v4) {
+		int8_t rx1_gain_db_start;
+		int8_t rx2_gain_db_start;
+		int8_t rx1_gain_db_end;
+		int8_t rx2_gain_db_end;
+		bool rssi_valid;
+
+		observation_count = spf_tandem_compact_v7_observations(
+			observations, observation_count, first_sample_sequence,
+			ctx->samples_per_channel);
+		rssi_valid = spf_gain_sampler_collect_rssi(&ctx->sampler,
+			first_sample_sequence, ctx->samples_per_channel,
+			&rssi_start, &rssi_end, &rssi_overflow_count);
+		if (!rssi_valid || rssi_overflow_count) {
+			rssi_start = (spf_rssi_pair_t){0};
+			rssi_end = (spf_rssi_pair_t){0};
+		}
+		ret = spf_tandem_session_preview(&ctx->tandem,
+			first_sample_sequence, ctx->samples_per_channel,
+			timeline_events, ctx->tandem.request.event_capacity,
+			&preview);
+		if (ret)
+			return ret;
+		ret = spf_buffer_sequence_resolve(&ctx->sequence,
+			first_sample_sequence, ctx->samples_per_channel, &sequence);
+		if (ret)
+			return ret;
+		if (buffered_capture_is_strict(ctx) &&
+				sequence.missing_samples_before)
+			return -EOVERFLOW;
+		ret = gain_db_for_index(ctx,
+			preview.timeline.gain_start.rx1_gain_index,
+			&rx1_gain_db_start);
+		if (!ret)
+			ret = gain_db_for_index(ctx,
+				preview.timeline.gain_start.rx2_gain_index,
+				&rx2_gain_db_start);
+		if (!ret)
+			ret = gain_db_for_index(ctx,
+				preview.timeline.gain_end.rx1_gain_index,
+				&rx1_gain_db_end);
+		if (!ret)
+			ret = gain_db_for_index(ctx,
+				preview.timeline.gain_end.rx2_gain_index,
+				&rx2_gain_db_end);
+		if (ret)
+			return ret;
+		const spf_radio_frame_v7_args_t args = {
+			.metadata_features = SPF_META_REQUIRED_FEATURES_V7,
+			.stream_id = ctx->stream_id,
+			.buffer_sequence = sequence.buffer_sequence,
+			.first_sample_sequence = first_sample_sequence,
+			.samples_per_channel = ctx->samples_per_channel,
+			.iq_payload_bytes = (uint32_t)ctx->layout.iq_bytes,
+			.enabled_scan_mask = ctx->layout.enabled_scan_mask,
+			.gain_observation_interval_samples =
+				ctx->observation_interval_samples,
+			.gain_observations = observations,
+			.gain_observation_count = observation_count,
+			.gain_observation_capacity =
+				(uint16_t)ctx->tandem.request.observation_capacity,
+			.gain_observation_overflow_count =
+				observation_overflow_count,
+			.gain_events = timeline_events,
+			.gain_event_count = (uint16_t)preview.event_count,
+			.gain_event_capacity =
+				(uint16_t)ctx->tandem.request.event_capacity,
+			.gain_event_overflow_count = 0,
+			.rssi_start = {
+				.rx1_qdb = rssi_start.rx1_qdb,
+				.rx2_qdb = rssi_start.rx2_qdb,
+				.valid = rssi_start.valid,
+				.duration_ns = rssi_start.duration_ns,
+			},
+			.rssi_end = {
+				.rx1_qdb = rssi_end.rx1_qdb,
+				.rx2_qdb = rssi_end.rx2_qdb,
+				.valid = rssi_end.valid,
+				.duration_ns = rssi_end.duration_ns,
+			},
+			.device_iio_overflow =
+				sequence.missing_samples_before != 0,
+			.rx1_gain_db_start = rx1_gain_db_start,
+			.rx2_gain_db_start = rx2_gain_db_start,
+			.rx1_gain_db_end = rx1_gain_db_end,
+			.rx2_gain_db_end = rx2_gain_db_end,
+			.rx1_first_change_sample =
+				preview.timeline.rx1_first_change_sample,
+			.rx2_first_change_sample =
+				preview.timeline.rx2_first_change_sample,
+			.missing_samples_before = sequence.missing_samples_before,
+			.ownership_epoch = preview.status.ownership_epoch,
+			.tandem_state = preview.status.state,
+			.tandem_fault_flags = preview.status.fault_flags,
+			.tandem_transition_count_end =
+				(uint32_t)preview.timeline.transition_count_end,
+			.gain_table_id = preview.status.gain_table_id,
+			.threshold_provenance = preview.status.threshold_provenance,
+			.minimum_gain_db = preview.status.minimum_gain_db,
+			.maximum_gain_db = preview.status.maximum_gain_db,
+			.initial_gain_db = preview.status.initial_gain_db,
+			.minimum_gain_index = preview.status.minimum_gain_index,
+			.maximum_gain_index = preview.status.maximum_gain_index,
+			.rx1_gain_index_start =
+				preview.timeline.gain_start.rx1_gain_index,
+			.rx2_gain_index_start =
+				preview.timeline.gain_start.rx2_gain_index,
+			.rx1_gain_index_end =
+				preview.timeline.gain_end.rx1_gain_index,
+			.rx2_gain_index_end =
+				preview.timeline.gain_end.rx2_gain_index,
+			.ad9361_temperature_mdeg_c =
+				ctx->temperature_sampler_started ?
+				spf_temperature_sampler_get(&ctx->temperature_sampler) :
+				SPF_TEMPERATURE_INVALID,
+			.tandem_transition_count_start =
+				(uint32_t)preview.timeline.transition_count_start,
+			.timeline_flags = SPF_FPGA_GAIN_TIMELINE_COMPLETE,
+			.event_sequence_start = preview.event_sequence_start,
+		};
+		if (!preview.event_sequence_start_valid ||
+			!spf_radio_frame_v7_base_build(metadata, metadata_capacity,
+				&args))
+			return -EPROTO;
+		ret = spf_tandem_session_commit(&ctx->tandem, &preview);
+		if (ret)
+			return ret;
+		spf_buffer_sequence_commit(&ctx->sequence, &sequence);
+		ctx->frames_emitted++;
+		*iq_offset = sizeof(first_sample_sequence);
+		*iq_bytes = ctx->layout.iq_bytes;
+		return (ssize_t)header_bytes;
+	}
 	if (buffered_capture_is_strict(ctx) &&
 			observation_overflow_count) {
 		fprintf(stderr,

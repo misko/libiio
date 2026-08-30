@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "spf-tandem-session.h"
 
+#include <spf_radio_frame_v3.h>
+
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
@@ -12,16 +14,21 @@
 #include <string.h>
 
 struct mock_device {
-	struct adi_tandem_agc_event events[8];
+	struct adi_tandem_agc_event events[64];
 	size_t event_count;
 	uint32_t epoch;
 	uint32_t faults;
 	uint32_t overflow;
 	uint32_t acquire_transitions;
 	uint32_t transitions;
+	uint32_t state;
 	uint32_t lagged_transitions;
 	unsigned int lagged_status_reads;
+	unsigned int read_eagain_count;
+	unsigned int wait_timeout_count;
 	size_t read_batch;
+	unsigned int read_count;
+	unsigned int wait_count;
 	int open_count;
 	int close_count;
 	int acquire_count;
@@ -87,7 +94,8 @@ static void fill_status(struct mock_device *mock,
 	memset(status, 0, sizeof(*status));
 	status->version = ADI_TANDEM_AGC_ABI_VERSION;
 	status->size = sizeof(*status);
-	status->state = ADI_TANDEM_AGC_STATE_ARMED_AUTO;
+	status->state = mock->state ? mock->state :
+		ADI_TANDEM_AGC_STATE_ARMED_AUTO;
 	status->ownership_epoch = mock->epoch;
 	status->fault_flags = mock->faults;
 	status->overflow_count = mock->overflow;
@@ -96,6 +104,8 @@ static void fill_status(struct mock_device *mock,
 	status->minimum_gain_db = -20;
 	status->maximum_gain_db = 71;
 	status->initial_gain_db = 20;
+	status->rx1_gain_index = 19;
+	status->rx2_gain_index = 19;
 }
 
 static int mock_ioctl(int fd, unsigned long request, void *argument,
@@ -147,6 +157,12 @@ static ssize_t mock_read(int fd, void *destination, size_t bytes, void *opaque)
 	struct mock_device *mock = opaque;
 	size_t count;
 	assert(fd == 23);
+	mock->read_count++;
+	if (mock->read_eagain_count) {
+		mock->read_eagain_count--;
+		errno = EAGAIN;
+		return -1;
+	}
 	if (!mock->event_count) {
 		errno = EAGAIN;
 		return -1;
@@ -171,12 +187,26 @@ static int mock_close(int fd, void *opaque)
 	return 0;
 }
 
+static int mock_wait_readable(int fd, int timeout_ms, void *opaque)
+{
+	struct mock_device *mock = opaque;
+	assert(fd == 23);
+	assert(timeout_ms > 0);
+	mock->wait_count++;
+	if (mock->wait_timeout_count) {
+		mock->wait_timeout_count--;
+		return 0;
+	}
+	return 1;
+}
+
 static struct spf_tandem_syscalls mock_syscalls(struct mock_device *mock)
 {
 	const struct spf_tandem_syscalls calls = {
 		.open_device = mock_open,
 		.ioctl_device = mock_ioctl,
 		.read_device = mock_read,
+		.wait_readable = mock_wait_readable,
 		.close_device = mock_close,
 		.opaque = mock,
 	};
@@ -198,6 +228,18 @@ static void test_request_decoder(void)
 	decoded.cooldown_periods = 8;
 	assert(spf_tandem_request_validate_event_window(&decoded, 65U * 1024U) ==
 		0);
+	decoded.power_measurement_samples = 1024;
+	decoded.cooldown_periods = 3;
+	for (unsigned int kernel_buffers = 1; kernel_buffers <= 6;
+			kernel_buffers += kernel_buffers == 1 ? 1 : 2) {
+		decoded.event_capacity = kernel_buffers + 1;
+		assert(spf_tandem_request_validate_event_window_depth(&decoded,
+			4096, kernel_buffers) == 0);
+		decoded.event_capacity--;
+		assert(spf_tandem_request_validate_event_window_depth(&decoded,
+			4096, kernel_buffers) == -ENOSPC);
+	}
+	decoded.event_capacity = 16;
 	decoded.mode = ADI_TANDEM_AGC_MODE_HOLD;
 	assert(spf_tandem_request_validate_event_window(&decoded, UINT32_MAX) == 0);
 	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
@@ -227,6 +269,214 @@ static void test_request_decoder(void)
 		-EINVAL);
 	wire[103] = 1;
 	assert(spf_tandem_request_decode(&decoded, wire, sizeof(wire)) == -EINVAL);
+}
+
+static void test_transactional_watermark_and_cdc_delay(void)
+{
+	uint8_t wire[104];
+	struct mock_device mock = {.epoch = 16};
+	struct spf_tandem_syscalls calls = mock_syscalls(&mock);
+	struct spf_tandem_session session;
+	struct spf_tandem_frame_preview first;
+	struct spf_tandem_frame_preview repeated;
+	spf_gain_event_v7_t output[4];
+
+	valid_request(wire);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_enable_authoritative_timeline(&session) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	mock.events[0] = (struct adi_tandem_agc_event){105, 0, 0x13, 20, 20};
+	mock.events[1] = (struct adi_tandem_agc_event){205, 1, 0x13, 21, 21};
+	mock.event_count = 2;
+	mock.transitions = 2;
+	mock.read_eagain_count = 1;
+	mock.wait_timeout_count = 1;
+	assert(spf_tandem_session_snapshot_watermark(&session) == 0);
+	assert(spf_tandem_session_preview(&session, 100, 100,
+		output, 4, &first) == 0);
+	assert(mock.read_count == 2);
+	assert(mock.wait_count == 1);
+	assert(first.event_count == 1);
+	assert(first.timeline.consumed_event_count == 1);
+	assert(first.timeline.gain_start.rx1_gain_index == 19);
+	assert(first.timeline.gain_end.rx1_gain_index == 20);
+	assert(first.timeline.transition_count_start == 0);
+	assert(first.timeline.transition_count_end == 1);
+	assert(first.event_sequence_start_valid && first.event_sequence_start == 0);
+	assert(session.timeline_state.transition_count == 0);
+	assert(session.queue_count == 2);
+	/* Serialization is deliberately outside the ledger transaction. A failed
+	 * builder call leaves the preview retryable and the committed state intact. */
+	uint8_t invalid_metadata[16] = {0};
+	const spf_radio_frame_v7_args_t invalid_args = {0};
+	assert(!spf_radio_frame_v7_base_build(invalid_metadata,
+		sizeof(invalid_metadata), &invalid_args));
+	assert(session.timeline_state.transition_count == 0);
+	assert(session.queue_count == 2);
+	assert(spf_tandem_session_preview(&session, 100, 100,
+		output, 4, &repeated) == 0);
+	assert(repeated.generation == first.generation);
+	assert(repeated.event_count == first.event_count);
+	assert(session.timeline_state.transition_count == 0);
+	assert(spf_tandem_session_commit(&session, &first) == 0);
+	assert(session.timeline_state.transition_count == 1);
+	assert(session.queue_count == 1);
+	assert(spf_tandem_session_commit(&session, &repeated) == -EINVAL);
+
+	/* The future event already drained at the first fixed watermark remains
+	 * the first event of the next frame; a fresh status snapshot accounts for
+	 * it relative to the newly committed state. */
+	assert(spf_tandem_session_snapshot_watermark(&session) == 0);
+	assert(spf_tandem_session_preview(&session, 200, 100,
+		output, 4, &first) == 0);
+	assert(first.event_count == 1 && output[0].sample_sequence == 205);
+	assert(first.timeline.gain_start.rx1_gain_index == 20);
+	assert(first.timeline.gain_end.rx1_gain_index == 21);
+	assert(spf_tandem_session_commit(&session, &first) == 0);
+	assert(session.queue_count == 0);
+	spf_tandem_session_close(&session);
+}
+
+static void test_fixed_watermark_wrap_and_retry_exhaustion(void)
+{
+	uint8_t wire[104];
+	struct mock_device mock = {.epoch = 17};
+	struct spf_tandem_syscalls calls = mock_syscalls(&mock);
+	struct spf_tandem_session session;
+	struct spf_tandem_frame_preview preview;
+	spf_gain_event_v7_t output[4];
+
+	valid_request(wire);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_enable_authoritative_timeline(&session) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	session.timeline_state.transition_count = 254;
+	session.timeline_state.next_event_sequence = UINT32_MAX;
+	mock.events[0] = (struct adi_tandem_agc_event){10, UINT32_MAX,
+		0x13, 20, 20};
+	mock.events[1] = (struct adi_tandem_agc_event){11, 0, 0x13, 21, 21};
+	mock.event_count = 2;
+	mock.transitions = 0;
+	assert(spf_tandem_session_snapshot_watermark(&session) == 0);
+	assert(session.pending_transition_watermark == 256);
+	assert(spf_tandem_session_preview(&session, 0, 100,
+		output, 4, &preview) == 0);
+	assert(preview.event_count == 2);
+	assert(preview.next_state.transition_count == 256);
+	assert(spf_tandem_session_commit(&session, &preview) == 0);
+	spf_tandem_session_close(&session);
+
+	memset(&mock, 0, sizeof(mock));
+	mock.epoch = 18;
+	calls = mock_syscalls(&mock);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_enable_authoritative_timeline(&session) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	mock.transitions = 1;
+	mock.read_eagain_count = 1;
+	mock.wait_timeout_count = 1;
+	assert(spf_tandem_session_snapshot_watermark(&session) == 0);
+	assert(spf_tandem_session_preview(&session, 0, 100,
+		output, 4, &preview) == -EILSEQ);
+	assert(session.timeline_state.transition_count == 0);
+	assert(session.timeline_state.event_sequence_valid);
+	assert(session.timeline_state.next_event_sequence == 0);
+	spf_tandem_session_close(&session);
+}
+
+static void test_frame_boundaries_hold_and_sequence_gap(void)
+{
+	uint8_t wire[104];
+	struct mock_device mock = {.epoch = 19};
+	struct spf_tandem_syscalls calls = mock_syscalls(&mock);
+	struct spf_tandem_session session;
+	struct spf_tandem_frame_preview preview;
+	spf_gain_event_v7_t output[4];
+
+	valid_request(wire);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_enable_authoritative_timeline(&session) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	session.timeline_state.next_event_sequence = UINT32_MAX;
+	mock.events[0] = (struct adi_tandem_agc_event){100, UINT32_MAX,
+		0x13, 20, 20};
+	mock.events[1] = (struct adi_tandem_agc_event){100, 0,
+		0x13, 21, 21};
+	mock.events[2] = (struct adi_tandem_agc_event){200, 1,
+		0x13, 22, 22};
+	mock.event_count = 3;
+	mock.transitions = 3;
+	assert(spf_tandem_session_snapshot_watermark(&session) == 0);
+	assert(spf_tandem_session_preview(&session, 100, 100,
+		output, 4, &preview) == 0);
+	assert(preview.event_count == 2);
+	assert(output[0].event_sequence == UINT32_MAX);
+	assert(output[1].event_sequence == 0);
+	assert(preview.timeline.gain_start.rx1_gain_index == 21);
+	assert(preview.timeline.gain_end.rx1_gain_index == 21);
+	assert(preview.timeline.rx1_first_change_sample == 0);
+	assert(preview.timeline.consumed_event_count == 2);
+	assert(spf_tandem_session_commit(&session, &preview) == 0);
+	assert(session.queue_count == 1);
+	assert(spf_tandem_session_snapshot_watermark(&session) == 0);
+	assert(spf_tandem_session_preview(&session, 200, 100,
+		output, 4, &preview) == 0);
+	assert(preview.event_count == 1 && output[0].sample_sequence == 200);
+	assert(preview.timeline.gain_start.rx1_gain_index == 22);
+	assert(spf_tandem_session_commit(&session, &preview) == 0);
+	spf_tandem_session_close(&session);
+
+	memset(&mock, 0, sizeof(mock));
+	mock.epoch = 20;
+	mock.state = ADI_TANDEM_AGC_STATE_ARMED_HOLD;
+	calls = mock_syscalls(&mock);
+	put_le32(wire + 12, ADI_TANDEM_AGC_MODE_HOLD);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_enable_authoritative_timeline(&session) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	assert(spf_tandem_session_snapshot_watermark(&session) == 0);
+	assert(spf_tandem_session_preview(&session, 0, 100,
+		output, 4, &preview) == 0);
+	assert(preview.event_count == 0);
+	assert(preview.event_sequence_start_valid);
+	assert(preview.event_sequence_start == 0);
+	assert(preview.timeline.gain_start.rx1_gain_index == 19);
+	assert(preview.timeline.gain_end.rx1_gain_index == 19);
+	assert(spf_tandem_session_commit(&session, &preview) == 0);
+	spf_tandem_session_close(&session);
+
+	memset(&mock, 0, sizeof(mock));
+	mock.epoch = 21;
+	calls = mock_syscalls(&mock);
+	valid_request(wire);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_enable_authoritative_timeline(&session) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	mock.events[0] = (struct adi_tandem_agc_event){10, 0, 0x13, 20, 20};
+	mock.events[1] = (struct adi_tandem_agc_event){11, 2, 0x13, 21, 21};
+	mock.event_count = 2;
+	mock.transitions = 2;
+	assert(spf_tandem_session_snapshot_watermark(&session) == 0);
+	assert(spf_tandem_session_preview(&session, 0, 100,
+		output, 4, &preview) == -EILSEQ);
+	assert(session.timeline_state.transition_count == 0);
+	assert(session.queue_count == 2);
+	spf_tandem_session_close(&session);
+
+	memset(&mock, 0, sizeof(mock));
+	mock.epoch = 22;
+	calls = mock_syscalls(&mock);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_enable_authoritative_timeline(&session) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	mock.events[0] = (struct adi_tandem_agc_event){10, 1, 0x13, 20, 20};
+	mock.event_count = 1;
+	mock.transitions = 1;
+	assert(spf_tandem_session_snapshot_watermark(&session) == 0);
+	assert(spf_tandem_session_preview(&session, 0, 100,
+		output, 4, &preview) == -EILSEQ);
+	assert(session.timeline_state.next_event_sequence == 0);
+	spf_tandem_session_close(&session);
 }
 
 static void test_lifecycle_and_partition(void)
@@ -399,6 +649,9 @@ int main(void)
 	test_sequence_and_status_faults_fail_closed();
 	test_status_snapshot_catches_up_to_event_fifo();
 	test_status_counter_wraps_without_losing_continuity();
+	test_transactional_watermark_and_cdc_delay();
+	test_fixed_watermark_wrap_and_retry_exhaustion();
+	test_frame_boundaries_hold_and_sequence_gap();
 	puts("SPF tandem session tests passed");
 	return 0;
 }

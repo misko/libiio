@@ -30,6 +30,49 @@ uint16_t spf_tandem_compact_coherent_observations(
 	return write_index;
 }
 
+uint16_t spf_tandem_compact_v7_observations(
+	spf_gain_observation_v3_t *observations, uint16_t count,
+	uint64_t frame_start, uint32_t samples_per_channel)
+{
+	const uint16_t required_flags = SPF_GAIN_OBSERVATION_VALID |
+		SPF_GAIN_OBSERVATION_SAMPLE_INTERVAL_VALID;
+	uint64_t frame_end;
+	uint64_t previous_before = 0;
+	uint64_t previous_after = 0;
+	uint16_t read_index;
+	uint16_t write_index = 0;
+
+	if (!observations || !samples_per_channel ||
+		frame_start > UINT64_MAX - samples_per_channel)
+		return 0;
+	frame_end = frame_start + samples_per_channel;
+	for (read_index = 0; read_index < count; ++read_index) {
+		const spf_gain_observation_v3_t *observation =
+			&observations[read_index];
+
+		if (observation->flags != required_flags ||
+			observation->reserved0 || observation->reserved1 ||
+			observation->rx1_gain_index != observation->rx2_gain_index ||
+			observation->rx1_gain_index > UINT8_C(0x7f) ||
+			observation->rx1_gain_db != observation->rx2_gain_db ||
+			observation->rx1_gain_db == SPF_GAIN_DB_INVALID ||
+			observation->sample_sequence_after <
+				observation->sample_sequence_before ||
+			observation->sample_sequence_after < frame_start ||
+			observation->sample_sequence_before >= frame_end ||
+			(write_index &&
+			 (observation->sample_sequence_before < previous_before ||
+			  observation->sample_sequence_after < previous_after)))
+			continue;
+		previous_before = observation->sample_sequence_before;
+		previous_after = observation->sample_sequence_after;
+		if (write_index != read_index)
+			observations[write_index] = *observation;
+		write_index++;
+	}
+	return write_index;
+}
+
 size_t spf_radio_frame_v5_header_bytes(uint16_t observation_capacity,
 	uint16_t event_capacity)
 {
