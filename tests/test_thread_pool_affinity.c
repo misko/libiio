@@ -12,24 +12,46 @@
 struct affinity_result {
 	int eventfd;
 	int cpu;
-	int passed;
+	cpu_set_t default_affinity;
+	int pinned_passed;
+	int default_passed;
 };
 
-static void check_affinity(struct thread_pool *pool, void *data)
+static void check_default_affinity(struct thread_pool *pool, void *data)
+{
+	struct affinity_result *result = data;
+	cpu_set_t cpuset;
+	uint64_t signal = 1;
+
+	result->default_passed =
+		sched_getaffinity(0, sizeof(cpuset), &cpuset) == 0 &&
+		CPU_EQUAL(&result->default_affinity, &cpuset);
+	if (write(result->eventfd, &signal, sizeof(signal)) != sizeof(signal))
+		result->default_passed = 0;
+}
+
+static void check_pinned_affinity(struct thread_pool *pool, void *data)
 {
 	struct affinity_result *result = data;
 	cpu_set_t cpuset;
 	uint64_t signal = 1;
 	int i;
+	int ret;
 
-	result->passed = sched_getaffinity(0, sizeof(cpuset), &cpuset) == 0 &&
+	result->pinned_passed = sched_getaffinity(0, sizeof(cpuset), &cpuset) == 0 &&
 		CPU_ISSET((unsigned int)result->cpu, &cpuset);
-	for (i = 0; result->passed && i < CPU_SETSIZE; i++) {
+	for (i = 0; result->pinned_passed && i < CPU_SETSIZE; i++) {
 		if (i != result->cpu && CPU_ISSET((unsigned int)i, &cpuset))
-			result->passed = 0;
+			result->pinned_passed = 0;
+	}
+	ret = thread_pool_add_thread(pool, check_default_affinity, result,
+		"default_affinity_test");
+	if (ret) {
+		result->default_passed = 0;
+		signal++;
 	}
 	if (write(result->eventfd, &signal, sizeof(signal)) != sizeof(signal))
-		result->passed = 0;
+		result->pinned_passed = 0;
 }
 
 int main(void)
@@ -37,7 +59,7 @@ int main(void)
 	struct affinity_result result = { .eventfd = -1, .cpu = -1 };
 	struct thread_pool *pool;
 	cpu_set_t allowed;
-	uint64_t signal;
+	uint64_t signals = 0;
 	int ret;
 	int i;
 
@@ -45,6 +67,7 @@ int main(void)
 		perror("sched_getaffinity");
 		return 1;
 	}
+	result.default_affinity = allowed;
 	for (i = 0; i < CPU_SETSIZE; i++) {
 		if (CPU_ISSET((unsigned int)i, &allowed)) {
 			result.cpu = i;
@@ -68,7 +91,7 @@ int main(void)
 		return 1;
 	}
 
-	ret = thread_pool_add_thread_on_cpu(pool, check_affinity, &result,
+	ret = thread_pool_add_thread_on_cpu(pool, check_pinned_affinity, &result,
 		"affinity_test", result.cpu);
 	if (ret) {
 		errno = ret;
@@ -77,16 +100,24 @@ int main(void)
 		thread_pool_destroy(pool);
 		return 1;
 	}
-	if (read(result.eventfd, &signal, sizeof(signal)) != sizeof(signal)) {
-		perror("read");
-		result.passed = 0;
+	while (signals < 2) {
+		uint64_t signal;
+
+		if (read(result.eventfd, &signal, sizeof(signal)) != sizeof(signal)) {
+			perror("read");
+			result.pinned_passed = 0;
+			result.default_passed = 0;
+			break;
+		}
+		signals += signal;
 	}
 	thread_pool_stop_and_wait(pool);
 	close(result.eventfd);
 	thread_pool_destroy(pool);
 
-	if (!result.passed) {
-		fprintf(stderr, "worker did not inherit the requested CPU mask\n");
+	if (!result.pinned_passed || !result.default_passed) {
+		fprintf(stderr,
+			"worker-specific or nested default CPU affinity was not preserved\n");
 		return 1;
 	}
 	return 0;
