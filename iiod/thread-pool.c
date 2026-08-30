@@ -35,6 +35,12 @@ struct thread_pool {
 	unsigned int thread_count;
 	int stop_fd;
 	bool stop;
+#ifdef __linux__
+	/* Unqualified workers use the pool creator's mask. This prevents a
+	 * specialized worker from unintentionally propagating its affinity to a
+	 * nested worker that it creates later. */
+	cpu_set_t default_affinity;
+#endif
 };
 
 struct thread_body_data {
@@ -93,24 +99,30 @@ static int thread_pool_add_thread_internal(struct thread_pool *pool,
 
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-	if (cpu >= 0) {
 #ifdef __linux__
+	{
 		cpu_set_t cpuset;
+		const cpu_set_t *affinity = &pool->default_affinity;
 
-		if (cpu >= CPU_SETSIZE) {
-			ret = EINVAL;
-			goto err_destroy_attr;
+		if (cpu >= 0) {
+			if (cpu >= CPU_SETSIZE) {
+				ret = EINVAL;
+				goto err_destroy_attr;
+			}
+			CPU_ZERO(&cpuset);
+			CPU_SET((unsigned int)cpu, &cpuset);
+			affinity = &cpuset;
 		}
-		CPU_ZERO(&cpuset);
-		CPU_SET((unsigned int)cpu, &cpuset);
-		ret = pthread_attr_setaffinity_np(&attr, sizeof(cpuset), &cpuset);
+		ret = pthread_attr_setaffinity_np(&attr, sizeof(*affinity), affinity);
 		if (ret)
 			goto err_destroy_attr;
+	}
 #else
+	if (cpu >= 0) {
 		ret = ENOTSUP;
 		goto err_destroy_attr;
-#endif
 	}
+#endif
 
 	/* In order to avoid race conditions thread_pool_thread_started() must
 	 * be called before the thread is created and
@@ -162,6 +174,17 @@ struct thread_pool * thread_pool_new(void)
 		errno = ENOMEM;
 		return NULL;
 	}
+
+#ifdef __linux__
+	if (sched_getaffinity(0, sizeof(pool->default_affinity),
+			&pool->default_affinity)) {
+		int err = errno;
+
+		free(pool);
+		errno = err;
+		return NULL;
+	}
+#endif
 
 	pool->stop_fd = eventfd(0, EFD_NONBLOCK);
 	if (pool->stop_fd == -1) {
