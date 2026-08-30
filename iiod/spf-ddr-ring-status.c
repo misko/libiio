@@ -43,14 +43,69 @@ static void put_le64(uint8_t *destination, uint64_t value)
 
 static bool status_values_valid(const struct spf_ddr_ring_status *status)
 {
-	if (status->state > SPF_DDR_RING_STATE_CANCELLED ||
-		status->terminal_reason > SPF_DDR_RING_REASON_INTERNAL_ERROR)
+	uint32_t valid_mask = SPF_DDR_RING_STATUS_VALID_LAST_CONTIGUOUS |
+		SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE;
+
+	if (status->version != SPF_DDR_RING_STATUS_VERSION_V1 &&
+		status->version != SPF_DDR_RING_STATUS_VERSION_V2)
 		return false;
-	if (status->valid_fields & ~(SPF_DDR_RING_STATUS_VALID_LAST_CONTIGUOUS |
-			SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE))
+	if (status->version == SPF_DDR_RING_STATUS_VERSION_V2)
+		valid_mask |= SPF_DDR_RING_STATUS_VALID_FAILURE_FRAME |
+			SPF_DDR_RING_STATUS_VALID_FAILURE_SAMPLE;
+	if (status->state > SPF_DDR_RING_STATE_CANCELLED ||
+		status->terminal_reason > SPF_DDR_RING_REASON_METADATA_PROTOCOL)
+		return false;
+	if (status->valid_fields & ~valid_mask)
 		return false;
 	if (status->consumed_frames > status->produced_frames ||
 		status->high_water_frames > status->produced_frames)
+		return false;
+	if (!(status->valid_fields & SPF_DDR_RING_STATUS_VALID_LAST_CONTIGUOUS) &&
+		status->last_contiguous_sample_sequence)
+		return false;
+	if (!(status->valid_fields & SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE) &&
+		status->first_unavailable_sample_sequence)
+		return false;
+	if (!(status->valid_fields & SPF_DDR_RING_STATUS_VALID_FAILURE_FRAME) &&
+		status->failure_frame_index)
+		return false;
+	if (!(status->valid_fields & SPF_DDR_RING_STATUS_VALID_FAILURE_SAMPLE) &&
+		status->failure_sample_sequence)
+		return false;
+
+	switch (status->state) {
+	case SPF_DDR_RING_STATE_OFF:
+	case SPF_DDR_RING_STATE_RESERVED:
+	case SPF_DDR_RING_STATE_RUNNING:
+	case SPF_DDR_RING_STATE_DRAINING:
+		if (status->terminal_reason != SPF_DDR_RING_REASON_NONE ||
+			status->error_code)
+			return false;
+		break;
+	case SPF_DDR_RING_STATE_COMPLETE:
+		if (status->terminal_reason != SPF_DDR_RING_REASON_TARGET_COMPLETE ||
+			status->error_code)
+			return false;
+		break;
+	case SPF_DDR_RING_STATE_FAILED:
+		if (status->terminal_reason < SPF_DDR_RING_REASON_CONSUMER_STALL ||
+			status->terminal_reason > SPF_DDR_RING_REASON_METADATA_PROTOCOL ||
+			status->error_code >= 0)
+			return false;
+		break;
+	case SPF_DDR_RING_STATE_CANCELLED:
+		if ((status->terminal_reason != SPF_DDR_RING_REASON_CLIENT_CANCELLED &&
+			status->terminal_reason !=
+				SPF_DDR_RING_REASON_CLIENT_DISCONNECTED) ||
+			status->error_code >= 0)
+			return false;
+		break;
+	default:
+		return false;
+	}
+	if (status->state != SPF_DDR_RING_STATE_FAILED &&
+		(status->valid_fields & (SPF_DDR_RING_STATUS_VALID_FAILURE_FRAME |
+			SPF_DDR_RING_STATUS_VALID_FAILURE_SAMPLE)))
 		return false;
 	return true;
 }
@@ -77,7 +132,7 @@ int spf_ddr_ring_status_encode(void *wire_status, size_t wire_bytes,
 		return -EINVAL;
 	memset(wire, 0, wire_bytes);
 	put_le32(wire, SPF_DDR_RING_STATUS_MAGIC);
-	put_le16(wire + 4, SPF_DDR_RING_STATUS_VERSION);
+	put_le16(wire + 4, source->version);
 	put_le16(wire + 6, SPF_DDR_RING_STATUS_BYTES);
 	put_le32(wire + 8, source->state);
 	put_le32(wire + 12, source->terminal_reason);
@@ -94,6 +149,10 @@ int spf_ddr_ring_status_encode(void *wire_status, size_t wire_bytes,
 	put_le64(wire + 88, source->consumer_position);
 	put_le64(wire + 96, source->last_contiguous_sample_sequence);
 	put_le64(wire + 104, source->first_unavailable_sample_sequence);
+	if (source->version == SPF_DDR_RING_STATUS_VERSION_V2) {
+		put_le64(wire + 112, source->failure_frame_index);
+		put_le64(wire + 120, source->failure_sample_sequence);
+	}
 	return 0;
 }
 
@@ -102,16 +161,21 @@ int spf_ddr_ring_status_decode(struct spf_ddr_ring_status *destination,
 {
 	const uint8_t *wire = wire_status;
 	struct spf_ddr_ring_status status;
+	uint16_t version;
 
 	if (!destination || !wire || wire_bytes != SPF_DDR_RING_STATUS_BYTES)
 		return -EINVAL;
+	version = get_le16(wire + 4);
 	if (get_le32(wire) != SPF_DDR_RING_STATUS_MAGIC ||
-		get_le16(wire + 4) != SPF_DDR_RING_STATUS_VERSION ||
+		(version != SPF_DDR_RING_STATUS_VERSION_V1 &&
+		 version != SPF_DDR_RING_STATUS_VERSION_V2) ||
 		get_le16(wire + 6) != SPF_DDR_RING_STATUS_BYTES)
 		return -EPROTONOSUPPORT;
-	if (get_le64(wire + 112) || get_le64(wire + 120))
+	if (version == SPF_DDR_RING_STATUS_VERSION_V1 &&
+		(get_le64(wire + 112) || get_le64(wire + 120)))
 		return -EINVAL;
 	memset(&status, 0, sizeof(status));
+	status.version = version;
 	status.state = get_le32(wire + 8);
 	status.terminal_reason = get_le32(wire + 12);
 	status.valid_fields = get_le32(wire + 16);
@@ -127,6 +191,10 @@ int spf_ddr_ring_status_decode(struct spf_ddr_ring_status *destination,
 	status.consumer_position = get_le64(wire + 88);
 	status.last_contiguous_sample_sequence = get_le64(wire + 96);
 	status.first_unavailable_sample_sequence = get_le64(wire + 104);
+	if (version == SPF_DDR_RING_STATUS_VERSION_V2) {
+		status.failure_frame_index = get_le64(wire + 112);
+		status.failure_sample_sequence = get_le64(wire + 120);
+	}
 	if (!status_values_valid(&status))
 		return -EINVAL;
 	*destination = status;

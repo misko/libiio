@@ -6,10 +6,14 @@
 #include <stdint.h>
 
 #define SPF_DDR_RING_STATUS_MAGIC UINT32_C(0x53524653) /* SFRS */
-#define SPF_DDR_RING_STATUS_VERSION UINT16_C(1)
+#define SPF_DDR_RING_STATUS_VERSION_V1 UINT16_C(1)
+#define SPF_DDR_RING_STATUS_VERSION_V2 UINT16_C(2)
+#define SPF_DDR_RING_STATUS_VERSION SPF_DDR_RING_STATUS_VERSION_V1
 #define SPF_DDR_RING_STATUS_BYTES 128U
 #define SPF_DDR_RING_STATUS_VALID_LAST_CONTIGUOUS UINT32_C(1)
 #define SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE UINT32_C(2)
+#define SPF_DDR_RING_STATUS_VALID_FAILURE_FRAME UINT32_C(4)
+#define SPF_DDR_RING_STATUS_VALID_FAILURE_SAMPLE UINT32_C(8)
 
 enum spf_ddr_ring_state {
 	SPF_DDR_RING_STATE_OFF = 0,
@@ -31,9 +35,13 @@ enum spf_ddr_ring_terminal_reason {
 	SPF_DDR_RING_REASON_COUNTER_GAP = 6,
 	SPF_DDR_RING_REASON_TRANSPORT_ERROR = 7,
 	SPF_DDR_RING_REASON_INTERNAL_ERROR = 8,
+	SPF_DDR_RING_REASON_GAIN_EVENT_GAP = 9,
+	SPF_DDR_RING_REASON_GAIN_EVENT_OVERFLOW = 10,
+	SPF_DDR_RING_REASON_METADATA_PROTOCOL = 11,
 };
 
 struct spf_ddr_ring_status {
+	uint16_t version;
 	uint32_t state;
 	uint32_t terminal_reason;
 	uint32_t valid_fields;
@@ -49,6 +57,8 @@ struct spf_ddr_ring_status {
 	uint64_t consumer_position;
 	uint64_t last_contiguous_sample_sequence;
 	uint64_t first_unavailable_sample_sequence;
+	uint64_t failure_frame_index;
+	uint64_t failure_sample_sequence;
 };
 
 int spf_ddr_ring_exclusive_boundary(uint64_t first_sample_sequence,
