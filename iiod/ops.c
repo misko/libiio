@@ -134,6 +134,7 @@ struct iiod_stage_timing {
 	pthread_mutex_t lock;
 	uint64_t first_ns;
 	uint64_t last_ns;
+	uint64_t transported_iq_bytes;
 	uint64_t next_snapshot_frame;
 	struct iiod_timing_accumulator stages[IIOD_TIMING_STAGE_COUNT];
 };
@@ -142,6 +143,12 @@ struct iiod_stage_timing {
 
 static pthread_mutex_t burst_reservation_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool burst_reserved;
+static int rw_cpu_affinity = -1;
+
+void iiod_set_rw_cpu_affinity(int cpu)
+{
+	rw_cpu_affinity = cpu;
+}
 
 /*
  * The local context is shared by every IIOD connection.  Each newly created
@@ -696,10 +703,16 @@ static void iiod_timing_record(struct DevEntry *entry,
 static void iiod_timing_log(struct DevEntry *entry, bool snapshot)
 {
 	const char *device = dev_label_or_name_or_id(entry->dev);
+	uint64_t transported_frames = 0;
+	uint64_t frame_iq_bytes;
 	uint64_t wall_ns = 0;
 	unsigned int i;
 
 	pthread_mutex_lock(&entry->timing.lock);
+	frame_iq_bytes = (uint64_t)entry->sample_size * entry->samples_count;
+	if (frame_iq_bytes)
+		transported_frames = entry->timing.transported_iq_bytes /
+			frame_iq_bytes;
 	if (entry->timing.last_ns >= entry->timing.first_ns)
 		wall_ns = entry->timing.last_ns - entry->timing.first_ns;
 	for (i = 0; i < IIOD_TIMING_STAGE_COUNT; i++) {
@@ -710,13 +723,15 @@ static void iiod_timing_log(struct DevEntry *entry, bool snapshot)
 			continue;
 		fprintf(stderr,
 			"SPF_IIOD_TIMING_V1 snapshot=%u dev=%s metadata=%u burst=%u ring=%u "
-			"frame_iq_bytes=%zu wall_ns=%" PRIu64
+			"frame_iq_bytes=%zu transported_iq_bytes=%" PRIu64
+			" transported_frames=%" PRIu64 " wall_ns=%" PRIu64
 			" stage=%s count=%" PRIu64
 			" total_ns=%" PRIu64 " max_ns=%" PRIu64 "\n",
 			snapshot, device ? device : "unknown", entry->metadata_enabled,
 			entry->burst_plan.requested_iq_bytes != 0,
 			entry->burst_plan.ring_capacity_iq_bytes != 0,
-			(size_t)entry->sample_size * entry->samples_count, wall_ns,
+			(size_t)frame_iq_bytes, entry->timing.transported_iq_bytes,
+			transported_frames, wall_ns,
 			iiod_timing_stage_names[i], stage->count, stage->total_ns,
 			stage->max_ns);
 	}
@@ -724,15 +739,37 @@ static void iiod_timing_log(struct DevEntry *entry, bool snapshot)
 	pthread_mutex_unlock(&entry->timing.lock);
 }
 
-static void iiod_timing_maybe_snapshot(struct DevEntry *entry)
+static void iiod_timing_transport_complete(struct DevEntry *entry,
+	ssize_t iq_bytes)
 {
+	uint64_t transported_frames = 0;
+	uint64_t frame_iq_bytes;
 	bool due = false;
 
+	if (iq_bytes <= 0)
+		return;
 	pthread_mutex_lock(&entry->timing.lock);
+	frame_iq_bytes = (uint64_t)entry->sample_size * entry->samples_count;
+	if (UINT64_MAX - entry->timing.transported_iq_bytes <
+			(uint64_t)iq_bytes)
+		entry->timing.transported_iq_bytes = UINT64_MAX;
+	else
+		entry->timing.transported_iq_bytes += (uint64_t)iq_bytes;
+	if (frame_iq_bytes)
+		transported_frames = entry->timing.transported_iq_bytes /
+			frame_iq_bytes;
 	if (entry->timing.next_snapshot_frame &&
-			entry->timing.stages[IIOD_TIMING_TRANSPORT_FRAME].count >=
-				entry->timing.next_snapshot_frame) {
-		entry->timing.next_snapshot_frame += IIOD_TIMING_SNAPSHOT_FRAMES;
+			transported_frames >= entry->timing.next_snapshot_frame) {
+		do {
+			if (UINT64_MAX - entry->timing.next_snapshot_frame <
+					IIOD_TIMING_SNAPSHOT_FRAMES) {
+				entry->timing.next_snapshot_frame = 0;
+				break;
+			}
+			entry->timing.next_snapshot_frame +=
+				IIOD_TIMING_SNAPSHOT_FRAMES;
+		} while (entry->timing.next_snapshot_frame &&
+			transported_frames >= entry->timing.next_snapshot_frame);
 		due = true;
 	}
 	pthread_mutex_unlock(&entry->timing.lock);
@@ -1896,7 +1933,7 @@ static void rw_thd(struct thread_pool *pool, void *d)
 					ret = send_ring_data(entry, thd);
 					iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_FRAME,
 						frame_started_ns);
-					iiod_timing_maybe_snapshot(entry);
+					iiod_timing_transport_complete(entry, ret);
 					if (ret == -EAGAIN)
 						continue;
 					if (ret > 0)
@@ -1920,7 +1957,7 @@ static void rw_thd(struct thread_pool *pool, void *d)
 					ret = send_burst_data(entry, thd);
 					iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_FRAME,
 						frame_started_ns);
-					iiod_timing_maybe_snapshot(entry);
+					iiod_timing_transport_complete(entry, ret);
 					if (ret > 0)
 						thd->nb -= (unsigned int)ret;
 					else if (ret < 0 &&
@@ -1998,7 +2035,7 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				ret = send_data(entry, thd, nb_bytes);
 				iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_FRAME,
 					frame_started_ns);
-				iiod_timing_maybe_snapshot(entry);
+				iiod_timing_transport_complete(entry, ret);
 				if (ret > 0)
 					thd->nb -= ret;
 
@@ -2475,7 +2512,12 @@ retry:
 	pthread_mutex_init(&entry->timing.lock, NULL);
 	entry->timing.next_snapshot_frame = IIOD_TIMING_SNAPSHOT_FRAMES;
 
-	ret = thread_pool_add_thread(main_thread_pool, rw_thd, entry, "rw_thd");
+	if (rw_cpu_affinity >= 0)
+		ret = thread_pool_add_thread_on_cpu(main_thread_pool, rw_thd, entry,
+			"rw_thd", rw_cpu_affinity);
+	else
+		ret = thread_pool_add_thread(main_thread_pool, rw_thd, entry,
+			"rw_thd");
 	if (ret) {
 		pthread_mutex_unlock(&devlist_lock);
 		pthread_mutex_destroy(&entry->timing.lock);
