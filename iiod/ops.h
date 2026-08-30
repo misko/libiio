@@ -83,6 +83,8 @@ struct parser_pdata {
 
 extern bool server_demux; /* Defined in iiod.c */
 
+void iiod_set_rw_cpu_affinity(int cpu);
+
 static inline void *zalloc(size_t size)
 {
 	return calloc(1, size);

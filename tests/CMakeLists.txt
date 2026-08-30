@@ -133,6 +133,19 @@ if(PTHREAD_LIBRARIES OR ANDROID)
 	target_link_libraries(iio_writedev ${PTHREAD_LIBRARIES})
 endif()
 
+if(${CMAKE_SYSTEM_NAME} MATCHES "Linux" AND
+		(PTHREAD_LIBRARIES OR ANDROID) AND NOT NO_THREADS)
+	add_executable(test_thread_pool_affinity test_thread_pool_affinity.c
+		../iiod/thread-pool.c)
+	target_include_directories(test_thread_pool_affinity PRIVATE ../iiod)
+	target_compile_definitions(test_thread_pool_affinity PRIVATE _GNU_SOURCE=1)
+	target_link_libraries(test_thread_pool_affinity ${PTHREAD_LIBRARIES})
+	set_target_properties(test_thread_pool_affinity PROPERTIES
+		C_STANDARD 99
+		C_STANDARD_REQUIRED ON
+		C_EXTENSIONS OFF)
+endif()
+
 set_target_properties(${IIO_TESTS_TARGETS} iio_tests_helper PROPERTIES
 	C_STANDARD 99
 	C_STANDARD_REQUIRED ON

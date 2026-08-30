@@ -10,6 +10,9 @@
 
 #include <errno.h>
 #include <pthread.h>
+#ifdef __linux__
+#include <sched.h>
+#endif
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -67,9 +70,9 @@ static void * thread_body(void *d)
 	return NULL;
 }
 
-int thread_pool_add_thread(struct thread_pool *pool,
+static int thread_pool_add_thread_internal(struct thread_pool *pool,
 		void (*f)(struct thread_pool *, void *),
-		void *d, const char *name)
+		void *d, const char *name, int cpu)
 {
 	struct thread_body_data *pdata;
 	sigset_t sigmask, oldsigmask;
@@ -90,6 +93,24 @@ int thread_pool_add_thread(struct thread_pool *pool,
 
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	if (cpu >= 0) {
+#ifdef __linux__
+		cpu_set_t cpuset;
+
+		if (cpu >= CPU_SETSIZE) {
+			ret = EINVAL;
+			goto err_destroy_attr;
+		}
+		CPU_ZERO(&cpuset);
+		CPU_SET((unsigned int)cpu, &cpuset);
+		ret = pthread_attr_setaffinity_np(&attr, sizeof(cpuset), &cpuset);
+		if (ret)
+			goto err_destroy_attr;
+#else
+		ret = ENOTSUP;
+		goto err_destroy_attr;
+#endif
+	}
 
 	/* In order to avoid race conditions thread_pool_thread_started() must
 	 * be called before the thread is created and
@@ -110,6 +131,26 @@ int thread_pool_add_thread(struct thread_pool *pool,
 	pthread_attr_destroy(&attr);
 	pthread_sigmask(SIG_SETMASK, &oldsigmask, NULL);
 	return ret;
+
+err_destroy_attr:
+	pthread_attr_destroy(&attr);
+	pthread_sigmask(SIG_SETMASK, &oldsigmask, NULL);
+	free(pdata);
+	return ret;
+}
+
+int thread_pool_add_thread(struct thread_pool *pool,
+		void (*f)(struct thread_pool *, void *),
+		void *d, const char *name)
+{
+	return thread_pool_add_thread_internal(pool, f, d, name, -1);
+}
+
+int thread_pool_add_thread_on_cpu(struct thread_pool *pool,
+		void (*f)(struct thread_pool *, void *),
+		void *d, const char *name, int cpu)
+{
+	return thread_pool_add_thread_internal(pool, f, d, name, cpu);
 }
 
 struct thread_pool * thread_pool_new(void)
