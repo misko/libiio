@@ -53,6 +53,7 @@ struct spf_iiod_metadata_context {
 	bool burst_enabled;
 	bool ring_enabled;
 	bool ring_prefix_complete;
+	bool sampler_continuous;
 };
 
 static bool buffered_capture_is_strict(
@@ -249,18 +250,31 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 
 	if (!ctx || !kernel_buffers_count)
 		return -EINVAL;
-	ret = spf_sampler_coverage_plan_compute(ctx->samples_per_channel,
-		ctx->observation_interval_samples, kernel_buffers_count,
-		SPF_GAIN_SAMPLER_RING_CAPACITY, &coverage);
-	if (ret)
-		return ret;
+	ctx->sampler_continuous = spf_sampler_requires_continuous_coverage(
+		ctx->burst_enabled, ctx->ring_enabled);
+	if (!ctx->sampler_continuous) {
+		ret = spf_sampler_coverage_plan_compute(ctx->samples_per_channel,
+			ctx->observation_interval_samples, kernel_buffers_count,
+			SPF_GAIN_SAMPLER_RING_CAPACITY, &coverage);
+		if (ret)
+			return ret;
+	}
 	ret = spf_tandem_session_acquire(&ctx->tandem);
 	if (ret)
 		return ret;
-	ctx->sampler_coverage_window_samples = coverage.window_samples;
 	ctx->refills_started = 0;
-	spf_gain_sampler_limit(&ctx->sampler,
-		ctx->sampler_coverage_window_samples);
+	if (ctx->sampler_continuous) {
+		/* A buffered producer can stall after every kernel block has been
+		 * armed. Keep the observation ledger live until buffer teardown; each
+		 * frame is still collected immediately, so retained state stays bounded.
+		 */
+		ctx->sampler_coverage_window_samples = 0;
+		spf_gain_sampler_unlimit(&ctx->sampler);
+	} else {
+		ctx->sampler_coverage_window_samples = coverage.window_samples;
+		spf_gain_sampler_limit(&ctx->sampler,
+			ctx->sampler_coverage_window_samples);
+	}
 	return 0;
 }
 
@@ -271,16 +285,23 @@ int iiod_buffer_metadata_before_refill(void *provider_context)
 	if (!ctx)
 		return -EINVAL;
 	/* The first dequeue consumes an already queued block. Every later refill
-	 * can rearm one block while all older queued blocks remain capture work.
-	 * Reset to the complete queue-depth window so producer copy/backpressure
-	 * cannot put the sampler to sleep while DMA is still filling those blocks.
-	 * The fixed window remains bounded even if the producer outruns sampling.
+	 * gets an exact start/finish observation fence. Ordinary IIO renews a
+	 * bounded queue-depth window; buffered capture preserves its continuous
+	 * policy so DDR copy and consumer latency cannot create a historical gap.
 	 */
-	if (ctx->refills_started != 0 &&
-		!spf_gain_sampler_limit_and_wait_started(&ctx->sampler,
-			ctx->sampler_coverage_window_samples,
-			SPF_IIOD_SAMPLER_START_TIMEOUT_MS))
-		return -ETIMEDOUT;
+	if (ctx->refills_started != 0) {
+		bool started;
+
+		if (ctx->sampler_continuous)
+			started = spf_gain_sampler_wait_started(&ctx->sampler,
+				SPF_IIOD_SAMPLER_START_TIMEOUT_MS);
+		else
+			started = spf_gain_sampler_limit_and_wait_started(&ctx->sampler,
+				ctx->sampler_coverage_window_samples,
+				SPF_IIOD_SAMPLER_START_TIMEOUT_MS);
+		if (!started)
+			return -ETIMEDOUT;
+	}
 	ctx->refills_started++;
 	return 0;
 }

@@ -4,6 +4,12 @@
 #include <errno.h>
 #include <stddef.h>
 
+bool spf_sampler_requires_continuous_coverage(bool burst_enabled,
+	bool ring_enabled)
+{
+	return burst_enabled || ring_enabled;
+}
+
 int spf_sampler_coverage_plan_compute(uint32_t samples_per_frame,
 	uint32_t observation_interval_samples,
 	unsigned int kernel_buffers_count,

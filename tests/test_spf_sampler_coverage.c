@@ -11,6 +11,10 @@
 int main(void)
 {
 	struct spf_sampler_coverage_plan plan;
+	assert(!spf_sampler_requires_continuous_coverage(false, false));
+	assert(spf_sampler_requires_continuous_coverage(true, false));
+	assert(spf_sampler_requires_continuous_coverage(false, true));
+	assert(spf_sampler_requires_continuous_coverage(true, true));
 
 	assert(spf_sampler_coverage_plan_compute(UINT32_C(1048576),
 		UINT32_C(1048576), 4U, 1024U, &plan) == 0);
