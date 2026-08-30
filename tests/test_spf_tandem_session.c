@@ -202,17 +202,17 @@ static void test_request_decoder(void)
 	assert(spf_tandem_request_validate_event_window(&decoded, UINT32_MAX) == 0);
 	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
 		&interval) == 0);
-	assert(interval == 250000);
+	assert(interval == 1000000);
 	assert(spf_tandem_request_observation_interval(&decoded, 2048,
 		&interval) == 0);
-	assert(interval == 1024);
+	assert(interval == 2048);
 	decoded.mode = ADI_TANDEM_AGC_MODE_AUTO;
 	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
 		&interval) == 0);
-	assert(interval == 32768);
+	assert(interval == 1000000);
 	assert(spf_tandem_request_observation_interval(&decoded, 16384,
 		&interval) == 0);
-	assert(interval == 4096);
+	assert(interval == 16384);
 	decoded.mode = UINT32_MAX;
 	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
 		&interval) == -EINVAL);

@@ -17,9 +17,8 @@
 	((1U << SPF_TANDEM_TRANSITION_COUNTER_BITS) - 1U)
 #define SPF_TANDEM_TRANSITION_COUNTER_HALF_RANGE \
 	(1U << (SPF_TANDEM_TRANSITION_COUNTER_BITS - 1U))
-#define SPF_TANDEM_HOLD_OBSERVATIONS_PER_FRAME 4U
+#define SPF_TANDEM_REFILL_OBSERVATIONS_PER_FRAME 1U
 #define SPF_TANDEM_OBSERVATION_INTERVAL_MIN 1024U
-#define SPF_TANDEM_AUTO_OBSERVATION_INTERVAL_MAX 32768U
 
 _Static_assert(sizeof(struct adi_tandem_agc_request_v1) == 104,
 	"unexpected tandem request ABI size");
@@ -153,16 +152,17 @@ int spf_tandem_request_observation_interval(
 		return -EINVAL;
 
 	interval = samples_per_channel /
-		SPF_TANDEM_HOLD_OBSERVATIONS_PER_FRAME;
+		SPF_TANDEM_REFILL_OBSERVATIONS_PER_FRAME;
 	if (interval < SPF_TANDEM_OBSERVATION_INTERVAL_MIN)
 		interval = SPF_TANDEM_OBSERVATION_INTERVAL_MIN;
-	/* AUTO retains the original high-resolution observation cadence for
-	 * transient gain/RSSI evidence. HOLD cannot produce gain transitions, so
-	 * four counter-bounded observations per frame preserve endpoint coverage
-	 * without spending a core repeatedly proving the same held gain. */
-	if (request->mode == ADI_TANDEM_AGC_MODE_AUTO &&
-		interval > SPF_TANDEM_AUTO_OBSERVATION_INTERVAL_MAX)
-		interval = SPF_TANDEM_AUTO_OBSERVATION_INTERVAL_MAX;
+	/* Every refill after the first is fenced by one real gain/RSSI observation
+	 * whose synchronized counter interval brackets the DMA refill. The first
+	 * refill is guarded by the sampler's bounded startup-discard contract.
+	 * HOLD cannot transition. AUTO's authoritative FPGA event records retain
+	 * every intra-frame gain transition and exact sample sequence, so polling
+	 * the SPI-backed AD936x state between refill fences adds CPU load without
+	 * adding transition evidence. Keep the observation interval honest at one
+	 * refill; do not manufacture denser observations than the sampler makes. */
 	*interval_samples = interval;
 	return 0;
 }
