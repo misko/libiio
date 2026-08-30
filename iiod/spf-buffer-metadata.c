@@ -6,6 +6,7 @@
 #include "spf-ddr-burst-request.h"
 #include "spf-ddr-ring-request.h"
 #include "spf-ddr-ring-status.h"
+#include "spf-gain-telemetry.h"
 #include "spf-metadata-request.h"
 #include "spf-sampler-coverage.h"
 #include "spf-tandem-metadata.h"
@@ -14,7 +15,6 @@
 
 #include <spf_gain_metadata.h>
 #include <spf_gain_read.h>
-#include <spf_gain_sampler.h>
 #include <spf_radio_frame_v3.h>
 #include <spf_rssi_read.h>
 
@@ -35,7 +35,7 @@
 struct spf_iiod_metadata_context {
 	struct iio_device *rx;
 	struct iio_device *phy;
-	spf_gain_sampler_t sampler;
+	struct spf_gain_telemetry gain_telemetry;
 	spf_gain_table_t gain_table;
 	struct spf_temperature_sampler temperature_sampler;
 	struct spf_tandem_session tandem;
@@ -50,7 +50,6 @@ struct spf_iiod_metadata_context {
 	uint64_t frames_emitted;
 	uint64_t refills_started;
 	uint32_t startup_frames_discarded;
-	bool sampler_started;
 	bool temperature_sampler_started;
 	bool timestamp_configured;
 	bool tandem_initialized;
@@ -61,6 +60,21 @@ struct spf_iiod_metadata_context {
 	bool metadata_v4;
 	bool buffer_prepared;
 };
+
+static void report_gain_telemetry_degradation(
+	struct spf_iiod_metadata_context *ctx)
+{
+	enum spf_gain_telemetry_failure failure;
+	int error;
+
+	if (!ctx || !spf_gain_telemetry_take_diagnostic(
+			&ctx->gain_telemetry, &failure, &error))
+		return;
+	fprintf(stderr,
+		"SPF optional gain/RSSI telemetry unavailable: reason=%s error=%d; "
+		"continuing with the authoritative FPGA gain timeline\n",
+		spf_gain_telemetry_failure_name(failure), error);
+}
 
 static void metadata_failure_clear(struct spf_iiod_metadata_context *ctx)
 {
@@ -252,6 +266,7 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	ctx->burst_enabled = transport_kind == SPF_METADATA_TRANSPORT_BURST;
 	ctx->ring_enabled = transport_kind == SPF_METADATA_TRANSPORT_RING;
 	ctx->metadata_v4 = metadata_v4;
+	spf_gain_telemetry_init(&ctx->gain_telemetry, metadata_v4);
 	burst_plan->ring_status_version = metadata_v4 ?
 		SPF_DDR_RING_STATUS_VERSION_V2 : SPF_DDR_RING_STATUS_VERSION_V1;
 	ctx->layout = layout;
@@ -310,14 +325,15 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	if (metadata_v4 && ctx->observation_interval_samples > samples_count)
 		ctx->observation_interval_samples = (uint32_t)samples_count;
 	ctx->stream_id = make_stream_id(ctx);
-	if (!spf_gain_sampler_start(&ctx->sampler,
-			ctx->observation_interval_samples)) {
+	ret = spf_gain_telemetry_start(&ctx->gain_telemetry,
+		ctx->observation_interval_samples);
+	if (ret) {
 		(void)iio_device_reg_write(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
 				ctx->timestamp_control_previous);
 		free(ctx);
-		return -EIO;
+		return ret;
 	}
-	ctx->sampler_started = true;
+	report_gain_telemetry_degradation(ctx);
 	ctx->temperature_sampler_started =
 		spf_temperature_sampler_start(&ctx->temperature_sampler);
 
@@ -352,7 +368,7 @@ int iiod_buffer_metadata_buffer_opening(void *provider_context,
 		unsigned int kernel_buffers_count)
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
-	struct spf_sampler_coverage_plan coverage;
+	struct spf_sampler_coverage_plan coverage = {0};
 	int ret;
 
 	if (!ctx || !kernel_buffers_count)
@@ -382,12 +398,18 @@ int iiod_buffer_metadata_buffer_opening(void *provider_context,
 	}
 	ctx->sampler_continuous = spf_sampler_requires_continuous_coverage(
 		ctx->burst_enabled, ctx->ring_enabled);
-	if (!ctx->sampler_continuous) {
+	if (!ctx->sampler_continuous &&
+			spf_gain_telemetry_is_usable(&ctx->gain_telemetry)) {
 		ret = spf_sampler_coverage_plan_compute(ctx->samples_per_channel,
 			ctx->observation_interval_samples, kernel_buffers_count,
 			SPF_GAIN_SAMPLER_RING_CAPACITY, &coverage);
-		if (ret)
-			return ret;
+		if (ret) {
+			ret = spf_gain_telemetry_degrade(&ctx->gain_telemetry,
+				SPF_GAIN_TELEMETRY_COVERAGE_UNAVAILABLE, ret);
+			if (ret)
+				return ret;
+			report_gain_telemetry_degradation(ctx);
+		}
 	}
 	ret = spf_tandem_session_acquire(&ctx->tandem);
 	if (ret)
@@ -402,10 +424,10 @@ int iiod_buffer_metadata_buffer_opening(void *provider_context,
 		 * frame is still collected immediately, so retained state stays bounded.
 		 */
 		ctx->sampler_coverage_window_samples = 0;
-		spf_gain_sampler_unlimit(&ctx->sampler);
+		spf_gain_telemetry_unlimit(&ctx->gain_telemetry);
 	} else {
 		ctx->sampler_coverage_window_samples = coverage.window_samples;
-		spf_gain_sampler_limit(&ctx->sampler,
+		spf_gain_telemetry_limit(&ctx->gain_telemetry,
 			ctx->sampler_coverage_window_samples);
 	}
 	return 0;
@@ -434,20 +456,22 @@ int iiod_buffer_metadata_before_refill(void *provider_context)
 	 * policy so DDR copy and consumer latency cannot create a historical gap.
 	 */
 	if (ctx->refills_started != 0) {
-		bool started;
+		int ret;
 
 		if (ctx->sampler_continuous)
-			started = spf_gain_sampler_wait_started(&ctx->sampler,
+			ret = spf_gain_telemetry_wait_started(&ctx->gain_telemetry,
 				SPF_IIOD_SAMPLER_START_TIMEOUT_MS);
 		else
-			started = spf_gain_sampler_limit_and_wait_started(&ctx->sampler,
+			ret = spf_gain_telemetry_limit_and_wait_started(
+				&ctx->gain_telemetry,
 				ctx->sampler_coverage_window_samples,
 				SPF_IIOD_SAMPLER_START_TIMEOUT_MS);
-		if (!started) {
+		if (ret) {
 			metadata_failure_set(ctx,
 				IIOD_BUFFER_FAILURE_METADATA_PROTOCOL, false, 0);
-			return -ETIMEDOUT;
+			return ret;
 		}
+		report_gain_telemetry_degradation(ctx);
 	}
 	ctx->refills_started++;
 	return 0;
@@ -461,12 +485,15 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 	if (!ctx)
 		return -EINVAL;
 	metadata_failure_clear(ctx);
-	if (ctx->refills_started > 1 &&
-		!spf_gain_sampler_finish_capture(
-			&ctx->sampler, SPF_IIOD_SAMPLER_START_TIMEOUT_MS)) {
-		metadata_failure_set(ctx, IIOD_BUFFER_FAILURE_METADATA_PROTOCOL,
-			false, 0);
-		return -ETIMEDOUT;
+	if (ctx->refills_started > 1) {
+		ret = spf_gain_telemetry_finish_capture(&ctx->gain_telemetry,
+			SPF_IIOD_SAMPLER_START_TIMEOUT_MS);
+		if (ret) {
+			metadata_failure_set(ctx,
+				IIOD_BUFFER_FAILURE_METADATA_PROTOCOL, false, 0);
+			return ret;
+		}
+		report_gain_telemetry_degradation(ctx);
 	}
 	/* V4 binds the coherent fence/count snapshot to the DMA sample interval
 	 * after metadata_get() reads that interval. Legacy sessions retain their
@@ -495,8 +522,7 @@ void iiod_buffer_metadata_close(void *provider_context)
 		return;
 	if (ctx->tandem_initialized)
 		spf_tandem_session_close(&ctx->tandem);
-	if (ctx->sampler_started)
-		spf_gain_sampler_stop(&ctx->sampler);
+	spf_gain_telemetry_stop(&ctx->gain_telemetry);
 	if (ctx->temperature_sampler_started)
 		spf_temperature_sampler_stop(&ctx->temperature_sampler);
 	if (ctx->timestamp_configured)
@@ -571,7 +597,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			return ret;
 		}
 	}
-	observation_count = spf_gain_sampler_collect(&ctx->sampler,
+	observation_count = spf_gain_telemetry_collect(&ctx->gain_telemetry,
 		first_sample_sequence, ctx->samples_per_channel, observations,
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		&observation_overflow_count);
@@ -585,7 +611,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		observation_count = spf_tandem_compact_v7_observations(
 			observations, observation_count, first_sample_sequence,
 			ctx->samples_per_channel);
-		rssi_valid = spf_gain_sampler_collect_rssi(&ctx->sampler,
+		rssi_valid = spf_gain_telemetry_collect_rssi(&ctx->gain_telemetry,
 			first_sample_sequence, ctx->samples_per_channel,
 			&rssi_start, &rssi_end, &rssi_overflow_count);
 		if (!rssi_valid || rssi_overflow_count) {
@@ -726,7 +752,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			(ctx->burst_enabled || ctx->ring_enabled) ? 1U : 0U);
 		return -ENODATA;
 	}
-	if (!spf_gain_sampler_collect_rssi(&ctx->sampler,
+	if (!spf_gain_telemetry_collect_rssi(&ctx->gain_telemetry,
 			first_sample_sequence, ctx->samples_per_channel,
 			&rssi_start, &rssi_end, &rssi_overflow_count)) {
 		fprintf(stderr,
