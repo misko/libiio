@@ -5,6 +5,7 @@
 #include "spf-buffer-layout.h"
 #include "spf-ddr-burst-request.h"
 #include "spf-ddr-ring-request.h"
+#include "spf-sampler-coverage.h"
 #include "spf-tandem-metadata.h"
 #include "spf-tandem-session.h"
 #include "spf-temperature-cache.h"
@@ -39,6 +40,7 @@ struct spf_iiod_metadata_context {
 	uint32_t timestamp_control_previous;
 	uint32_t samples_per_channel;
 	uint32_t observation_interval_samples;
+	uint64_t sampler_coverage_window_samples;
 	uint64_t stream_id;
 	struct spf_buffer_sequence_state sequence;
 	uint64_t frames_emitted;
@@ -242,28 +244,23 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 		unsigned int kernel_buffers_count)
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
-	uint64_t initial_credit;
-	uint64_t observations_per_frame;
+	struct spf_sampler_coverage_plan coverage;
 	int ret;
 
 	if (!ctx || !kernel_buffers_count)
 		return -EINVAL;
-	observations_per_frame =
-		(ctx->samples_per_channel + ctx->observation_interval_samples - 1U) /
-		ctx->observation_interval_samples;
-	/* One additional window covers buffer-arm latency without retaining an
-	 * unbounded observation history after the kernel queue becomes full.
-	 */
-	if (observations_per_frame * ((uint64_t)kernel_buffers_count + 1U) >
-			SPF_GAIN_SAMPLER_RING_CAPACITY)
-		return -E2BIG;
+	ret = spf_sampler_coverage_plan_compute(ctx->samples_per_channel,
+		ctx->observation_interval_samples, kernel_buffers_count,
+		SPF_GAIN_SAMPLER_RING_CAPACITY, &coverage);
+	if (ret)
+		return ret;
 	ret = spf_tandem_session_acquire(&ctx->tandem);
 	if (ret)
 		return ret;
-	initial_credit = (uint64_t)ctx->samples_per_channel *
-		((uint64_t)kernel_buffers_count + 1U);
+	ctx->sampler_coverage_window_samples = coverage.window_samples;
 	ctx->refills_started = 0;
-	spf_gain_sampler_limit(&ctx->sampler, initial_credit);
+	spf_gain_sampler_limit(&ctx->sampler,
+		ctx->sampler_coverage_window_samples);
 	return 0;
 }
 
@@ -274,12 +271,14 @@ int iiod_buffer_metadata_before_refill(void *provider_context)
 	if (!ctx)
 		return -EINVAL;
 	/* The first dequeue consumes an already queued block. Every later refill
-	 * re-enqueues exactly one consumed block before dequeuing another. Reset,
-	 * rather than accumulate, one frame plus one bounded arm-safety window.
+	 * can rearm one block while all older queued blocks remain capture work.
+	 * Reset to the complete queue-depth window so producer copy/backpressure
+	 * cannot put the sampler to sleep while DMA is still filling those blocks.
+	 * The fixed window remains bounded even if the producer outruns sampling.
 	 */
 	if (ctx->refills_started != 0 &&
 		!spf_gain_sampler_limit_and_wait_started(&ctx->sampler,
-			(uint64_t)ctx->samples_per_channel * 2U,
+			ctx->sampler_coverage_window_samples,
 			SPF_IIOD_SAMPLER_START_TIMEOUT_MS))
 		return -ETIMEDOUT;
 	ctx->refills_started++;

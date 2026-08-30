@@ -101,6 +101,8 @@ if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 		../iiod/spf-ddr-ring-request.c)
 	add_executable(test_spf_ddr_ring_status test_spf_ddr_ring_status.c
 		../iiod/spf-ddr-ring-status.c)
+	add_executable(test_spf_sampler_coverage test_spf_sampler_coverage.c
+		../iiod/spf-sampler-coverage.c)
 	add_executable(test_ddr_ring_core test_ddr_ring_core.c
 		../iiod/ddr-ring-core.c)
 	target_include_directories(test_spf_tandem_session PRIVATE ../iiod
@@ -113,6 +115,7 @@ if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	target_include_directories(test_spf_ddr_burst_request PRIVATE ../iiod)
 	target_include_directories(test_spf_ddr_ring_request PRIVATE ../iiod)
 	target_include_directories(test_spf_ddr_ring_status PRIVATE ../iiod)
+	target_include_directories(test_spf_sampler_coverage PRIVATE ../iiod)
 	target_include_directories(test_ddr_ring_core PRIVATE ../iiod)
 	target_link_libraries(test_spf_temperature_cache iio ${PTHREAD_LIBRARIES})
 	set(IIO_TESTS_TARGETS ${IIO_TESTS_TARGETS}
@@ -120,7 +123,7 @@ if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 		test_spf_temperature_cache test_spf_buffer_layout)
 	list(APPEND IIO_TESTS_TARGETS test_spf_ddr_burst_request)
 	list(APPEND IIO_TESTS_TARGETS test_spf_ddr_ring_request
-		test_spf_ddr_ring_status test_ddr_ring_core)
+		test_spf_ddr_ring_status test_spf_sampler_coverage test_ddr_ring_core)
 endif()
 
 if(PTHREAD_LIBRARIES OR ANDROID)
