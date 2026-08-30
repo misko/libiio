@@ -453,6 +453,29 @@ static void test_cache_bound(void)
 
 int main(void)
 {
+	assert(iio_decimal_capability_between("2", 2, 4));
+	assert(iio_decimal_capability_between("3", 2, 4));
+	assert(iio_decimal_capability_between("4", 2, 4));
+	assert(!iio_decimal_capability_between("1", 2, 4));
+	assert(iio_decimal_capability_between("1", 1, 2));
+	assert(iio_decimal_capability_between("2", 1, 2));
+	assert(!iio_decimal_capability_between("3", 1, 2));
+	assert(!iio_decimal_capability_between("20", 1, 2));
+	assert(!iio_decimal_capability_between(NULL, 1, 2));
+	assert(iio_decimal_capability_set_contains("1,2,3,4", 4));
+	assert(!iio_decimal_capability_set_contains("1,2,3,40", 4));
+	assert(!iio_decimal_capability_set_contains("1,2,3,5", 4));
+	assert(!iio_decimal_capability_set_contains("1,2, 4", 4));
+	assert(!iio_decimal_capability_set_contains("1,2,04", 4));
+	assert(!iio_decimal_capability_set_contains("1,2,4x", 4));
+	assert(!iio_decimal_capability_set_contains("1,2,,4", 4));
+	assert(!iio_decimal_capability_set_contains(NULL, 4));
+	assert(iio_buffer_metadata_open_capable("3", NULL));
+	assert(iio_buffer_metadata_open_capable("3", "1,2,3,4"));
+	assert(!iio_buffer_metadata_open_capable("3", "1,2, 4"));
+	assert(iio_buffer_metadata_status_capable("1", NULL));
+	assert(iio_buffer_metadata_status_capable("1", "1,2"));
+	assert(!iio_buffer_metadata_status_capable("1", "3"));
 	test_cache_replay();
 	test_partial_failure_poison();
 	test_short_response_poison();

@@ -106,6 +106,9 @@ struct iiod_ddr_ring {
 	size_t metadata_capacity;
 	uint64_t requested_iq_bytes;
 	uint64_t admitted_iq_bytes;
+	uint64_t failure_frame_index;
+	uint64_t failure_sample_sequence;
+	uint32_t failure_valid_fields;
 	bool reservation_held;
 	bool producer_started;
 	bool producer_exited;
@@ -486,6 +489,9 @@ static void ring_release_storage(struct iiod_ddr_ring *ring)
 	ring->metadata = NULL;
 	ring->iq = NULL;
 	ring->mapping_bytes = 0;
+	ring->failure_valid_fields = 0;
+	ring->failure_frame_index = 0;
+	ring->failure_sample_sequence = 0;
 	buffered_reservation_release(&ring->reservation_held);
 }
 
@@ -594,6 +600,9 @@ static int ring_prepare(struct iiod_ddr_ring *ring,
 	ring->metadata_capacity = plan->metadata_capacity;
 	ring->requested_iq_bytes = plan->ring_capacity_iq_bytes;
 	ring->admitted_iq_bytes = iq_bytes;
+	ring->failure_valid_fields = 0;
+	ring->failure_frame_index = 0;
+	ring->failure_sample_sequence = 0;
 	ret = iiod_ddr_ring_core_init(&ring->core, ring->slots, frame_count,
 		plan->ring_capture_frames);
 	if (ret)
@@ -1526,22 +1535,49 @@ static void dev_entry_put(struct DevEntry *entry)
 	}
 }
 
-static uint32_t ring_failure_reason(int error)
+static uint32_t ring_provider_failure_reason(struct DevEntry *entry, int error,
+	struct iiod_buffer_failure *failure)
 {
-	if (error == -EOVERFLOW)
+	const bool status_v2 = entry->burst_plan.ring_status_version ==
+		SPF_DDR_RING_STATUS_VERSION_V2;
+
+	*failure = (struct iiod_buffer_failure){0};
+	if (!status_v2)
+		return spf_ddr_ring_legacy_provider_failure_reason(error);
+	if (iiod_buffer_metadata_get_failure(
+			entry->metadata_provider_context, failure) != 0 ||
+		failure->kind > IIOD_BUFFER_FAILURE_METADATA_PROTOCOL ||
+		failure->valid_fields & ~(IIOD_BUFFER_FAILURE_VALID_FRAME |
+			IIOD_BUFFER_FAILURE_VALID_SAMPLE) ||
+		(!(failure->valid_fields & IIOD_BUFFER_FAILURE_VALID_FRAME) &&
+			failure->frame_index) ||
+		(!(failure->valid_fields & IIOD_BUFFER_FAILURE_VALID_SAMPLE) &&
+			failure->sample_sequence)) {
+		*failure = (struct iiod_buffer_failure){0};
+		return SPF_DDR_RING_REASON_METADATA_PROTOCOL;
+	}
+	switch (failure->kind) {
+	case IIOD_BUFFER_FAILURE_DMA_COUNTER_GAP:
 		return SPF_DDR_RING_REASON_COUNTER_GAP;
-	if (error == -ETIMEDOUT)
-		return SPF_DDR_RING_REASON_CONSUMER_STALL;
-	if (error == -ECANCELED || error == -EPIPE)
-		return SPF_DDR_RING_REASON_CLIENT_DISCONNECTED;
-	return SPF_DDR_RING_REASON_DMA_ERROR;
+	case IIOD_BUFFER_FAILURE_GAIN_EVENT_GAP:
+		return SPF_DDR_RING_REASON_GAIN_EVENT_GAP;
+	case IIOD_BUFFER_FAILURE_GAIN_EVENT_OVERFLOW:
+		return SPF_DDR_RING_REASON_GAIN_EVENT_OVERFLOW;
+	case IIOD_BUFFER_FAILURE_METADATA_PROTOCOL:
+		return SPF_DDR_RING_REASON_METADATA_PROTOCOL;
+	case IIOD_BUFFER_FAILURE_NONE:
+	default:
+		return SPF_DDR_RING_REASON_INTERNAL_ERROR;
+	}
 }
 
 static void ring_producer_thd(struct thread_pool *pool, void *data)
 {
 	struct DevEntry *entry = data;
 	struct iiod_ddr_ring *ring = &entry->ring;
+	struct iiod_buffer_failure typed_failure = {0};
 	unsigned int startup_discards = 0;
+	uint32_t terminal_reason = SPF_DDR_RING_REASON_INTERNAL_ERROR;
 	int error = 0;
 
 	while (!thread_pool_is_stopped(pool)) {
@@ -1568,27 +1604,44 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 			break;
 		if (ret) {
 			error = ret;
+			terminal_reason = SPF_DDR_RING_REASON_INTERNAL_ERROR;
 			break;
 		}
 		iiod_buffer_metadata_ring_prefix_complete(
 			entry->metadata_provider_context, prefix_complete);
 
 		ret = iiod_timed_metadata_before_refill(entry);
-		if (ret == 0) {
-			raw_bytes = iiod_timed_buffer_refill(entry);
-			ret = iiod_timed_metadata_after_refill(entry);
-			if (raw_bytes < 0)
-				ret = (int)raw_bytes;
-		} else {
-			raw_bytes = ret;
-		}
 		if (ret) {
 			error = ret;
+			terminal_reason = ring_provider_failure_reason(entry, ret,
+				&typed_failure);
+			goto abort_slot;
+		}
+		raw_bytes = iiod_timed_buffer_refill(entry);
+		if (raw_bytes < 0) {
+			error = (int)raw_bytes;
+			terminal_reason = SPF_DDR_RING_REASON_DMA_ERROR;
+			typed_failure = (struct iiod_buffer_failure){
+				.valid_fields = IIOD_BUFFER_FAILURE_VALID_FRAME,
+				.frame_index = ring->core.produced_frames,
+			};
+			goto abort_slot;
+		}
+		ret = iiod_timed_metadata_after_refill(entry);
+		if (ret) {
+			error = ret;
+			terminal_reason = ring_provider_failure_reason(entry, ret,
+				&typed_failure);
 			goto abort_slot;
 		}
 		raw_start = iio_buffer_start(entry->buf);
 		if (!raw_start) {
 			error = -EIO;
+			terminal_reason = SPF_DDR_RING_REASON_INTERNAL_ERROR;
+			typed_failure = (struct iiod_buffer_failure){
+				.valid_fields = IIOD_BUFFER_FAILURE_VALID_FRAME,
+				.frame_index = ring->core.produced_frames,
+			};
 			goto abort_slot;
 		}
 		if (entry->metadata_extra_samples &&
@@ -1604,12 +1657,23 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 			pthread_mutex_unlock(&entry->ring_lock);
 			if (++startup_discards > IIOD_BURST_MAX_STARTUP_DISCARDS) {
 				error = -ETIMEDOUT;
+				terminal_reason = entry->burst_plan.ring_status_version ==
+					SPF_DDR_RING_STATUS_VERSION_V2 ?
+					SPF_DDR_RING_REASON_METADATA_PROTOCOL :
+					SPF_DDR_RING_REASON_CONSUMER_STALL;
+				typed_failure = (struct iiod_buffer_failure){
+					.valid_fields = IIOD_BUFFER_FAILURE_VALID_FRAME,
+					.frame_index = ring->core.produced_frames,
+				};
 				break;
 			}
 			continue;
 		}
 		if (metadata_len < 0) {
 			error = (int)metadata_len;
+			terminal_reason = ring_provider_failure_reason(entry,
+				(int)metadata_len,
+				&typed_failure);
 			if (entry->metadata_extra_samples) {
 				pthread_mutex_lock(&entry->ring_lock);
 				iiod_ddr_ring_core_mark_unavailable(&ring->core,
@@ -1623,6 +1687,18 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 			iq_offset > (size_t)raw_bytes ||
 			iq_bytes > (size_t)raw_bytes - iq_offset) {
 			error = -EIO;
+			terminal_reason = entry->burst_plan.ring_status_version ==
+				SPF_DDR_RING_STATUS_VERSION_V2 ?
+				SPF_DDR_RING_REASON_METADATA_PROTOCOL :
+				SPF_DDR_RING_REASON_INTERNAL_ERROR;
+			typed_failure = (struct iiod_buffer_failure){
+				.valid_fields = IIOD_BUFFER_FAILURE_VALID_FRAME |
+					(entry->metadata_extra_samples ?
+					 IIOD_BUFFER_FAILURE_VALID_SAMPLE : 0),
+				.frame_index = ring->core.produced_frames,
+				.sample_sequence = entry->metadata_extra_samples ?
+					first_sample_sequence : 0,
+			};
 			goto abort_slot;
 		}
 		iiod_timed_ddr_copy(entry, ring_iq_slot(ring, slot),
@@ -1638,6 +1714,15 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 		pthread_mutex_unlock(&entry->ring_lock);
 		if (ret) {
 			error = ret;
+			terminal_reason = SPF_DDR_RING_REASON_INTERNAL_ERROR;
+			typed_failure = (struct iiod_buffer_failure){
+				.valid_fields = IIOD_BUFFER_FAILURE_VALID_FRAME |
+					(entry->metadata_extra_samples ?
+					 IIOD_BUFFER_FAILURE_VALID_SAMPLE : 0),
+				.frame_index = ring->core.produced_frames,
+				.sample_sequence = entry->metadata_extra_samples ?
+					first_sample_sequence : 0,
+			};
 			break;
 		}
 		continue;
@@ -1650,10 +1735,13 @@ abort_slot:
 	}
 
 	pthread_mutex_lock(&entry->ring_lock);
-	if (error && ring->core.state != SPF_DDR_RING_STATE_CANCELLED)
+	if (error && ring->core.state != SPF_DDR_RING_STATE_CANCELLED) {
+		ring->failure_valid_fields = typed_failure.valid_fields;
+		ring->failure_frame_index = typed_failure.frame_index;
+		ring->failure_sample_sequence = typed_failure.sample_sequence;
 		(void)iiod_ddr_ring_core_fail(&ring->core,
-			ring_failure_reason(error), error);
-	else if (!error && ring->core.state == SPF_DDR_RING_STATE_RUNNING)
+			terminal_reason, error);
+	} else if (!error && ring->core.state == SPF_DDR_RING_STATE_RUNNING)
 		(void)iiod_ddr_ring_core_cancel(&ring->core,
 			SPF_DDR_RING_REASON_CLIENT_CANCELLED);
 	pthread_cond_broadcast(&entry->ring_ready_cond);
@@ -2718,6 +2806,9 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 		if (!entry->ring.producer_started) {
 			ret = -ENODATA;
 		} else {
+			status.version = entry->burst_plan.ring_status_version ?
+				entry->burst_plan.ring_status_version :
+				SPF_DDR_RING_STATUS_VERSION_V1;
 			status.state = entry->ring.core.state;
 			status.terminal_reason = entry->ring.core.terminal_reason;
 			status.error_code = entry->ring.core.error_code;
@@ -2743,6 +2834,22 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 					SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE;
 				status.first_unavailable_sample_sequence =
 					entry->ring.core.first_unavailable_sample_sequence;
+			}
+			if (status.version == SPF_DDR_RING_STATUS_VERSION_V2 &&
+					(entry->ring.failure_valid_fields &
+					 IIOD_BUFFER_FAILURE_VALID_FRAME)) {
+				status.valid_fields |=
+					SPF_DDR_RING_STATUS_VALID_FAILURE_FRAME;
+				status.failure_frame_index =
+					entry->ring.failure_frame_index;
+			}
+			if (status.version == SPF_DDR_RING_STATUS_VERSION_V2 &&
+					(entry->ring.failure_valid_fields &
+					 IIOD_BUFFER_FAILURE_VALID_SAMPLE)) {
+				status.valid_fields |=
+					SPF_DDR_RING_STATUS_VALID_FAILURE_SAMPLE;
+				status.failure_sample_sequence =
+					entry->ring.failure_sample_sequence;
 			}
 			ret = spf_ddr_ring_status_encode(wire_status,
 				sizeof(wire_status), &status);

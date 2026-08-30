@@ -141,6 +141,36 @@ static void test_abort_and_cancel(void)
 	assert(iiod_ddr_ring_core_producer_reserve(&ring, &slot) == -ESHUTDOWN);
 }
 
+static void test_v2_provider_failure_reasons(void)
+{
+	const uint32_t reasons[] = {
+		SPF_DDR_RING_REASON_GAIN_EVENT_GAP,
+		SPF_DDR_RING_REASON_GAIN_EVENT_OVERFLOW,
+		SPF_DDR_RING_REASON_METADATA_PROTOCOL,
+	};
+
+	for (size_t index = 0; index < sizeof(reasons) / sizeof(reasons[0]);
+			++index) {
+		enum iiod_ddr_ring_slot_state slots[1];
+		struct iiod_ddr_ring_core ring;
+
+		assert(iiod_ddr_ring_core_init(&ring, slots, 1, 0) == 0);
+		assert(iiod_ddr_ring_core_start(&ring) == 0);
+		assert(iiod_ddr_ring_core_fail(&ring, reasons[index], -EIO) == 0);
+		assert(ring.state == SPF_DDR_RING_STATE_FAILED);
+		assert(ring.terminal_reason == reasons[index]);
+	}
+	{
+		enum iiod_ddr_ring_slot_state slots[1];
+		struct iiod_ddr_ring_core ring;
+
+		assert(iiod_ddr_ring_core_init(&ring, slots, 1, 0) == 0);
+		assert(iiod_ddr_ring_core_start(&ring) == 0);
+		assert(iiod_ddr_ring_core_fail(&ring,
+			SPF_DDR_RING_REASON_METADATA_PROTOCOL + 1U, -EIO) == -EINVAL);
+	}
+}
+
 static void test_sample_continuity_stops_at_first_gap(void)
 {
 	enum iiod_ddr_ring_slot_state slots[2];
@@ -171,6 +201,7 @@ int main(void)
 	test_continuous_capture_uses_low_watermark();
 	test_failure_drains_committed();
 	test_abort_and_cancel();
+	test_v2_provider_failure_reasons();
 	test_sample_continuity_stops_at_first_gap();
 	return 0;
 }

@@ -20,6 +20,7 @@ struct spf_tandem_frame_preview {
 	spf_gain_timeline_frame_t timeline;
 	spf_gain_timeline_state_t next_state;
 	uint64_t generation;
+	uint64_t transition_watermark;
 	uint64_t first_sample_sequence;
 	uint32_t samples_per_channel;
 	uint32_t event_sequence_start;
@@ -61,6 +62,7 @@ struct spf_tandem_session {
 	bool sample_sequence_valid;
 	bool pending_watermark_valid;
 	bool authoritative_timeline;
+	bool auto_started;
 };
 
 int spf_tandem_request_decode(struct adi_tandem_agc_request_v1 *destination,
@@ -71,6 +73,10 @@ int spf_tandem_request_validate_event_window(
 int spf_tandem_request_validate_event_window_depth(
 	const struct adi_tandem_agc_request_v1 *request,
 	uint32_t samples_per_channel, unsigned int kernel_buffers_count);
+int spf_tandem_validate_sample_fence_window(uint32_t samples_per_channel,
+	unsigned int kernel_buffers_count);
+int spf_tandem_sample_fence_at_or_after(uint32_t observed_fence,
+	uint32_t target_fence, bool *at_or_after);
 int spf_tandem_request_observation_interval(
 	const struct adi_tandem_agc_request_v1 *request,
 	uint32_t samples_per_channel, uint32_t *interval_samples);
@@ -80,8 +86,11 @@ int spf_tandem_session_init(struct spf_tandem_session *session,
 int spf_tandem_session_enable_authoritative_timeline(
 	struct spf_tandem_session *session);
 int spf_tandem_session_acquire(struct spf_tandem_session *session);
+int spf_tandem_session_start_auto(struct spf_tandem_session *session);
 int spf_tandem_session_heartbeat(struct spf_tandem_session *session);
-int spf_tandem_session_snapshot_watermark(struct spf_tandem_session *session);
+int spf_tandem_session_snapshot_frame_watermark(
+	struct spf_tandem_session *session, uint64_t first_sample_sequence,
+	uint32_t samples_per_channel);
 int spf_tandem_session_preview(struct spf_tandem_session *session,
 	uint64_t first_sample_sequence, uint32_t samples_per_channel,
 	spf_gain_event_v7_t *events, size_t event_capacity,

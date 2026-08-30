@@ -245,6 +245,7 @@ def test_device_ddr_ring_status_decodes_atomic_snapshot(monkeypatch):
         ddr_ring_frames=17
     )
     status = buffer.ddr_ring_status()
+    assert status["version"] == 1
     assert status["state"] == "draining"
     assert status["produced_frames"] == 9
     assert status["consumed_frames"] == 7
@@ -252,6 +253,106 @@ def test_device_ddr_ring_status_decodes_atomic_snapshot(monkeypatch):
     assert status["wrap_count"] == 2
     assert status["last_contiguous_sample_sequence"] == 123456
     assert status["first_unavailable_sample_sequence"] is None
+    assert status["failure_frame_index"] is None
+    assert status["failure_sample_sequence"] is None
+    buffer.close()
+
+
+def test_device_ddr_ring_status_v2_decodes_typed_failure(monkeypatch):
+    wire = struct.pack(
+        "<IHHIIIi13Q",
+        0x53524653,
+        2,
+        128,
+        5,
+        9,
+        0xC,
+        -84,
+        32769,
+        32768,
+        17,
+        7,
+        7,
+        4,
+        2,
+        1,
+        1,
+        0,
+        0,
+        0,
+        123456,
+    )
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: object())
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+    monkeypatch.setattr(
+        iio,
+        "_buffer_get_metadata_status",
+        lambda _buffer, destination, _capacity: memmove(destination, wire, len(wire))
+        and len(wire),
+    )
+    buffer = iio.MetadataBuffer(
+        RingFakeDevice(), 1024, b"provider", ddr_ring_bytes=32769,
+        ddr_ring_frames=17
+    )
+    status = buffer.ddr_ring_status()
+    assert status["version"] == 2
+    assert status["state"] == "failed"
+    assert status["terminal_reason"] == "gain_event_gap"
+    assert status["failure_frame_index"] == 0
+    assert status["failure_sample_sequence"] == 123456
+    buffer.close()
+
+
+@pytest.mark.parametrize(
+    "version,reason,produced,consumed,high_water",
+    [
+        (1, 9, 7, 7, 4),
+        (2, 9, 7, 8, 4),
+        (2, 9, 7, 7, 8),
+    ],
+)
+def test_device_ddr_ring_status_rejects_hostile_relations(
+    monkeypatch, version, reason, produced, consumed, high_water
+):
+    wire = struct.pack(
+        "<IHHIIIi13Q",
+        0x53524653,
+        version,
+        128,
+        5,
+        reason,
+        0,
+        -84,
+        32769,
+        32768,
+        17,
+        produced,
+        consumed,
+        high_water,
+        2,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+    )
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: object())
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+    monkeypatch.setattr(
+        iio,
+        "_buffer_get_metadata_status",
+        lambda _buffer, destination, _capacity: memmove(destination, wire, len(wire))
+        and len(wire),
+    )
+    buffer = iio.MetadataBuffer(
+        RingFakeDevice(), 1024, b"provider", ddr_ring_bytes=32769,
+        ddr_ring_frames=17
+    )
+    with pytest.raises(OSError):
+        buffer.ddr_ring_status()
     buffer.close()
 
 

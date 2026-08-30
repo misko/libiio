@@ -10,6 +10,24 @@
 struct iio_buffer;
 struct iio_device;
 
+#define IIOD_BUFFER_FAILURE_VALID_FRAME UINT32_C(1)
+#define IIOD_BUFFER_FAILURE_VALID_SAMPLE UINT32_C(2)
+
+enum iiod_buffer_failure_kind {
+	IIOD_BUFFER_FAILURE_NONE = 0,
+	IIOD_BUFFER_FAILURE_DMA_COUNTER_GAP = 1,
+	IIOD_BUFFER_FAILURE_GAIN_EVENT_GAP = 2,
+	IIOD_BUFFER_FAILURE_GAIN_EVENT_OVERFLOW = 3,
+	IIOD_BUFFER_FAILURE_METADATA_PROTOCOL = 4,
+};
+
+struct iiod_buffer_failure {
+	uint32_t kind;
+	uint32_t valid_fields;
+	uint64_t frame_index;
+	uint64_t sample_sequence;
+};
+
 struct iiod_buffer_burst_plan {
 	uint64_t requested_iq_bytes;
 	uint64_t ring_capacity_iq_bytes;
@@ -51,5 +69,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		const struct iio_device *dev, const struct iio_buffer *buffer,
 		size_t raw_bytes, void *metadata, size_t metadata_capacity,
 		size_t *iq_offset, size_t *iq_bytes);
+int iiod_buffer_metadata_get_failure(void *provider_context,
+	struct iiod_buffer_failure *failure);
 
 #endif

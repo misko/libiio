@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "spf-tandem-metadata.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <string.h>
 
@@ -71,6 +72,74 @@ uint16_t spf_tandem_compact_v7_observations(
 		write_index++;
 	}
 	return write_index;
+}
+
+int spf_tandem_transition_count_wire(uint64_t transition_count,
+	uint32_t *wire_count)
+{
+	if (!wire_count)
+		return -EINVAL;
+	if (transition_count > UINT32_MAX)
+		return -ERANGE;
+	*wire_count = (uint32_t)transition_count;
+	return 0;
+}
+
+int spf_tandem_radio_frame_v7_build(void *destination,
+	size_t destination_bytes, const spf_radio_frame_v7_args_t *base_args,
+	const struct spf_tandem_frame_preview *preview,
+	int32_t ad9361_temperature_mdeg_c)
+{
+	spf_radio_frame_v7_args_t args;
+	uint32_t transition_count_start;
+	uint32_t transition_count_end;
+	int ret;
+
+	if (!destination || !base_args || !preview)
+		return -EINVAL;
+	if (!preview->event_sequence_start_valid ||
+		preview->event_count > UINT16_MAX)
+		return -EPROTO;
+	ret = spf_tandem_transition_count_wire(
+		preview->timeline.transition_count_start,
+		&transition_count_start);
+	if (!ret)
+		ret = spf_tandem_transition_count_wire(
+			preview->timeline.transition_count_end,
+			&transition_count_end);
+	if (ret)
+		return ret;
+
+	args = *base_args;
+	args.gain_event_count = (uint16_t)preview->event_count;
+	args.rx1_first_change_sample =
+		preview->timeline.rx1_first_change_sample;
+	args.rx2_first_change_sample =
+		preview->timeline.rx2_first_change_sample;
+	args.ownership_epoch = preview->status.ownership_epoch;
+	args.tandem_state = preview->status.state;
+	args.tandem_fault_flags = preview->status.fault_flags;
+	args.tandem_transition_count_end = transition_count_end;
+	args.gain_table_id = preview->status.gain_table_id;
+	args.threshold_provenance = preview->status.threshold_provenance;
+	args.minimum_gain_db = preview->status.minimum_gain_db;
+	args.maximum_gain_db = preview->status.maximum_gain_db;
+	args.initial_gain_db = preview->status.initial_gain_db;
+	args.minimum_gain_index = preview->status.minimum_gain_index;
+	args.maximum_gain_index = preview->status.maximum_gain_index;
+	args.rx1_gain_index_start =
+		preview->timeline.gain_start.rx1_gain_index;
+	args.rx2_gain_index_start =
+		preview->timeline.gain_start.rx2_gain_index;
+	args.rx1_gain_index_end = preview->timeline.gain_end.rx1_gain_index;
+	args.rx2_gain_index_end = preview->timeline.gain_end.rx2_gain_index;
+	args.ad9361_temperature_mdeg_c = ad9361_temperature_mdeg_c;
+	args.tandem_transition_count_start = transition_count_start;
+	args.timeline_flags = SPF_FPGA_GAIN_TIMELINE_COMPLETE;
+	args.event_sequence_start = preview->event_sequence_start;
+	if (!spf_radio_frame_v7_base_build(destination, destination_bytes, &args))
+		return -EPROTO;
+	return 0;
 }
 
 size_t spf_radio_frame_v5_header_bytes(uint16_t observation_capacity,

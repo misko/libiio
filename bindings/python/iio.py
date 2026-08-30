@@ -1394,7 +1394,8 @@ class MetadataBuffer(Buffer):
         if status_bytes != 128:
             raise OSError("IIO server returned an invalid DDR ring status size")
         values = _struct.unpack("<IHHIIIi13Q", storage.raw)
-        if values[:3] != (0x53524653, 1, 128) or values[-2:] != (0, 0):
+        magic, version, wire_bytes = values[:3]
+        if magic != 0x53524653 or version not in (1, 2) or wire_bytes != 128:
             raise OSError("IIO server returned an invalid DDR ring status")
         state_names = (
             "off",
@@ -1415,12 +1416,44 @@ class MetadataBuffer(Buffer):
             "counter_gap",
             "transport_error",
             "internal_error",
+            "gain_event_gap",
+            "gain_event_overflow",
+            "metadata_protocol",
         )
         state, reason, valid_fields, error_code = values[3:7]
-        if state >= len(state_names) or reason >= len(reason_names):
+        maximum_reason = 8 if version == 1 else 11
+        if state >= len(state_names) or reason > maximum_reason:
             raise OSError("IIO server returned an invalid DDR ring state")
         counters = values[7:-2]
+        if counters[4] > counters[3] or counters[5] > counters[3]:
+            raise OSError("IIO server returned invalid DDR ring counters")
+        failure_frame_index, failure_sample_sequence = values[-2:]
+        valid_mask = 0x3 if version == 1 else 0xF
+        if valid_fields & ~valid_mask:
+            raise OSError("IIO server returned invalid DDR ring status fields")
+        if version == 1 and (failure_frame_index or failure_sample_sequence):
+            raise OSError("IIO server returned invalid DDR ring v1 status")
+        if not (valid_fields & 0x1) and counters[9]:
+            raise OSError("IIO server returned invalid contiguous sample status")
+        if not (valid_fields & 0x2) and counters[10]:
+            raise OSError("IIO server returned invalid unavailable sample status")
+        if not (valid_fields & 0x4) and failure_frame_index:
+            raise OSError("IIO server returned invalid failure frame status")
+        if not (valid_fields & 0x8) and failure_sample_sequence:
+            raise OSError("IIO server returned invalid failure sample status")
+        failure_fields = valid_fields & 0xC
+        if state in (0, 1, 2, 3):
+            valid_terminal = reason == 0 and error_code == 0
+        elif state == 4:
+            valid_terminal = reason == 1 and error_code == 0
+        elif state == 5:
+            valid_terminal = 4 <= reason <= 11 and error_code < 0
+        else:
+            valid_terminal = reason in (2, 3) and error_code < 0
+        if not valid_terminal or (state != 5 and failure_fields):
+            raise OSError("IIO server returned inconsistent DDR ring status")
         return {
+            "version": version,
             "state": state_names[state],
             "terminal_reason": reason_names[reason],
             "error_code": error_code,
@@ -1438,6 +1471,12 @@ class MetadataBuffer(Buffer):
             ),
             "first_unavailable_sample_sequence": (
                 counters[10] if valid_fields & 2 else None
+            ),
+            "failure_frame_index": (
+                failure_frame_index if valid_fields & 4 else None
+            ),
+            "failure_sample_sequence": (
+                failure_sample_sequence if valid_fields & 8 else None
             ),
         }
 

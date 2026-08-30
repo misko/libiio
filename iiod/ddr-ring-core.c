@@ -205,7 +205,7 @@ int iiod_ddr_ring_core_fail(struct iiod_ddr_ring_core *ring,
 	uint32_t reason, int error_code)
 {
 	if (!ring || reason < SPF_DDR_RING_REASON_CONSUMER_STALL ||
-		reason > SPF_DDR_RING_REASON_INTERNAL_ERROR || error_code >= 0)
+		reason > SPF_DDR_RING_REASON_METADATA_PROTOCOL || error_code >= 0)
 		return -EINVAL;
 	if (iiod_ddr_ring_core_is_terminal(ring))
 		return -ESHUTDOWN;

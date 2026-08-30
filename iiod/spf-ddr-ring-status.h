@@ -64,6 +64,8 @@ struct spf_ddr_ring_status {
 int spf_ddr_ring_exclusive_boundary(uint64_t first_sample_sequence,
 	uint64_t samples_per_frame, uint64_t *exclusive_boundary);
 
+uint32_t spf_ddr_ring_legacy_provider_failure_reason(int error);
+
 int spf_ddr_ring_status_encode(void *wire_status, size_t wire_bytes,
 	const struct spf_ddr_ring_status *source);
 int spf_ddr_ring_status_decode(struct spf_ddr_ring_status *destination,

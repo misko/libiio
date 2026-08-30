@@ -10,10 +10,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SPF_TANDEM_STATUS_CATCHUP_ATTEMPTS 4
 #define SPF_TANDEM_EVENT_DRAIN_TIMEOUT_MS 20
+#define SPF_TANDEM_FENCE_TIMEOUT_MS 20
+#define SPF_TANDEM_FENCE_RETRY_NS 1000000L
+#define SPF_TANDEM_AUTHORITATIVE_FPGA_ABI 2U
 #define SPF_TANDEM_TRANSITION_COUNTER_BITS 8U
 #define SPF_TANDEM_TRANSITION_COUNTER_MASK \
 	((1U << SPF_TANDEM_TRANSITION_COUNTER_BITS) - 1U)
@@ -126,6 +130,11 @@ int spf_tandem_request_decode(struct adi_tandem_agc_request_v1 *destination,
 		destination->version != ADI_TANDEM_AGC_ABI_VERSION ||
 		destination->size != sizeof(*destination))
 		return -EPROTONOSUPPORT;
+	if (destination->required_features !=
+			(ADI_TANDEM_AGC_FEATURE_EVENTS |
+			 ADI_TANDEM_AGC_FEATURE_FAIL_CLOSED |
+			 ADI_TANDEM_AGC_FEATURE_PAIRED_GAIN))
+		return -EINVAL;
 	for (index = 0; index < 8; ++index)
 		if (reserved[index])
 			return -EINVAL;
@@ -183,6 +192,36 @@ int spf_tandem_request_validate_event_window_depth(
 	maximum_retained_events = 1U +
 		(retention_samples - 1U) / minimum_transition_samples;
 	return maximum_retained_events <= request->event_capacity ? 0 : -ENOSPC;
+}
+
+int spf_tandem_validate_sample_fence_window(uint32_t samples_per_channel,
+	unsigned int kernel_buffers_count)
+{
+	const uint64_t retention_frames =
+		(uint64_t)kernel_buffers_count + UINT64_C(1);
+	const uint64_t half_range = UINT64_C(1) << 31;
+
+	if (!samples_per_channel || !kernel_buffers_count)
+		return -EINVAL;
+	if ((uint64_t)samples_per_channel >
+		(UINT64_MAX / retention_frames))
+		return -EOVERFLOW;
+	return (uint64_t)samples_per_channel * retention_frames < half_range ?
+		0 : -ERANGE;
+}
+
+int spf_tandem_sample_fence_at_or_after(uint32_t observed_fence,
+	uint32_t target_fence, bool *at_or_after)
+{
+	const uint32_t delta = observed_fence - target_fence;
+	const uint32_t half_range = UINT32_C(1) << 31;
+
+	if (!at_or_after)
+		return -EINVAL;
+	if (delta == half_range)
+		return -ERANGE;
+	*at_or_after = delta < half_range;
+	return 0;
 }
 
 int spf_tandem_request_observation_interval(
@@ -266,7 +305,11 @@ static int read_status(struct spf_tandem_session *session,
 		return -errno;
 	if (status.version != ADI_TANDEM_AGC_ABI_VERSION ||
 		status.size != sizeof(status) ||
-		status.ownership_epoch != session->status.ownership_epoch)
+		status.ownership_epoch != session->status.ownership_epoch ||
+		(session->request.mode == ADI_TANDEM_AGC_MODE_HOLD &&
+		 status.state != ADI_TANDEM_AGC_STATE_ARMED_HOLD) ||
+		(session->request.mode == ADI_TANDEM_AGC_MODE_AUTO &&
+		 status.state != ADI_TANDEM_AGC_STATE_ARMED_AUTO))
 		return -EPROTO;
 	if (status.fault_flags)
 		return -EIO;
@@ -364,6 +407,9 @@ int spf_tandem_session_acquire(struct spf_tandem_session *session)
 		caps.size != sizeof(caps) ||
 		(caps.features & session->request.required_features) !=
 			session->request.required_features ||
+		(session->authoritative_timeline &&
+		 (!(caps.features & ADI_TANDEM_AGC_FEATURE_SAMPLE_FENCE) ||
+		  caps.fpga_abi != SPF_TANDEM_AUTHORITATIVE_FPGA_ABI)) ||
 		caps.event_size != sizeof(struct adi_tandem_agc_event) ||
 		session->request.event_capacity > caps.fifo_depth) {
 		ret = -EPROTONOSUPPORT;
@@ -371,6 +417,9 @@ int spf_tandem_session_acquire(struct spf_tandem_session *session)
 	}
 	memset(&acquire, 0, sizeof(acquire));
 	acquire.request = session->request;
+	if (session->authoritative_timeline &&
+		session->request.mode == ADI_TANDEM_AGC_MODE_AUTO)
+		acquire.request.mode = ADI_TANDEM_AGC_MODE_HOLD;
 	if (session->syscalls.ioctl_device(session->fd,
 			ADI_TANDEM_AGC_IOC_ACQUIRE, &acquire,
 			session->syscalls.opaque) < 0) {
@@ -385,9 +434,11 @@ int spf_tandem_session_acquire(struct spf_tandem_session *session)
 		(session->authoritative_timeline &&
 			(acquire.status.transition_count != 0 ||
 			 acquire.status.overflow_count != 0)) ||
-		(session->request.mode == ADI_TANDEM_AGC_MODE_HOLD &&
+		((session->request.mode == ADI_TANDEM_AGC_MODE_HOLD ||
+		  session->authoritative_timeline) &&
 			acquire.status.state != ADI_TANDEM_AGC_STATE_ARMED_HOLD) ||
-		(session->request.mode == ADI_TANDEM_AGC_MODE_AUTO &&
+		(!session->authoritative_timeline &&
+		 session->request.mode == ADI_TANDEM_AGC_MODE_AUTO &&
 			acquire.status.state != ADI_TANDEM_AGC_STATE_ARMED_AUTO)) {
 		ret = -EPROTO;
 		goto fail;
@@ -400,6 +451,7 @@ int spf_tandem_session_acquire(struct spf_tandem_session *session)
 	session->sequence_valid = false;
 	session->sample_sequence_valid = false;
 	session->pending_watermark_valid = false;
+	session->auto_started = false;
 	session->generation++;
 	session->frame_transition_count = acquire.status.transition_count;
 	session->fifo_depth = caps.fifo_depth;
@@ -422,6 +474,31 @@ fail:
 		session->syscalls.opaque);
 	session->fd = -1;
 	return ret;
+}
+
+int spf_tandem_session_start_auto(struct spf_tandem_session *session)
+{
+	struct adi_tandem_agc_status status;
+	int ret;
+
+	if (!session || !session->acquired || !session->authoritative_timeline)
+		return -EINVAL;
+	if (session->request.mode == ADI_TANDEM_AGC_MODE_HOLD)
+		return session->auto_started ? -EINVAL : 0;
+	if (session->request.mode != ADI_TANDEM_AGC_MODE_AUTO ||
+		session->auto_started)
+		return -EINVAL;
+	if (session->syscalls.ioctl_device(session->fd,
+			ADI_TANDEM_AGC_IOC_START_AUTO, NULL,
+			session->syscalls.opaque) < 0)
+		return -errno;
+	ret = read_status(session, &status);
+	if (ret)
+		return ret;
+	if (status.state != ADI_TANDEM_AGC_STATE_ARMED_AUTO)
+		return -EPROTO;
+	session->auto_started = true;
+	return 0;
 }
 
 static int fill_queue(struct spf_tandem_session *session)
@@ -514,19 +591,66 @@ static int validate_queued_events(const struct spf_tandem_session *session)
 	return 0;
 }
 
-int spf_tandem_session_snapshot_watermark(struct spf_tandem_session *session)
+static int monotonic_milliseconds(uint64_t *milliseconds)
+{
+	struct timespec now = {0, 0};
+
+	if (!milliseconds)
+		return -EINVAL;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return -errno;
+	*milliseconds = (uint64_t)now.tv_sec * UINT64_C(1000) +
+		(uint64_t)now.tv_nsec / UINT64_C(1000000);
+	return 0;
+}
+
+int spf_tandem_session_snapshot_frame_watermark(
+	struct spf_tandem_session *session, uint64_t first_sample_sequence,
+	uint32_t samples_per_channel)
 {
 	struct adi_tandem_agc_status status;
+	const struct timespec retry = {.tv_nsec = SPF_TANDEM_FENCE_RETRY_NS};
+	uint64_t frame_end;
+	uint64_t deadline;
+	uint64_t now = 0;
 	uint32_t committed_low;
 	uint32_t delta;
 	uint64_t watermark;
+	bool fence_reached;
 	int ret;
 
-	if (!session || !session->acquired || !session->authoritative_timeline)
+	if (!session || !session->acquired || !session->authoritative_timeline ||
+		!samples_per_channel ||
+		(session->request.mode == ADI_TANDEM_AGC_MODE_AUTO &&
+		 !session->auto_started))
 		return -EINVAL;
-	ret = read_status(session, &status);
+	frame_end = first_sample_sequence + samples_per_channel;
+	if (frame_end < first_sample_sequence)
+		return -ERANGE;
+	ret = monotonic_milliseconds(&now);
 	if (ret)
 		return ret;
+	if (now > UINT64_MAX - SPF_TANDEM_FENCE_TIMEOUT_MS)
+		return -ERANGE;
+	deadline = now + SPF_TANDEM_FENCE_TIMEOUT_MS;
+	for (;;) {
+		ret = read_status(session, &status);
+		if (ret)
+			return ret;
+		ret = spf_tandem_sample_fence_at_or_after(
+			status.sample_counter_fence_low, (uint32_t)frame_end,
+			&fence_reached);
+		if (ret)
+			return ret;
+		if (fence_reached)
+			break;
+		ret = monotonic_milliseconds(&now);
+		if (ret)
+			return ret;
+		if (now >= deadline)
+			return -ETIMEDOUT;
+		(void)nanosleep(&retry, NULL);
+	}
 	committed_low = (uint32_t)session->timeline_state.transition_count &
 		SPF_TANDEM_TRANSITION_COUNTER_MASK;
 	delta = (status.transition_count - committed_low) &
@@ -534,7 +658,7 @@ int spf_tandem_session_snapshot_watermark(struct spf_tandem_session *session)
 	if (delta >= SPF_TANDEM_TRANSITION_COUNTER_HALF_RANGE ||
 		delta > session->fifo_depth ||
 		delta > SPF_TANDEM_EVENT_QUEUE_CAPACITY ||
-		delta < session->queue_count)
+		session->queue_count > delta)
 		return -EILSEQ;
 	if (session->timeline_state.transition_count > UINT64_MAX - delta)
 		return -ERANGE;
@@ -643,6 +767,8 @@ int spf_tandem_session_preview(struct spf_tandem_session *session,
 	preview->timeline = frame;
 	preview->next_state = next_state;
 	preview->generation = session->generation;
+	preview->transition_watermark =
+		session->pending_transition_watermark;
 	preview->first_sample_sequence = first_sample_sequence;
 	preview->samples_per_channel = samples_per_channel;
 	preview->event_count = frame.frame_event_count;
@@ -665,6 +791,8 @@ int spf_tandem_session_commit(struct spf_tandem_session *session,
 	if (!session || !preview || !session->acquired ||
 		!session->pending_watermark_valid ||
 		preview->generation != session->generation ||
+		preview->transition_watermark !=
+			session->pending_transition_watermark ||
 		preview->timeline.consumed_event_count > session->queue_count ||
 		preview->next_state.transition_count >
 			session->pending_transition_watermark)
@@ -791,4 +919,5 @@ void spf_tandem_session_close(struct spf_tandem_session *session)
 	session->acquired = false;
 	session->queue_count = 0;
 	session->pending_watermark_valid = false;
+	session->auto_started = false;
 }

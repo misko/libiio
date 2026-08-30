@@ -53,7 +53,10 @@ static bool status_values_valid(const struct spf_ddr_ring_status *status)
 		valid_mask |= SPF_DDR_RING_STATUS_VALID_FAILURE_FRAME |
 			SPF_DDR_RING_STATUS_VALID_FAILURE_SAMPLE;
 	if (status->state > SPF_DDR_RING_STATE_CANCELLED ||
-		status->terminal_reason > SPF_DDR_RING_REASON_METADATA_PROTOCOL)
+		status->terminal_reason >
+			(status->version == SPF_DDR_RING_STATUS_VERSION_V1 ?
+			 SPF_DDR_RING_REASON_INTERNAL_ERROR :
+			 SPF_DDR_RING_REASON_METADATA_PROTOCOL))
 		return false;
 	if (status->valid_fields & ~valid_mask)
 		return false;
@@ -119,6 +122,17 @@ int spf_ddr_ring_exclusive_boundary(uint64_t first_sample_sequence,
 		return -EOVERFLOW;
 	*exclusive_boundary = first_sample_sequence + samples_per_frame;
 	return 0;
+}
+
+uint32_t spf_ddr_ring_legacy_provider_failure_reason(int error)
+{
+	if (error == -EOVERFLOW)
+		return SPF_DDR_RING_REASON_COUNTER_GAP;
+	if (error == -ETIMEDOUT)
+		return SPF_DDR_RING_REASON_CONSUMER_STALL;
+	if (error == -ECANCELED || error == -EPIPE)
+		return SPF_DDR_RING_REASON_CLIENT_DISCONNECTED;
+	return SPF_DDR_RING_REASON_DMA_ERROR;
 }
 
 int spf_ddr_ring_status_encode(void *wire_status, size_t wire_bytes,

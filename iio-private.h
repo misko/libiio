@@ -14,6 +14,7 @@
 #include "iio-backend.h"
 #include "iio-config.h"
 
+#include <limits.h>
 #include <stdbool.h>
 
 #ifdef _MSC_BUILD
@@ -41,6 +42,67 @@
 	*(((uint32_t *) addr) + BIT_WORD(bit)) |= BIT_MASK(bit)
 #define CLEAR_BIT(addr, bit) \
 	*(((uint32_t *) addr) + BIT_WORD(bit)) &= ~BIT_MASK(bit)
+
+static inline bool iio_decimal_capability_between(const char *value,
+	unsigned int minimum, unsigned int maximum)
+{
+	unsigned int parsed;
+
+	if (!value || value[0] < '0' || value[0] > '9' || value[1] != '\0')
+		return false;
+	parsed = (unsigned int)(value[0] - '0');
+	return parsed >= minimum && parsed <= maximum;
+}
+
+static inline bool iio_decimal_capability_set_contains(const char *values,
+	unsigned int target)
+{
+	bool found = false;
+
+	if (!values || !values[0])
+		return false;
+	for (;;) {
+		unsigned int parsed = 0;
+
+		if (*values < '0' || *values > '9')
+			return false;
+		if (*values == '0' && values[1] >= '0' && values[1] <= '9')
+			return false;
+		do {
+			const unsigned int digit = (unsigned int)(*values - '0');
+
+			if (parsed > (UINT_MAX - digit) / 10U)
+				return false;
+			parsed = parsed * 10U + digit;
+			values++;
+		} while (*values >= '0' && *values <= '9');
+		found = found || parsed == target;
+		if (!*values)
+			return found;
+		if (*values != ',' || !values[1])
+			return false;
+		values++;
+	}
+}
+
+static inline bool iio_buffer_metadata_open_capable(const char *scalar,
+	const char *versions)
+{
+	if (versions)
+		return iio_decimal_capability_set_contains(versions, 2) ||
+			iio_decimal_capability_set_contains(versions, 3) ||
+			iio_decimal_capability_set_contains(versions, 4);
+	return iio_decimal_capability_between(scalar, 2, 4);
+}
+
+static inline bool iio_buffer_metadata_status_capable(const char *scalar,
+	const char *versions)
+{
+	if (versions)
+		return iio_decimal_capability_set_contains(versions, 1) ||
+			iio_decimal_capability_set_contains(versions, 2);
+	return iio_decimal_capability_between(scalar, 1, 2);
+}
 
 /* https://pubs.opengroup.org/onlinepubs/009695399/basedefs/limits.h.html
  * {NAME_MAX} : Maximum number of bytes in a filename

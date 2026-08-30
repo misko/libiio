@@ -23,6 +23,31 @@ static const uint8_t failure_session_request[] = {
 	0x01, 0x00, 0x08, 0x01,
 };
 
+static const uint8_t before_failure_session_request[] = {
+	0x53, 0x50, 0x46, 0x54, /* SPFT */
+	0x01, 0x00, 0x08, 0x02,
+};
+
+static const uint8_t after_failure_session_request[] = {
+	0x53, 0x50, 0x46, 0x54, /* SPFT */
+	0x01, 0x00, 0x08, 0x03,
+};
+
+static const uint8_t legacy_overflow_session_request[] = {
+	0x53, 0x50, 0x46, 0x54, /* SPFT */
+	0x01, 0x00, 0x08, 0x04,
+};
+
+static const uint8_t legacy_timeout_session_request[] = {
+	0x53, 0x50, 0x46, 0x54, /* SPFT */
+	0x01, 0x00, 0x08, 0x05,
+};
+
+static const uint8_t v2_success_session_request[] = {
+	0x53, 0x50, 0x46, 0x54, /* SPFT */
+	0x01, 0x00, 0x08, 0x06,
+};
+
 #define TEST_BURST_REQUEST_BYTES 32U
 #define TEST_RING_REQUEST_BYTES 48U
 
@@ -44,7 +69,8 @@ static uint64_t get_le64(const uint8_t *source)
 
 struct test_context {
 	uint64_t sequence;
-	bool fail_after_first;
+	uint8_t failure_stage;
+	struct iiod_buffer_failure failure;
 	bool buffer_prepared;
 	bool buffer_opened;
 };
@@ -100,13 +126,31 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	}
 	if (base_bytes != sizeof(expected_session_request) ||
 		(memcmp(request, expected_session_request, base_bytes) &&
-		 memcmp(request, failure_session_request, base_bytes)))
+		 memcmp(request, failure_session_request, base_bytes) &&
+		 memcmp(request, before_failure_session_request, base_bytes) &&
+		 memcmp(request, after_failure_session_request, base_bytes) &&
+		 memcmp(request, legacy_overflow_session_request, base_bytes) &&
+		 memcmp(request, legacy_timeout_session_request, base_bytes) &&
+		 memcmp(request, v2_success_session_request, base_bytes)))
 		return -EINVAL;
 	context = calloc(1, sizeof(*context));
 	if (!context)
 		return -ENOMEM;
-	context->fail_after_first =
-		!memcmp(request, failure_session_request, base_bytes);
+	if (!memcmp(request, failure_session_request, base_bytes))
+		context->failure_stage = 1;
+	else if (!memcmp(request, before_failure_session_request, base_bytes))
+		context->failure_stage = 2;
+	else if (!memcmp(request, after_failure_session_request, base_bytes))
+		context->failure_stage = 3;
+	else if (!memcmp(request, legacy_overflow_session_request, base_bytes))
+		context->failure_stage = 4;
+	else if (!memcmp(request, legacy_timeout_session_request, base_bytes))
+		context->failure_stage = 5;
+	else if (!memcmp(request, v2_success_session_request, base_bytes))
+		context->failure_stage = 6;
+	if (burst_plan->ring_capacity_iq_bytes && context->failure_stage &&
+			(context->failure_stage <= 3 || context->failure_stage == 6))
+		burst_plan->ring_status_version = 2;
 	*provider_context = context;
 	*extra_samples = 0;
 	return 0;
@@ -136,14 +180,41 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context)
 
 int iiod_buffer_metadata_before_refill(void *provider_context)
 {
-	(void)provider_context;
+	struct test_context *context = provider_context;
+	if (context && context->failure_stage == 2) {
+		context->failure = (struct iiod_buffer_failure){
+			.kind = IIOD_BUFFER_FAILURE_GAIN_EVENT_OVERFLOW,
+			.valid_fields = IIOD_BUFFER_FAILURE_VALID_FRAME,
+			.frame_index = 0,
+		};
+		return -EOVERFLOW;
+	}
+	if (context && context->failure_stage == 4)
+		return -EOVERFLOW;
+	if (context && context->failure_stage == 5)
+		return -ETIMEDOUT;
 	return 0;
 }
 
 int iiod_buffer_metadata_after_refill(void *provider_context)
 {
-	(void)provider_context;
+	struct test_context *context = provider_context;
+	if (context && context->failure_stage == 3) {
+		context->failure = (struct iiod_buffer_failure){
+			.kind = IIOD_BUFFER_FAILURE_GAIN_EVENT_GAP,
+			.valid_fields = IIOD_BUFFER_FAILURE_VALID_FRAME,
+			.frame_index = 0,
+		};
+		return -EILSEQ;
+	}
 	return 0;
+}
+
+void iiod_buffer_metadata_ring_prefix_complete(void *provider_context,
+	bool complete)
+{
+	(void)provider_context;
+	(void)complete;
 }
 
 void iiod_buffer_metadata_close(void *provider_context)
@@ -164,8 +235,16 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		metadata_capacity < sizeof(record) ||
 		!iq_offset || !iq_bytes)
 		return -EINVAL;
-	if (context->fail_after_first && context->sequence == 1)
+	if (context->failure_stage == 1 && context->sequence == 1) {
+		context->failure = (struct iiod_buffer_failure){
+			.kind = IIOD_BUFFER_FAILURE_METADATA_PROTOCOL,
+			.valid_fields = IIOD_BUFFER_FAILURE_VALID_FRAME |
+				IIOD_BUFFER_FAILURE_VALID_SAMPLE,
+			.frame_index = 1,
+			.sample_sequence = 0,
+		};
 		return -EIO;
+	}
 	record.magic = UINT32_C(0x54454d49); /* IMET */
 	record.bytes = sizeof(record);
 	record.sequence = context->sequence++;
@@ -173,4 +252,14 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	*iq_offset = 0;
 	*iq_bytes = raw_bytes;
 	return sizeof(record);
+}
+
+int iiod_buffer_metadata_get_failure(void *provider_context,
+	struct iiod_buffer_failure *failure)
+{
+	struct test_context *context = provider_context;
+	if (!context || !failure)
+		return -EINVAL;
+	*failure = context->failure;
+	return 0;
 }

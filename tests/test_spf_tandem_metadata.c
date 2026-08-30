@@ -5,6 +5,7 @@
 #undef NDEBUG
 #endif
 #include <assert.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -197,6 +198,144 @@ static void test_v7_observations_keep_only_canonical_overlap(void)
 	assert(observations[1].sample_sequence_before == 140);
 }
 
+static void test_v7_transition_count_conversion_is_checked(void)
+{
+	uint32_t wire_count = 0;
+
+	assert(spf_tandem_transition_count_wire(UINT32_MAX, &wire_count) == 0);
+	assert(wire_count == UINT32_MAX);
+	assert(spf_tandem_transition_count_wire(
+		(uint64_t)UINT32_MAX + 1U, &wire_count) == -ERANGE);
+	assert(spf_tandem_transition_count_wire(0, NULL) == -EINVAL);
+}
+
+static void test_v7_provider_mapping_golden(void)
+{
+	uint8_t output[512];
+	const spf_gain_event_v7_t event = {
+		.sample_sequence = UINT64_C(0x100000000),
+		.event_sequence = 0,
+		.flags = UINT16_C(0x13),
+		.rx1_gain_index = 11,
+		.rx2_gain_index = 11,
+	};
+	const spf_radio_frame_v7_args_t base_args = {
+		.metadata_features = SPF_META_REQUIRED_FEATURES_V7,
+		.stream_id = UINT64_C(0x1020304050607080),
+		.buffer_sequence = UINT64_C(0x1122334455667788),
+		.first_sample_sequence = UINT64_C(0x100000000),
+		.samples_per_channel = 256,
+		.iq_payload_bytes = 1024,
+		.enabled_scan_mask = UINT32_C(0x03),
+		.gain_observation_interval_samples = 64,
+		.gain_observation_count = 0,
+		.gain_observation_capacity = 1,
+		.gain_events = &event,
+		.gain_event_capacity = 1,
+		.rx1_gain_db_start = 11,
+		.rx2_gain_db_start = 11,
+		.rx1_gain_db_end = 11,
+		.rx2_gain_db_end = 11,
+	};
+	const struct spf_tandem_frame_preview preview = {
+		.status = {
+			.state = ADI_TANDEM_AGC_STATE_ARMED_AUTO,
+			.ownership_epoch = UINT32_C(0x10203040),
+			.gain_table_id = ADI_TANDEM_AGC_GAIN_TABLE_1300_4000_MHZ,
+			.threshold_provenance = UINT32_C(0x55667788),
+			.minimum_gain_db = 0,
+			.maximum_gain_db = 62,
+			.initial_gain_db = 10,
+			.minimum_gain_index = 0,
+			.maximum_gain_index = 62,
+		},
+		.timeline = {
+			.gain_start = {.rx1_gain_index = 11, .rx2_gain_index = 11},
+			.gain_end = {.rx1_gain_index = 11, .rx2_gain_index = 11},
+			.transition_count_start = UINT32_C(0x11223344),
+			.transition_count_end = UINT32_C(0x11223345),
+			.rx1_first_change_sample = 0,
+			.rx2_first_change_sample = 0,
+			.frame_event_count = 1,
+			.consumed_event_count = 1,
+		},
+		.event_sequence_start = 0,
+		.event_count = 1,
+		.event_sequence_start_valid = true,
+	};
+	const size_t expected_bytes = SPF_RADIO_META_V7_PREFIX_BYTES +
+		SPF_GAIN_OBSERVATION_BYTES + SPF_GAIN_EVENT_BYTES +
+		sizeof(uint32_t);
+	spf_radio_meta_v3_prefix_t *prefix = (void *)output;
+	spf_radio_meta_v7_extension_t *extension =
+		(void *)(output + SPF_RADIO_META_V3_PREFIX_BYTES);
+	uint32_t stored_crc;
+	const uint32_t expected_flags = SPF_META_START_VALID |
+		SPF_META_END_VALID | SPF_META_SAMPLE_SEQUENCE_VALID |
+		SPF_META_FPGA_EVENTS_VALID | SPF_META_RX1_CHANGED_IN_BUFFER |
+		SPF_META_RX2_CHANGED_IN_BUFFER | SPF_META_GAIN_FULL_TABLE_MODE |
+		SPF_META_GAIN_READ_FAILED | SPF_META_RSSI_READ_FAILED |
+		SPF_META_GAIN_DB_VALUES |
+		SPF_META_HARDWARE_SAMPLE_COUNTER_VALID | SPF_META_TANDEM_VALID |
+		SPF_META_FPGA_GAIN_TIMELINE_VALID;
+
+	memset(output, 0xa5, sizeof(output));
+	assert(spf_radio_frame_v7_header_bytes(1, 1) == expected_bytes);
+	assert(spf_tandem_radio_frame_v7_build(output, sizeof(output),
+		&base_args, &preview, INT32_MIN) == 0);
+	assert(prefix->version == SPF_GAIN_META_VERSION_V7);
+	assert(prefix->header_bytes == expected_bytes);
+	assert(prefix->features == SPF_META_REQUIRED_FEATURES_V7);
+	assert(prefix->flags == expected_flags);
+	assert(prefix->gain_observation_count == 0);
+	assert(prefix->gain_observation_capacity == 1);
+	assert(prefix->gain_event_count == 1);
+	assert(prefix->gain_event_capacity == 1);
+	assert(prefix->rx1_rssi_start_qdb == SPF_RSSI_QDB_INVALID);
+	assert(prefix->rx2_rssi_start_qdb == SPF_RSSI_QDB_INVALID);
+	assert(prefix->rx1_rssi_end_qdb == SPF_RSSI_QDB_INVALID);
+	assert(prefix->rx2_rssi_end_qdb == SPF_RSSI_QDB_INVALID);
+	assert(prefix->rssi_start_read_duration_ns == 0);
+	assert(prefix->rssi_end_read_duration_ns == 0);
+	assert((uint8_t *)extension - output == SPF_RADIO_META_V3_PREFIX_BYTES);
+	assert(extension->ownership_epoch == UINT32_C(0x10203040));
+	assert(extension->tandem_state == ADI_TANDEM_AGC_STATE_ARMED_AUTO);
+	assert(extension->tandem_fault_flags == 0);
+	assert(extension->tandem_transition_count_end == UINT32_C(0x11223345));
+	assert(extension->gain_table_id ==
+		ADI_TANDEM_AGC_GAIN_TABLE_1300_4000_MHZ);
+	assert(extension->threshold_provenance == UINT32_C(0x55667788));
+	assert(extension->minimum_gain_db == 0);
+	assert(extension->maximum_gain_db == 62);
+	assert(extension->initial_gain_db == 10);
+	assert(extension->minimum_gain_index == 0);
+	assert(extension->maximum_gain_index == 62);
+	assert(extension->rx1_gain_index_end == 11);
+	assert(extension->rx2_gain_index_end == 11);
+	assert(extension->ad9361_temperature_mdeg_c == INT32_MIN);
+	assert(extension->tandem_transition_count_start == UINT32_C(0x11223344));
+	assert(extension->rx1_gain_index_start == 11);
+	assert(extension->rx2_gain_index_start == 11);
+	assert(extension->timeline_flags == SPF_FPGA_GAIN_TIMELINE_COMPLETE);
+	assert(extension->event_sequence_start == 0);
+	assert(!memcmp(output + SPF_RADIO_META_V7_PREFIX_BYTES +
+		SPF_GAIN_OBSERVATION_BYTES, &event, sizeof(event)));
+	memcpy(&stored_crc, output + expected_bytes - sizeof(stored_crc),
+		sizeof(stored_crc));
+	assert(stored_crc == UINT32_C(0x7ef10920));
+	memset(output + expected_bytes - sizeof(stored_crc), 0,
+		sizeof(stored_crc));
+	assert(stored_crc == spf_gain_meta_crc32(output, expected_bytes));
+
+	struct spf_tandem_frame_preview overflow = preview;
+	overflow.timeline.transition_count_end = (uint64_t)UINT32_MAX + 1U;
+	memset(output, 0xa5, sizeof(output));
+	assert(spf_tandem_radio_frame_v7_build(output, sizeof(output),
+		&base_args, &overflow, INT32_MIN) == -ERANGE);
+	for (size_t index = 0; index < sizeof(output); ++index)
+		assert(output[index] == 0xa5);
+}
+
 static void test_v6_single_rx_and_exact_gap(void)
 {
 	uint8_t output[512];
@@ -277,6 +416,8 @@ int main(void)
 	test_invalid_temperature_is_serialized_without_header_growth();
 	test_auto_observations_drop_torn_pair();
 	test_v7_observations_keep_only_canonical_overlap();
+	test_v7_transition_count_conversion_is_checked();
+	test_v7_provider_mapping_golden();
 	test_v6_single_rx_and_exact_gap();
 	puts("SPF tandem metadata tests passed");
 	return 0;

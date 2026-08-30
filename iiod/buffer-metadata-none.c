@@ -76,3 +76,13 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	(void)iq_bytes;
 	return -ENOSYS;
 }
+
+int iiod_buffer_metadata_get_failure(void *provider_context,
+	struct iiod_buffer_failure *failure)
+{
+	(void)provider_context;
+	if (!failure)
+		return -EINVAL;
+	*failure = (struct iiod_buffer_failure){0};
+	return 0;
+}

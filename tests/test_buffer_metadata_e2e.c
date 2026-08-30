@@ -31,6 +31,31 @@ static const uint8_t failure_session_request[] = {
 	0x01, 0x00, 0x08, 0x01,
 };
 
+static const uint8_t before_failure_session_request[] = {
+	0x53, 0x50, 0x46, 0x54,
+	0x01, 0x00, 0x08, 0x02,
+};
+
+static const uint8_t after_failure_session_request[] = {
+	0x53, 0x50, 0x46, 0x54,
+	0x01, 0x00, 0x08, 0x03,
+};
+
+static const uint8_t legacy_overflow_session_request[] = {
+	0x53, 0x50, 0x46, 0x54,
+	0x01, 0x00, 0x08, 0x04,
+};
+
+static const uint8_t legacy_timeout_session_request[] = {
+	0x53, 0x50, 0x46, 0x54,
+	0x01, 0x00, 0x08, 0x05,
+};
+
+static const uint8_t v2_success_session_request[] = {
+	0x53, 0x50, 0x46, 0x54,
+	0x01, 0x00, 0x08, 0x06,
+};
+
 #define TEST_BURST_REQUEST_BYTES 32U
 #define TEST_RING_REQUEST_BYTES 48U
 
@@ -112,8 +137,10 @@ int main(int argc, char **argv)
 		assert(!capability || (strcmp(capability, "2") &&
 			strcmp(capability, "3") && strcmp(capability, "4")));
 	else
-		assert(capability && !strcmp(capability, "4"));
+		assert(capability && !strcmp(capability, "3"));
 	if (!stock_server) {
+		assert(!strcmp(iio_context_get_attr_value(ctx,
+			"iio,buffer-metadata-abi-versions"), "1,2,3,4"));
 		const char *layouts = iio_context_get_attr_value(ctx,
 			"iio,buffer-metadata-layouts");
 		assert(layouts && !strcmp(layouts,
@@ -133,6 +160,8 @@ int main(int argc, char **argv)
 			"iio,buffer-ddr-ring-max-iq-bytes"), "200000000"));
 		assert(!strcmp(iio_context_get_attr_value(ctx,
 			"iio,buffer-metadata-status"), "1"));
+		assert(!strcmp(iio_context_get_attr_value(ctx,
+			"iio,buffer-metadata-status-versions"), "1,2"));
 		assert(!strcmp(iio_context_get_attr_value(ctx,
 			"iio,buffer-metadata-timing-log"), "1"));
 	}
@@ -302,10 +331,91 @@ int main(int argc, char **argv)
 	assert(metadata_bytes == 0);
 	assert(iio_buffer_get_metadata_status(buffer, ring_status,
 		sizeof(ring_status)) == (ssize_t)sizeof(ring_status));
+	assert(get_le16(ring_status + 4) == 2);
 	assert(get_le32(ring_status + 8) == 5);
+	assert(get_le32(ring_status + 12) == 11);
+	assert((get_le32(ring_status + 16) & UINT32_C(0x0c)) ==
+		UINT32_C(0x0c));
 	assert((int32_t)get_le32(ring_status + 20) == -EIO);
 	assert(get_le64(ring_status + 48) == 1);
 	assert(get_le64(ring_status + 56) == 1);
+	assert(get_le64(ring_status + 112) == 1);
+	assert(get_le64(ring_status + 120) == 0);
+	iio_buffer_destroy(buffer);
+
+	/* Typed provider failures preserve their source domain even when they
+	 * occur before DMA or after a successful refill. Frame index zero is a
+	 * valid earliest-failure coordinate, not an unavailable sentinel. */
+	const uint8_t *typed_failure_requests[] = {
+		before_failure_session_request,
+		after_failure_session_request,
+	};
+	const int typed_failure_errors[] = {-EOVERFLOW, -EILSEQ};
+	const uint32_t typed_failure_reasons[] = {10, 9};
+	for (size_t index = 0; index < 2; ++index) {
+		build_ring_request(ring_request, typed_failure_requests[index],
+			sizeof(before_failure_session_request),
+			UINT64_C(2) * 1024U * 8U, 3);
+		buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+			ring_request, sizeof(ring_request));
+		assert(buffer);
+		metadata_bytes = 123;
+		assert(iio_buffer_refill_with_metadata(buffer, metadata,
+			sizeof(metadata), &metadata_bytes) ==
+			typed_failure_errors[index]);
+		assert(metadata_bytes == 0);
+		assert(iio_buffer_get_metadata_status(buffer, ring_status,
+			sizeof(ring_status)) == (ssize_t)sizeof(ring_status));
+		assert(get_le16(ring_status + 4) == 2);
+		assert(get_le32(ring_status + 8) == 5);
+		assert(get_le32(ring_status + 12) ==
+			typed_failure_reasons[index]);
+		assert((get_le32(ring_status + 16) & UINT32_C(0x04)) != 0);
+		assert(get_le64(ring_status + 112) == 0);
+		iio_buffer_destroy(buffer);
+	}
+	const uint8_t *legacy_failure_requests[] = {
+		legacy_overflow_session_request,
+		legacy_timeout_session_request,
+	};
+	const int legacy_failure_errors[] = {-EOVERFLOW, -ETIMEDOUT};
+	const uint32_t legacy_failure_reasons[] = {6, 4};
+	for (size_t index = 0; index < 2; ++index) {
+		build_ring_request(ring_request, legacy_failure_requests[index],
+			sizeof(legacy_overflow_session_request),
+			UINT64_C(2) * 1024U * 8U, 3);
+		buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+			ring_request, sizeof(ring_request));
+		assert(buffer);
+		metadata_bytes = 123;
+		assert(iio_buffer_refill_with_metadata(buffer, metadata,
+			sizeof(metadata), &metadata_bytes) ==
+			legacy_failure_errors[index]);
+		assert(iio_buffer_get_metadata_status(buffer, ring_status,
+			sizeof(ring_status)) == (ssize_t)sizeof(ring_status));
+		assert(get_le16(ring_status + 4) == 1);
+		assert(get_le32(ring_status + 12) ==
+			legacy_failure_reasons[index]);
+		assert(get_le64(ring_status + 112) == 0 &&
+			get_le64(ring_status + 120) == 0);
+		iio_buffer_destroy(buffer);
+	}
+
+	/* A later successful v2 capture must not inherit failure locators. */
+	build_ring_request(ring_request, v2_success_session_request,
+		sizeof(v2_success_session_request), UINT64_C(2) * 1024U * 8U, 1);
+	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+		ring_request, sizeof(ring_request));
+	assert(buffer);
+	metadata_bytes = 0;
+	assert(iio_buffer_refill_with_metadata(buffer, metadata,
+		sizeof(metadata), &metadata_bytes) == 1024 * 8);
+	assert(iio_buffer_get_metadata_status(buffer, ring_status,
+		sizeof(ring_status)) == (ssize_t)sizeof(ring_status));
+	assert(get_le16(ring_status + 4) == 2);
+	assert((get_le32(ring_status + 16) & UINT32_C(0x0c)) == 0);
+	assert(get_le64(ring_status + 112) == 0 &&
+		get_le64(ring_status + 120) == 0);
 	iio_buffer_destroy(buffer);
 
 	/* Continuous mode remains bounded by the same two-slot ring and CLOSE is

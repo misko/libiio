@@ -66,6 +66,12 @@ uint16_t spf_tandem_compact_coherent_observations(
 uint16_t spf_tandem_compact_v7_observations(
 	spf_gain_observation_v3_t *observations, uint16_t count,
 	uint64_t frame_start, uint32_t samples_per_channel);
+int spf_tandem_transition_count_wire(uint64_t transition_count,
+	uint32_t *wire_count);
+int spf_tandem_radio_frame_v7_build(void *destination,
+	size_t destination_bytes, const spf_radio_frame_v7_args_t *base_args,
+	const struct spf_tandem_frame_preview *preview,
+	int32_t ad9361_temperature_mdeg_c);
 bool spf_radio_frame_v5_build(void *destination, size_t destination_bytes,
 	const spf_radio_frame_v5_args_t *args);
 bool spf_radio_frame_v6_build(void *destination, size_t destination_bytes,

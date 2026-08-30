@@ -47,6 +47,14 @@ int main(void)
 		status.first_unavailable_sample_sequence);
 	assert(decoded.failure_frame_index == 0);
 	assert(decoded.failure_sample_sequence == 0);
+	wire[12] = SPF_DDR_RING_REASON_GAIN_EVENT_GAP;
+	assert(spf_ddr_ring_status_decode(&decoded, wire, sizeof(wire)) ==
+		-EINVAL);
+	assert(spf_ddr_ring_status_encode(wire, sizeof(wire), &status) == 0);
+	wire[112] = 1;
+	assert(spf_ddr_ring_status_decode(&decoded, wire, sizeof(wire)) ==
+		-EINVAL);
+	assert(spf_ddr_ring_status_encode(wire, sizeof(wire), &status) == 0);
 	assert(spf_ddr_ring_status_encode(NULL, sizeof(wire), &status) == -EINVAL);
 	assert(spf_ddr_ring_status_decode(NULL, wire, sizeof(wire)) == -EINVAL);
 	assert(spf_ddr_ring_status_decode(&decoded, wire, sizeof(wire) - 1U) ==
@@ -101,6 +109,13 @@ int main(void)
 			.valid_fields = SPF_DDR_RING_STATUS_VALID_FAILURE_FRAME,
 			.error_code = -EOVERFLOW,
 		}) == -EINVAL);
+	assert(spf_ddr_ring_status_encode(wire, sizeof(wire),
+		&(struct spf_ddr_ring_status){
+			.version = SPF_DDR_RING_STATUS_VERSION_V1,
+			.state = SPF_DDR_RING_STATE_FAILED,
+			.terminal_reason = SPF_DDR_RING_REASON_GAIN_EVENT_GAP,
+			.error_code = -EILSEQ,
+		}) == -EINVAL);
 	assert(spf_ddr_ring_exclusive_boundary(1000, 1000000,
 		&exclusive_boundary) == 0);
 	assert(exclusive_boundary == UINT64_C(1001000));
@@ -112,5 +127,15 @@ int main(void)
 	assert(spf_ddr_ring_exclusive_boundary(0, 0, &exclusive_boundary) ==
 		-EINVAL);
 	assert(spf_ddr_ring_exclusive_boundary(0, 1, NULL) == -EINVAL);
+	assert(spf_ddr_ring_legacy_provider_failure_reason(-EOVERFLOW) ==
+		SPF_DDR_RING_REASON_COUNTER_GAP);
+	assert(spf_ddr_ring_legacy_provider_failure_reason(-ETIMEDOUT) ==
+		SPF_DDR_RING_REASON_CONSUMER_STALL);
+	assert(spf_ddr_ring_legacy_provider_failure_reason(-ECANCELED) ==
+		SPF_DDR_RING_REASON_CLIENT_DISCONNECTED);
+	assert(spf_ddr_ring_legacy_provider_failure_reason(-EPIPE) ==
+		SPF_DDR_RING_REASON_CLIENT_DISCONNECTED);
+	assert(spf_ddr_ring_legacy_provider_failure_reason(-EIO) ==
+		SPF_DDR_RING_REASON_DMA_ERROR);
 	return 0;
 }

@@ -654,7 +654,13 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 	}
 
 #ifdef IIOD_HAS_BUFFER_METADATA
-	ret = iio_context_add_attr(ctx, "iio,buffer-metadata", "4");
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata", "3");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-abi-versions",
+		"1,2,3,4");
 	if (ret < 0) {
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
@@ -711,6 +717,12 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		return EXIT_FAILURE;
 	}
 	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-status", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-status-versions",
+		"1,2");
 	if (ret < 0) {
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;

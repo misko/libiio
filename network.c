@@ -418,11 +418,12 @@ static int network_open_with_metadata(const struct iio_device *dev,
 	int ret = -EBUSY;
 	const char *capability = iio_context_get_attr_value(dev->ctx,
 			"iio,buffer-metadata");
+	const char *versions = iio_context_get_attr_value(dev->ctx,
+			"iio,buffer-metadata-abi-versions");
 
 	if (cyclic)
 		return -EINVAL;
-	if (!capability || (strcmp(capability, "2") &&
-		strcmp(capability, "3")))
+	if (!iio_buffer_metadata_open_capable(capability, versions))
 		return -ENOSYS;
 	iio_mutex_lock(ppdata->lock);
 	if (ppdata->io_ctx.fd >= 0)
@@ -567,8 +568,10 @@ static ssize_t network_get_buffer_metadata_status(const struct iio_device *dev,
 	ssize_t ret;
 	const char *capability = iio_context_get_attr_value(dev->ctx,
 		"iio,buffer-metadata-status");
+	const char *versions = iio_context_get_attr_value(dev->ctx,
+		"iio,buffer-metadata-status-versions");
 
-	if (!capability || strcmp(capability, "1"))
+	if (!iio_buffer_metadata_status_capable(capability, versions))
 		return -ENOSYS;
 
 	iio_mutex_lock(pdata->lock);
