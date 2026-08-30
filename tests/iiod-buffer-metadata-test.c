@@ -45,6 +45,8 @@ static uint64_t get_le64(const uint8_t *source)
 struct test_context {
 	uint64_t sequence;
 	bool fail_after_first;
+	bool buffer_prepared;
+	bool buffer_opened;
 };
 
 int iiod_buffer_metadata_open(const struct iio_device *dev,
@@ -110,11 +112,26 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	return 0;
 }
 
-int iiod_buffer_metadata_buffer_opened(void *provider_context,
+int iiod_buffer_metadata_buffer_opening(void *provider_context,
 		unsigned int kernel_buffers_count)
 {
-	(void)provider_context;
-	return kernel_buffers_count ? 0 : -EINVAL;
+	struct test_context *context = provider_context;
+
+	if (!context || !kernel_buffers_count || context->buffer_prepared ||
+		context->buffer_opened)
+		return -EINVAL;
+	context->buffer_prepared = true;
+	return 0;
+}
+
+int iiod_buffer_metadata_buffer_opened(void *provider_context)
+{
+	struct test_context *context = provider_context;
+
+	if (!context || !context->buffer_prepared || context->buffer_opened)
+		return -EINVAL;
+	context->buffer_opened = true;
+	return 0;
 }
 
 int iiod_buffer_metadata_before_refill(void *provider_context)
@@ -143,7 +160,8 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	struct test_metadata record;
 	(void)dev;
 	(void)buffer;
-	if (!context || !metadata || metadata_capacity < sizeof(record) ||
+	if (!context || !context->buffer_opened || !metadata ||
+		metadata_capacity < sizeof(record) ||
 		!iq_offset || !iq_bytes)
 		return -EINVAL;
 	if (context->fail_after_first && context->sequence == 1)

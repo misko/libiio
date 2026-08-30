@@ -56,6 +56,7 @@ struct spf_iiod_metadata_context {
 	bool ring_prefix_complete;
 	bool sampler_continuous;
 	bool metadata_v4;
+	bool buffer_prepared;
 };
 
 static bool buffered_capture_is_strict(
@@ -267,7 +268,7 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	return 0;
 }
 
-int iiod_buffer_metadata_buffer_opened(void *provider_context,
+int iiod_buffer_metadata_buffer_opening(void *provider_context,
 		unsigned int kernel_buffers_count)
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
@@ -288,6 +289,7 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 	ret = spf_tandem_session_acquire(&ctx->tandem);
 	if (ret)
 		return ret;
+	ctx->buffer_prepared = true;
 	ctx->refills_started = 0;
 	if (ctx->sampler_continuous) {
 		/* A buffered producer can stall after every kernel block has been
@@ -302,6 +304,13 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 			ctx->sampler_coverage_window_samples);
 	}
 	return 0;
+}
+
+int iiod_buffer_metadata_buffer_opened(void *provider_context)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+
+	return ctx && ctx->buffer_prepared && ctx->tandem.acquired ? 0 : -EINVAL;
 }
 
 int iiod_buffer_metadata_before_refill(void *provider_context)

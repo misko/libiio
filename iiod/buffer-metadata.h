@@ -32,8 +32,11 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		const void *request, size_t request_bytes,
 		void **provider_context, size_t *extra_samples,
 		struct iiod_buffer_burst_plan *burst_plan);
-int iiod_buffer_metadata_buffer_opened(void *provider_context,
+/* Called after optional host storage admission but before DMA is armed. */
+int iiod_buffer_metadata_buffer_opening(void *provider_context,
 		unsigned int kernel_buffers_count);
+/* Called only after the IIO DMA buffer was created successfully. */
+int iiod_buffer_metadata_buffer_opened(void *provider_context);
 int iiod_buffer_metadata_before_refill(void *provider_context);
 int iiod_buffer_metadata_after_refill(void *provider_context);
 /* A finite DDR ring calls this with true only after its strict admitted prefix

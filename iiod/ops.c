@@ -1811,21 +1811,36 @@ static void rw_thd(struct thread_pool *pool, void *d)
 					break;
 			}
 
+			if (entry->metadata_enabled) {
+				ret = iiod_buffer_metadata_buffer_opening(
+					entry->metadata_provider_context,
+					iio_device_get_kernel_buffers_count(dev));
+				if (ret < 0)
+					break;
+			}
+
 			entry->buf = iio_device_create_buffer(dev,
 					samples_count + entry->metadata_extra_samples,
 					entry->cyclic);
 			if (!entry->buf) {
 				ret = -errno;
 				IIO_ERROR("Unable to create buffer\n");
+				if (entry->metadata_provider_context) {
+					iiod_buffer_metadata_close(
+						entry->metadata_provider_context);
+					entry->metadata_provider_context = NULL;
+				}
 				break;
 			}
 			if (entry->metadata_enabled) {
 				ret = iiod_buffer_metadata_buffer_opened(
-					entry->metadata_provider_context,
-					iio_device_get_kernel_buffers_count(dev));
+					entry->metadata_provider_context);
 				if (ret < 0) {
 					iio_buffer_destroy(entry->buf);
 					entry->buf = NULL;
+					iiod_buffer_metadata_close(
+						entry->metadata_provider_context);
+					entry->metadata_provider_context = NULL;
 					break;
 				}
 			}

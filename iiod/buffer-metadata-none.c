@@ -23,11 +23,17 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	return -ENOSYS;
 }
 
-int iiod_buffer_metadata_buffer_opened(void *provider_context,
+int iiod_buffer_metadata_buffer_opening(void *provider_context,
 		unsigned int kernel_buffers_count)
 {
 	(void)provider_context;
 	(void)kernel_buffers_count;
+	return -ENOSYS;
+}
+
+int iiod_buffer_metadata_buffer_opened(void *provider_context)
+{
+	(void)provider_context;
 	return -ENOSYS;
 }
 
