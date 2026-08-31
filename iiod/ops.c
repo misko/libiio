@@ -130,6 +130,7 @@ struct iiod_direct_async {
 	size_t metadata_capacity;
 	size_t capacity;
 	size_t dma_capacity;
+	size_t dma_headroom;
 	size_t dma_count;
 	size_t head;
 	size_t tail;
@@ -690,10 +691,13 @@ static int direct_async_prepare(struct iiod_direct_async *direct,
 		useful_ram = ram_capacity;
 	if (!size_add(dma_capacity, useful_ram, &capacity))
 		return -EOVERFLOW;
-	/* A combined queue keeps one kernel block out of the userspace lease
-	 * count so DMA can continue while an older lease is copied to RAM. */
-	if (useful_ram)
-		capacity--;
+	/* Keep two blocks in the kernel when possible.  A 4 MiB RAM copy can
+	 * exceed one full-rate frame period on Zynq, while two periods cover the
+	 * measured worst case.  Three-buffer configurations retain one block so
+	 * there is still a head lease and a spillable lease. */
+	direct->dma_headroom = useful_ram ?
+		(dma_capacity > 3U ? 2U : 1U) : 0U;
+	capacity -= direct->dma_headroom;
 	if (!size_mul(capacity, metadata_capacity, &metadata_bytes))
 		return -EOVERFLOW;
 	direct->frames = calloc(capacity, sizeof(*direct->frames));
@@ -952,12 +956,11 @@ static int direct_async_spill_newest_dma(struct DevEntry *entry)
 	size_t queue_slot, ring_slot, offset;
 	int ret;
 
-	/* Keep one DMA block available to the kernel while the copy is in
-	 * progress.  Waiting until every block is leased creates an unavoidable
-	 * capture hole: the block released after the copy cannot be rearmed until
-	 * the DMA engine has already run out of destinations. */
-	if (!ring->direct_extension ||
-			direct->dma_count + 1U < direct->dma_capacity)
+	/* Preserve the prepared DMA headroom while the RAM copy is in progress.
+	 * Waiting until every block is leased creates an unavoidable capture hole:
+	 * the released block cannot be rearmed until DMA has no destination. */
+	if (!ring->direct_extension || !direct->dma_headroom ||
+			direct->dma_count + direct->dma_headroom < direct->dma_capacity)
 		return 0;
 	/* Never spill the head: the network worker may already be using it. */
 	for (offset = 1; offset <= direct->count; offset++) {
