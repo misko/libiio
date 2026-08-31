@@ -691,12 +691,12 @@ static int direct_async_prepare(struct iiod_direct_async *direct,
 		useful_ram = ram_capacity;
 	if (!size_add(dma_capacity, useful_ram, &capacity))
 		return -EOVERFLOW;
-	/* Keep two blocks in the kernel when possible.  A 4 MiB RAM copy can
-	 * exceed one full-rate frame period on Zynq, while two periods cover the
-	 * measured worst case.  Three-buffer configurations retain one block so
-	 * there is still a head lease and a spillable lease. */
+	/* Keep three blocks in the kernel when possible.  A 4 MiB RAM copy can
+	 * exceed one full-rate frame period on Zynq, and consecutive spills can
+	 * accumulate beyond two periods.  Small configurations scale the margin
+	 * down while retaining a head lease and one spillable lease. */
 	direct->dma_headroom = useful_ram ?
-		(dma_capacity > 3U ? 2U : 1U) : 0U;
+		(dma_capacity > 4U ? 3U : dma_capacity - 2U) : 0U;
 	capacity -= direct->dma_headroom;
 	if (!size_mul(capacity, metadata_capacity, &metadata_bytes))
 		return -EOVERFLOW;
