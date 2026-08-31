@@ -677,7 +677,9 @@ static int direct_async_prepare(struct iiod_direct_async *direct,
 {
 	size_t capacity, metadata_bytes, useful_ram;
 
-	if (!direct || dma_capacity < 2U || !metadata_capacity || !target_frames ||
+	if (!direct || dma_capacity < 2U ||
+		(ram_capacity && dma_capacity < 3U) ||
+		!metadata_capacity || !target_frames ||
 		metadata_capacity > IIOD_MAX_BUFFER_METADATA_BYTES)
 		return -EINVAL;
 	if (direct->requested)
@@ -688,6 +690,10 @@ static int direct_async_prepare(struct iiod_direct_async *direct,
 		useful_ram = ram_capacity;
 	if (!size_add(dma_capacity, useful_ram, &capacity))
 		return -EOVERFLOW;
+	/* A combined queue keeps one kernel block out of the userspace lease
+	 * count so DMA can continue while an older lease is copied to RAM. */
+	if (useful_ram)
+		capacity--;
 	if (!size_mul(capacity, metadata_capacity, &metadata_bytes))
 		return -EOVERFLOW;
 	direct->frames = calloc(capacity, sizeof(*direct->frames));
@@ -946,7 +952,12 @@ static int direct_async_spill_newest_dma(struct DevEntry *entry)
 	size_t queue_slot, ring_slot, offset;
 	int ret;
 
-	if (!ring->direct_extension || direct->dma_count < direct->dma_capacity)
+	/* Keep one DMA block available to the kernel while the copy is in
+	 * progress.  Waiting until every block is leased creates an unavoidable
+	 * capture hole: the block released after the copy cannot be rearmed until
+	 * the DMA engine has already run out of destinations. */
+	if (!ring->direct_extension ||
+			direct->dma_count + 1U < direct->dma_capacity)
 		return 0;
 	/* Never spill the head: the network worker may already be using it. */
 	for (offset = 1; offset <= direct->count; offset++) {
@@ -961,7 +972,7 @@ static int direct_async_spill_newest_dma(struct DevEntry *entry)
 		}
 	}
 	if (!frame)
-		return -EIO;
+		return direct->dma_count < direct->dma_capacity ? 0 : -EIO;
 	ret = iiod_ddr_ring_core_producer_reserve(&ring->core, &ring_slot);
 	if (ret)
 		return ret;
