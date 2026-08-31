@@ -45,8 +45,6 @@ int spf_buffer_layout_resolve(size_t samples_count, const uint32_t *mask,
 	layout->samples_per_channel = (uint32_t)samples_count;
 	layout->iq_bytes_per_sample = expected_scan_bytes;
 	layout->timestamp_words = (uint32_t)(iq_bytes / 8U);
-	/* Metadata capture owns timestamp insertion for the buffer lifetime. */
-	layout->timestamp_control = (layout->timestamp_words << 1) | UINT32_C(1);
 	layout->iq_bytes = iq_bytes;
 	layout->raw_bytes = iq_bytes + 8U;
 	return 0;
