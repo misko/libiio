@@ -1498,6 +1498,7 @@ class MetadataBuffer(Buffer):
             raise OSError("IIO server returned an invalid DDR ring state")
         counters = values[7:-2]
         return {
+            "version": values[1],
             "state": state_names[state],
             "terminal_reason": reason_names[reason],
             "error_code": error_code,

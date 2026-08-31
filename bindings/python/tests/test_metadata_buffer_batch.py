@@ -387,6 +387,7 @@ def test_device_ddr_ring_status_decodes_atomic_snapshot(monkeypatch):
         ddr_ring_frames=17
     )
     status = buffer.ddr_ring_status()
+    assert status["version"] == 1
     assert status["state"] == "draining"
     assert status["produced_frames"] == 9
     assert status["consumed_frames"] == 7
