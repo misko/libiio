@@ -138,11 +138,8 @@ struct iiod_stage_timing {
 	uint64_t first_ns;
 	uint64_t last_ns;
 	uint64_t transported_iq_bytes;
-	uint64_t next_snapshot_frame;
 	struct iiod_timing_accumulator stages[IIOD_TIMING_STAGE_COUNT];
 };
-
-#define IIOD_TIMING_SNAPSHOT_FRAMES UINT64_C(100)
 
 static pthread_mutex_t burst_reservation_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool burst_reserved;
@@ -709,7 +706,7 @@ static void iiod_timing_record(struct DevEntry *entry,
 	pthread_mutex_unlock(&entry->timing.lock);
 }
 
-static void iiod_timing_log(struct DevEntry *entry, bool snapshot)
+static void iiod_timing_log_final(struct DevEntry *entry)
 {
 	const char *device = dev_label_or_name_or_id(entry->dev);
 	uint64_t transported_frames = 0;
@@ -736,7 +733,7 @@ static void iiod_timing_log(struct DevEntry *entry, bool snapshot)
 			" transported_frames=%" PRIu64 " wall_ns=%" PRIu64
 			" stage=%s count=%" PRIu64
 			" total_ns=%" PRIu64 " max_ns=%" PRIu64 "\n",
-			snapshot, device ? device : "unknown", entry->metadata_enabled,
+			0U, device ? device : "unknown", entry->metadata_enabled,
 			entry->burst_plan.requested_iq_bytes != 0,
 			entry->burst_plan.ring_capacity_iq_bytes != 0,
 			(size_t)frame_iq_bytes, entry->timing.transported_iq_bytes,
@@ -751,39 +748,18 @@ static void iiod_timing_log(struct DevEntry *entry, bool snapshot)
 static void iiod_timing_transport_complete(struct DevEntry *entry,
 	ssize_t iq_bytes)
 {
-	uint64_t transported_frames = 0;
-	uint64_t frame_iq_bytes;
-	bool due = false;
-
+	/* Keep diagnostics out of the transport hot path.  A synchronous stderr
+	 * snapshot can stall long enough to exhaust the kernel DMA queue; the
+	 * teardown summary retains the same accumulated counters and maxima. */
 	if (iq_bytes <= 0)
 		return;
 	pthread_mutex_lock(&entry->timing.lock);
-	frame_iq_bytes = (uint64_t)entry->sample_size * entry->samples_count;
 	if (UINT64_MAX - entry->timing.transported_iq_bytes <
 			(uint64_t)iq_bytes)
 		entry->timing.transported_iq_bytes = UINT64_MAX;
 	else
 		entry->timing.transported_iq_bytes += (uint64_t)iq_bytes;
-	if (frame_iq_bytes)
-		transported_frames = entry->timing.transported_iq_bytes /
-			frame_iq_bytes;
-	if (entry->timing.next_snapshot_frame &&
-			transported_frames >= entry->timing.next_snapshot_frame) {
-		do {
-			if (UINT64_MAX - entry->timing.next_snapshot_frame <
-					IIOD_TIMING_SNAPSHOT_FRAMES) {
-				entry->timing.next_snapshot_frame = 0;
-				break;
-			}
-			entry->timing.next_snapshot_frame +=
-				IIOD_TIMING_SNAPSHOT_FRAMES;
-		} while (entry->timing.next_snapshot_frame &&
-			transported_frames >= entry->timing.next_snapshot_frame);
-		due = true;
-	}
 	pthread_mutex_unlock(&entry->timing.lock);
-	if (due)
-		iiod_timing_log(entry, true);
 }
 
 static int iiod_timed_metadata_before_refill(struct DevEntry *entry)
@@ -1523,7 +1499,7 @@ static void dev_entry_put(struct DevEntry *entry)
 	pthread_mutex_unlock(&entry->thdlist_lock);
 
 	if (free_entry) {
-		iiod_timing_log(entry, false);
+		iiod_timing_log_final(entry);
 		pthread_mutex_destroy(&entry->thdlist_lock);
 		pthread_cond_destroy(&entry->rw_ready_cond);
 		pthread_mutex_destroy(&entry->ring_lock);
@@ -2608,7 +2584,6 @@ retry:
 	pthread_mutex_init(&entry->ring_lock, NULL);
 	pthread_cond_init(&entry->ring_ready_cond, NULL);
 	pthread_mutex_init(&entry->timing.lock, NULL);
-	entry->timing.next_snapshot_frame = IIOD_TIMING_SNAPSHOT_FRAMES;
 
 	if (rw_cpu_affinity >= 0)
 		ret = thread_pool_add_thread_on_cpu(main_thread_pool, rw_thd, entry,
