@@ -624,12 +624,6 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 				first_sample_sequence);
 			return ret;
 		}
-		if (spf_buffer_sequence_require_contiguous(&sequence)) {
-			metadata_failure_set(ctx,
-				IIOD_BUFFER_FAILURE_DMA_COUNTER_GAP, true,
-				ctx->sequence.previous_frame_end);
-			return -EOVERFLOW;
-		}
 		ret = gain_db_for_index(ctx,
 			preview.timeline.gain_start.rx1_gain_index,
 			&rx1_gain_db_start);

@@ -67,22 +67,22 @@ int main(void)
 		&sequence) == 0);
 	assert(sequence.buffer_sequence == 2 &&
 		sequence.missing_samples_before == 1);
-	assert(spf_buffer_sequence_require_contiguous(&sequence) == -EOVERFLOW);
 	spf_buffer_sequence_commit(&state, &sequence);
 	assert(spf_buffer_sequence_resolve(&state, UINT64_C(1501), 100,
 		&sequence) == 0);
 	assert(sequence.buffer_sequence == 5 &&
 		sequence.missing_samples_before == 200);
-	assert(spf_buffer_sequence_require_contiguous(&sequence) == -EOVERFLOW);
-	sequence.missing_samples_before = 0;
-	assert(spf_buffer_sequence_require_contiguous(&sequence) == 0);
-	assert(spf_buffer_sequence_require_contiguous(NULL) == -EINVAL);
+	spf_buffer_sequence_commit(&state, &sequence);
+	assert(spf_buffer_sequence_resolve(&state, UINT64_C(1601), 100,
+		&sequence) == 0);
+	assert(sequence.buffer_sequence == 6 &&
+		sequence.missing_samples_before == 0);
 	assert(spf_buffer_sequence_resolve(&state, UINT64_C(1200), 100,
 		&sequence) == -ERANGE);
 	assert(spf_buffer_sequence_resolve(&state, UINT64_MAX - 99U, 100,
 		&sequence) == -EINVAL);
 	state.previous_buffer_sequence = UINT64_MAX;
-	assert(spf_buffer_sequence_resolve(&state, UINT64_C(1301), 100,
+	assert(spf_buffer_sequence_resolve(&state, UINT64_C(1701), 100,
 		&sequence) == -EOVERFLOW);
 	return 0;
 }

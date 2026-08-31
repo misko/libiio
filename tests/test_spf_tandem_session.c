@@ -485,6 +485,54 @@ static void test_fixed_watermark_wrap_and_retry_exhaustion(void)
 	spf_tandem_session_close(&session);
 }
 
+static void test_authoritative_timeline_accounts_for_skipped_iq_interval(void)
+{
+	uint8_t wire[104];
+	struct mock_device mock = {.epoch = 30};
+	struct spf_tandem_syscalls calls = mock_syscalls(&mock);
+	struct spf_tandem_session session;
+	struct spf_tandem_frame_preview preview;
+	spf_gain_event_v7_t output[4];
+
+	authoritative_request(wire);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_enable_authoritative_timeline(&session) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	assert(spf_tandem_session_start_auto(&session) == 0);
+	mock.events[0] = (struct adi_tandem_agc_event){105, 0, 0x13, 20, 20};
+	mock.events[1] = (struct adi_tandem_agc_event){205, 1, 0x13, 21, 21};
+	mock.events[2] = (struct adi_tandem_agc_event){250, 2, 0x13, 22, 22};
+	mock.events[3] = (struct adi_tandem_agc_event){310, 3, 0x13, 23, 23};
+	mock.event_count = 4;
+	mock.transitions = 4;
+
+	assert(spf_tandem_session_snapshot_frame_watermark(&session,
+		100, 100) == 0);
+	assert(spf_tandem_session_preview(&session, 100, 100,
+		output, 4, &preview) == 0);
+	assert(preview.event_count == 1 && output[0].event_sequence == 0);
+	assert(preview.timeline.transition_count_start == 0);
+	assert(preview.timeline.transition_count_end == 1);
+	assert(spf_tandem_session_commit(&session, &preview) == 0);
+
+	/* The next returned IQ frame begins at 300. Events in [200, 300) are
+	 * consumed into its authoritative start state and both independent
+	 * ledgers advance by exactly two, without serializing phantom IQ. */
+	assert(spf_tandem_session_snapshot_frame_watermark(&session,
+		300, 100) == 0);
+	assert(spf_tandem_session_preview(&session, 300, 100,
+		output, 4, &preview) == 0);
+	assert(preview.event_count == 1 && output[0].event_sequence == 3);
+	assert(preview.event_sequence_start_valid &&
+		preview.event_sequence_start == 3);
+	assert(preview.timeline.transition_count_start == 3);
+	assert(preview.timeline.transition_count_end == 4);
+	assert(preview.timeline.gain_start.rx1_gain_index == 22);
+	assert(preview.timeline.gain_end.rx1_gain_index == 23);
+	assert(spf_tandem_session_commit(&session, &preview) == 0);
+	spf_tandem_session_close(&session);
+}
+
 static void test_authoritative_fence_contract(void)
 {
 	uint8_t wire[104];
@@ -895,6 +943,7 @@ int main(void)
 	test_status_counter_wraps_without_losing_continuity();
 	test_transactional_watermark_and_cdc_delay();
 	test_fixed_watermark_wrap_and_retry_exhaustion();
+	test_authoritative_timeline_accounts_for_skipped_iq_interval();
 	test_authoritative_fence_contract();
 	test_frame_boundaries_hold_and_sequence_gap();
 	puts("SPF tandem session tests passed");

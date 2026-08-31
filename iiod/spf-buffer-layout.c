@@ -78,14 +78,6 @@ int spf_buffer_sequence_resolve(const struct spf_buffer_sequence_state *state,
 	return 0;
 }
 
-int spf_buffer_sequence_require_contiguous(
-	const struct spf_buffer_sequence_result *result)
-{
-	if (!result)
-		return -EINVAL;
-	return result->missing_samples_before ? -EOVERFLOW : 0;
-}
-
 void spf_buffer_sequence_commit(struct spf_buffer_sequence_state *state,
 	const struct spf_buffer_sequence_result *result)
 {
