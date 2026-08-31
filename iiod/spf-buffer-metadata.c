@@ -87,7 +87,6 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	struct iio_channel *rx0;
 	long long sample_rate_hz;
 	size_t tandem_request_bytes = request_bytes;
-	uint32_t timestamp_control;
 	int ret;
 
 	if (!dev || !request || !request_bytes || !provider_context ||
@@ -188,10 +187,8 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		free(ctx);
 		return -EIO;
 	}
-	timestamp_control = (ctx->layout.timestamp_words << 1) |
-		(ctx->timestamp_control_previous & UINT32_C(1));
 	if (iio_device_reg_write(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
-			timestamp_control) != 0) {
+			ctx->layout.timestamp_control) != 0) {
 		free(ctx);
 		return -EIO;
 	}

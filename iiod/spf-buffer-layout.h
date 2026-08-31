@@ -14,6 +14,7 @@ struct spf_buffer_layout {
 	uint32_t samples_per_channel;
 	uint32_t iq_bytes_per_sample;
 	uint32_t timestamp_words;
+	uint32_t timestamp_control;
 	size_t iq_bytes;
 	size_t raw_bytes;
 };

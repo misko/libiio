@@ -25,6 +25,7 @@ static void expect_layout(uint32_t mask, size_t samples, size_t scan_bytes,
 	assert(layout.iq_bytes == iq_bytes);
 	assert(layout.raw_bytes == iq_bytes + 8U);
 	assert(layout.timestamp_words == timestamp_words);
+	assert(layout.timestamp_control == (timestamp_words << 1) + 1U);
 }
 
 int main(void)
