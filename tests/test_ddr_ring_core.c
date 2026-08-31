@@ -124,6 +124,32 @@ static void test_failure_drains_committed(void)
 	assert(iiod_ddr_ring_core_consumer_reserve(&ring, &slot) == -EOVERFLOW);
 }
 
+static void test_direct_extension_drains_without_prefill(void)
+{
+	enum iiod_ddr_ring_slot_state slots[3];
+	struct iiod_ddr_ring_core ring;
+	size_t slot;
+
+	assert(iiod_ddr_ring_core_init(&ring, slots, 3, 0) == 0);
+	assert(iiod_ddr_ring_core_start_extension(&ring) == 0);
+	assert(ring.prefill_frames == 0 && ring.low_water_frames == 0);
+	assert(ring.consumer_started);
+	assert(iiod_ddr_ring_core_complete_extension(&ring) == 0);
+	assert(ring.state == SPF_DDR_RING_STATE_COMPLETE);
+	assert(ring.terminal_reason == SPF_DDR_RING_REASON_TARGET_COMPLETE);
+
+	assert(iiod_ddr_ring_core_init(&ring, slots, 3, 0) == 0);
+	assert(iiod_ddr_ring_core_start_extension(&ring) == 0);
+	produce(&ring, 0);
+	assert(iiod_ddr_ring_core_consumer_ready(&ring));
+	assert(iiod_ddr_ring_core_complete_extension(&ring) == -EBUSY);
+	assert(iiod_ddr_ring_core_consumer_reserve(&ring, &slot) == 0);
+	assert(slot == 0);
+	assert(iiod_ddr_ring_core_complete_extension(&ring) == -EBUSY);
+	assert(iiod_ddr_ring_core_consumer_release(&ring) == 0);
+	assert(iiod_ddr_ring_core_complete_extension(&ring) == 0);
+}
+
 static void test_abort_and_cancel(void)
 {
 	enum iiod_ddr_ring_slot_state slots[1];
@@ -169,6 +195,7 @@ int main(void)
 	test_finite_wrap();
 	test_finite_capture_prefills_target();
 	test_continuous_capture_uses_low_watermark();
+	test_direct_extension_drains_without_prefill();
 	test_failure_drains_committed();
 	test_abort_and_cancel();
 	test_sample_continuity_stops_at_first_gap();

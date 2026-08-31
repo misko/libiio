@@ -11,6 +11,7 @@
 #include "thread-pool.h"
 #include "buffer-metadata.h"
 #include "ddr-ring-core.h"
+#include "spf-ddr-ring-request.h"
 #include "spf-ddr-ring-status.h"
 #include "../debug.h"
 
@@ -111,6 +112,7 @@ struct iiod_ddr_ring {
 	bool reservation_held;
 	bool producer_started;
 	bool producer_exited;
+	bool direct_extension;
 };
 
 struct iiod_direct_async_frame {
@@ -118,6 +120,8 @@ struct iiod_direct_async_frame {
 	size_t metadata_bytes;
 	size_t iq_offset;
 	size_t iq_bytes;
+	size_t ring_slot;
+	bool ring_backed;
 };
 
 struct iiod_direct_async {
@@ -125,6 +129,8 @@ struct iiod_direct_async {
 	uint8_t *metadata;
 	size_t metadata_capacity;
 	size_t capacity;
+	size_t dma_capacity;
+	size_t dma_count;
 	size_t head;
 	size_t tail;
 	size_t count;
@@ -621,6 +627,8 @@ static int ring_prepare(struct iiod_ddr_ring *ring,
 	ring->metadata_capacity = plan->metadata_capacity;
 	ring->requested_iq_bytes = plan->ring_capacity_iq_bytes;
 	ring->admitted_iq_bytes = iq_bytes;
+	ring->direct_extension =
+		plan->ring_flags == SPF_DDR_RING_FLAG_DIRECT_EXTENSION;
 	ret = iiod_ddr_ring_core_init(&ring->core, ring->slots, frame_count,
 		plan->ring_capture_frames);
 	if (ret)
@@ -664,16 +672,22 @@ static void direct_async_release_storage(struct iiod_direct_async *direct)
 }
 
 static int direct_async_prepare(struct iiod_direct_async *direct,
-		unsigned int capacity, size_t metadata_capacity,
-		unsigned int target_frames)
+		unsigned int dma_capacity, size_t ram_capacity,
+		size_t metadata_capacity, unsigned int target_frames)
 {
-	size_t metadata_bytes;
+	size_t capacity, metadata_bytes, useful_ram;
 
-	if (!direct || capacity < 2U || !metadata_capacity || !target_frames ||
+	if (!direct || dma_capacity < 2U || !metadata_capacity || !target_frames ||
 		metadata_capacity > IIOD_MAX_BUFFER_METADATA_BYTES)
 		return -EINVAL;
 	if (direct->requested)
 		return -EBUSY;
+	useful_ram = target_frames > dma_capacity ?
+		(size_t)target_frames - dma_capacity : 0U;
+	if (useful_ram > ram_capacity)
+		useful_ram = ram_capacity;
+	if (!size_add(dma_capacity, useful_ram, &capacity))
+		return -EOVERFLOW;
 	if (!size_mul(capacity, metadata_capacity, &metadata_bytes))
 		return -EOVERFLOW;
 	direct->frames = calloc(capacity, sizeof(*direct->frames));
@@ -684,6 +698,7 @@ static int direct_async_prepare(struct iiod_direct_async *direct,
 	}
 	direct->metadata_capacity = metadata_capacity;
 	direct->capacity = capacity;
+	direct->dma_capacity = dma_capacity;
 	direct->target_frames = target_frames;
 	direct->requested = true;
 	return 0;
@@ -919,6 +934,59 @@ static void iiod_timed_ddr_copy(struct DevEntry *entry, void *destination,
 
 	memcpy(destination, source, bytes);
 	iiod_timing_record(entry, IIOD_TIMING_DDR_COPY, started_ns);
+}
+
+/* entry->ring_lock must be held. */
+static int direct_async_spill_newest_dma(struct DevEntry *entry)
+{
+	struct iiod_direct_async *direct = &entry->direct;
+	struct iiod_ddr_ring *ring = &entry->ring;
+	struct iiod_direct_async_frame *frame = NULL;
+	struct iio_buffer_block *block;
+	size_t queue_slot, ring_slot, offset;
+	int ret;
+
+	if (!ring->direct_extension || direct->dma_count < direct->dma_capacity)
+		return 0;
+	/* Never spill the head: the network worker may already be using it. */
+	for (offset = 1; offset <= direct->count; offset++) {
+		queue_slot = (direct->tail + direct->capacity - offset) %
+			direct->capacity;
+		if (queue_slot == direct->head)
+			continue;
+		if (direct->frames[queue_slot].block &&
+				!direct->frames[queue_slot].ring_backed) {
+			frame = &direct->frames[queue_slot];
+			break;
+		}
+	}
+	if (!frame)
+		return -EIO;
+	ret = iiod_ddr_ring_core_producer_reserve(&ring->core, &ring_slot);
+	if (ret)
+		return ret;
+	block = frame->block;
+	if (!block || !frame->iq_bytes || frame->iq_bytes != ring->frame_iq_bytes) {
+		(void)iiod_ddr_ring_core_producer_abort(&ring->core);
+		return -EIO;
+	}
+	iiod_timed_ddr_copy(entry, ring_iq_slot(ring, ring_slot),
+		(uint8_t *)iio_buffer_block_start(block) + frame->iq_offset,
+		frame->iq_bytes);
+	ret = iio_buffer_block_release(block);
+	if (ret) {
+		(void)iiod_ddr_ring_core_producer_abort(&ring->core);
+		return ret;
+	}
+	ret = iiod_ddr_ring_core_producer_commit(&ring->core);
+	if (ret)
+		return ret;
+	frame->block = NULL;
+	frame->iq_offset = 0;
+	frame->ring_slot = ring_slot;
+	frame->ring_backed = true;
+	direct->dma_count--;
+	return 0;
 }
 
 struct sample_cb_info {
@@ -1567,15 +1635,16 @@ static ssize_t send_direct_async_data(struct DevEntry *entry,
 		struct ThdEntry *thd)
 {
 	struct iiod_direct_async *direct = &entry->direct;
+	struct iiod_ddr_ring *ring = &entry->ring;
 	struct parser_pdata *pdata = thd->pdata;
 	struct iiod_direct_async_frame *frame;
-	struct iio_buffer_block *block;
+	struct iio_buffer_block *block = NULL;
 	void *metadata;
 	void *iq;
-	size_t iq_bytes;
-	size_t slot;
+	size_t iq_bytes, ring_slot = 0, slot;
+	bool ring_backed;
 	ssize_t ret;
-	int release_ret;
+	int complete_ret = 0, release_ret = 0;
 
 	pthread_mutex_lock(&entry->ring_lock);
 	if (!direct->count) {
@@ -1585,18 +1654,40 @@ static ssize_t send_direct_async_data(struct DevEntry *entry,
 	}
 	slot = direct->head;
 	frame = &direct->frames[slot];
-	if (!frame->block || thd->nb != frame->iq_bytes ||
+	ring_backed = frame->ring_backed;
+	if ((ring_backed == (frame->block != NULL)) ||
+		thd->nb != frame->iq_bytes ||
 		thd->metadata_capacity < frame->metadata_bytes) {
 		direct->error = -ENOSPC;
 		direct->cancelled = true;
+		if (ring->direct_extension &&
+				!iiod_ddr_ring_core_is_terminal(&ring->core))
+			(void)iiod_ddr_ring_core_fail(&ring->core,
+				SPF_DDR_RING_REASON_INTERNAL_ERROR, -ENOSPC);
 		pthread_cond_broadcast(&entry->ring_ready_cond);
 		pthread_mutex_unlock(&entry->ring_lock);
 		return -ENOSPC;
 	}
-	block = frame->block;
 	iq_bytes = frame->iq_bytes;
 	metadata = direct_async_metadata_slot(direct, slot);
-	iq = (uint8_t *)iio_buffer_block_start(block) + frame->iq_offset;
+	if (ring_backed) {
+		ret = iiod_ddr_ring_core_consumer_reserve(&ring->core, &ring_slot);
+		if (ret || ring_slot != frame->ring_slot) {
+			ret = ret ? ret : -EIO;
+			direct->error = (int)ret;
+			direct->cancelled = true;
+			if (!iiod_ddr_ring_core_is_terminal(&ring->core))
+				(void)iiod_ddr_ring_core_fail(&ring->core,
+					SPF_DDR_RING_REASON_INTERNAL_ERROR, (int)ret);
+			pthread_cond_broadcast(&entry->ring_ready_cond);
+			pthread_mutex_unlock(&entry->ring_lock);
+			return ret;
+		}
+		iq = ring_iq_slot(ring, ring_slot);
+	} else {
+		block = frame->block;
+		iq = (uint8_t *)iio_buffer_block_start(block) + frame->iq_offset;
+	}
 	pthread_mutex_unlock(&entry->ring_lock);
 
 	print_value(pdata, frame->iq_bytes);
@@ -1632,19 +1723,39 @@ static ssize_t send_direct_async_data(struct DevEntry *entry,
 	}
 
 complete:
-	release_ret = iio_buffer_block_release(block);
+	if (!ring_backed)
+		release_ret = iio_buffer_block_release(block);
+	pthread_mutex_lock(&entry->ring_lock);
+	if (ring_backed)
+		release_ret = iiod_ddr_ring_core_consumer_release(&ring->core);
 	if (ret >= 0 && release_ret < 0)
 		ret = release_ret;
-	pthread_mutex_lock(&entry->ring_lock);
-	/* A failed release keeps the lease valid for an ordered teardown retry. */
-	if (!release_ret)
+	/* A failed DMA release keeps the lease reachable for teardown retry. */
+	if (!release_ret) {
 		frame->block = NULL;
+		frame->ring_backed = false;
+		frame->ring_slot = 0;
+		if (!ring_backed)
+			direct->dma_count--;
+	}
 	direct->head = (direct->head + 1U) % direct->capacity;
 	direct->count--;
 	direct->consumed_frames++;
 	if (ret < 0) {
 		direct->error = (int)ret;
 		direct->cancelled = true;
+		if (ring->direct_extension &&
+				!iiod_ddr_ring_core_is_terminal(&ring->core))
+			(void)iiod_ddr_ring_core_fail(&ring->core,
+				SPF_DDR_RING_REASON_TRANSPORT_ERROR, (int)ret);
+	} else if (ring->direct_extension &&
+			direct->consumed_frames == direct->target_frames) {
+		complete_ret = iiod_ddr_ring_core_complete_extension(&ring->core);
+		if (complete_ret) {
+			direct->error = complete_ret;
+			direct->cancelled = true;
+			ret = complete_ret;
+		}
 	}
 	pthread_cond_broadcast(&entry->ring_ready_cond);
 	pthread_mutex_unlock(&entry->ring_lock);
@@ -1743,6 +1854,12 @@ static void direct_async_producer_thd(struct thread_pool *pool, void *data)
 			pthread_mutex_unlock(&entry->ring_lock);
 			break;
 		}
+		ret = direct_async_spill_newest_dma(entry);
+		if (ret) {
+			error = ret;
+			pthread_mutex_unlock(&entry->ring_lock);
+			break;
+		}
 		slot = direct->tail;
 		pthread_mutex_unlock(&entry->ring_lock);
 
@@ -1786,7 +1903,10 @@ static void direct_async_producer_thd(struct thread_pool *pool, void *data)
 		frame->metadata_bytes = (size_t)metadata_len;
 		frame->iq_offset = iq_offset;
 		frame->iq_bytes = iq_bytes;
+		frame->ring_slot = 0;
+		frame->ring_backed = false;
 		block = NULL;
+		direct->dma_count++;
 		direct->tail = (direct->tail + 1U) % direct->capacity;
 		direct->count++;
 		direct->produced_frames++;
@@ -1811,8 +1931,13 @@ release_block:
 	}
 
 	pthread_mutex_lock(&entry->ring_lock);
-	if (error && !direct->cancelled)
+	if (error && !direct->cancelled) {
 		direct->error = error;
+		if (entry->ring.direct_extension &&
+				!iiod_ddr_ring_core_is_terminal(&entry->ring.core))
+			(void)iiod_ddr_ring_core_fail(&entry->ring.core,
+				ring_failure_reason(error), error < 0 ? error : -EIO);
+	}
 	direct->producer_exited = true;
 	pthread_cond_broadcast(&entry->ring_ready_cond);
 	pthread_mutex_unlock(&entry->ring_lock);
@@ -1831,10 +1956,20 @@ static int direct_async_start_producer(struct DevEntry *entry)
 		pthread_mutex_unlock(&entry->ring_lock);
 		return -EINVAL;
 	}
+	if (entry->ring.direct_extension) {
+		ret = iiod_ddr_ring_core_start_extension(&entry->ring.core);
+		if (ret) {
+			pthread_mutex_unlock(&entry->ring_lock);
+			return ret;
+		}
+	}
 	entry->direct.producer_started = true;
 	entry->direct.producer_exited = false;
 	entry->direct_used = true;
 	pthread_mutex_unlock(&entry->ring_lock);
+	if (entry->ring.direct_extension)
+		iiod_buffer_metadata_ring_prefix_complete(
+			entry->metadata_provider_context, true);
 
 	entry->ref_count++;
 	ret = thread_pool_add_thread(main_thread_pool,
@@ -1845,6 +1980,11 @@ static int direct_async_start_producer(struct DevEntry *entry)
 		entry->direct.error = ret < 0 ? ret : -EIO;
 		entry->direct.producer_started = false;
 		entry->direct.producer_exited = true;
+		if (entry->ring.direct_extension &&
+				!iiod_ddr_ring_core_is_terminal(&entry->ring.core))
+			(void)iiod_ddr_ring_core_fail(&entry->ring.core,
+				SPF_DDR_RING_REASON_INTERNAL_ERROR,
+				ret < 0 ? ret : -EIO);
 		pthread_mutex_unlock(&entry->ring_lock);
 	}
 	return ret;
@@ -2150,7 +2290,8 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				entry->burst.state = IIOD_BURST_CAPTURING;
 			entry->cancelled = false;
 			entry->samples_count = samples_count;
-			if (entry->ring.core.state == SPF_DDR_RING_STATE_RESERVED) {
+			if (entry->ring.core.state == SPF_DDR_RING_STATE_RESERVED &&
+					!entry->ring.direct_extension) {
 				ret = ring_start_producer(entry);
 				if (ret)
 					break;
@@ -2481,6 +2622,10 @@ static void rw_thd(struct thread_pool *pool, void *d)
 	if (entry->direct.producer_started) {
 		pthread_mutex_lock(&entry->ring_lock);
 		entry->direct.cancelled = true;
+		if (entry->ring.direct_extension &&
+				!iiod_ddr_ring_core_is_terminal(&entry->ring.core))
+			(void)iiod_ddr_ring_core_cancel(&entry->ring.core,
+				SPF_DDR_RING_REASON_CLIENT_DISCONNECTED);
 		pthread_cond_broadcast(&entry->ring_ready_cond);
 		pthread_mutex_unlock(&entry->ring_lock);
 		if (entry->buf)
@@ -2553,6 +2698,7 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 {
 	struct DevEntry *entry;
 	struct ThdEntry *thd;
+	bool ring_extension;
 	ssize_t ret;
 
 	if (!dev)
@@ -2563,6 +2709,7 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 		return -EBADF;
 
 	entry = thd->entry;
+	ring_extension = entry->ring.direct_extension;
 	if (metadata_capacity && (is_write ||
 			metadata_capacity > IIOD_MAX_BUFFER_METADATA_BYTES ||
 			thd->sample_size != entry->sample_size ||
@@ -2571,7 +2718,9 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 	if (async_frames && (!metadata_capacity || is_write ||
 		async_frames > IIO_BUFFER_METADATA_BATCH_MAX ||
 		entry->burst_plan.requested_iq_bytes ||
-		entry->burst_plan.ring_capacity_iq_bytes))
+		(entry->burst_plan.ring_capacity_iq_bytes && !ring_extension)))
+		return -EINVAL;
+	if (!async_frames && metadata_capacity && ring_extension)
 		return -EINVAL;
 
 	if (nb < entry->sample_size)
@@ -2589,8 +2738,9 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 	}
 	if (async_frames) {
 		ret = direct_async_prepare(&entry->direct,
-			iio_device_get_kernel_buffers_count(dev), metadata_capacity,
-			async_frames);
+			iio_device_get_kernel_buffers_count(dev),
+			ring_extension ? entry->ring.core.slot_count : 0U,
+			metadata_capacity, async_frames);
 		if (ret) {
 			pthread_mutex_unlock(&entry->thdlist_lock);
 			return ret;
@@ -2683,6 +2833,11 @@ static void remove_thd_entry(struct ThdEntry *t)
 			if (entry->direct.producer_started) {
 				pthread_mutex_lock(&entry->ring_lock);
 				entry->direct.cancelled = true;
+				if (entry->ring.direct_extension &&
+						!iiod_ddr_ring_core_is_terminal(
+							&entry->ring.core))
+					(void)iiod_ddr_ring_core_cancel(&entry->ring.core,
+						SPF_DDR_RING_REASON_CLIENT_DISCONNECTED);
 				pthread_cond_broadcast(&entry->ring_ready_cond);
 				pthread_mutex_unlock(&entry->ring_lock);
 			}
@@ -3118,7 +3273,7 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 	else {
 		entry = thd->entry;
 		pthread_mutex_lock(&entry->ring_lock);
-		if (!entry->ring.producer_started) {
+		if (!entry->ring.producer_started && !entry->ring.direct_extension) {
 			ret = -ENODATA;
 		} else {
 			status.state = entry->ring.core.state;

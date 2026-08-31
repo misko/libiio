@@ -38,6 +38,19 @@ int iiod_ddr_ring_core_start(struct iiod_ddr_ring_core *ring)
 	return 0;
 }
 
+int iiod_ddr_ring_core_start_extension(struct iiod_ddr_ring_core *ring)
+{
+	int ret = iiod_ddr_ring_core_start(ring);
+
+	if (ret)
+		return ret;
+	/* DMA descriptors ahead of the RAM tier provide the initial prefill. */
+	ring->prefill_frames = 0;
+	ring->low_water_frames = 0;
+	ring->consumer_started = true;
+	return 0;
+}
+
 int iiod_ddr_ring_core_producer_reserve(struct iiod_ddr_ring_core *ring,
 	size_t *slot)
 {
@@ -230,6 +243,18 @@ int iiod_ddr_ring_core_cancel(struct iiod_ddr_ring_core *ring,
 	ring->state = SPF_DDR_RING_STATE_CANCELLED;
 	ring->terminal_reason = reason;
 	ring->error_code = -ECANCELED;
+	return 0;
+}
+
+int iiod_ddr_ring_core_complete_extension(struct iiod_ddr_ring_core *ring)
+{
+	if (!ring || ring->state != SPF_DDR_RING_STATE_RUNNING)
+		return -EINVAL;
+	if (ring->occupied || ring->producer_reserved || ring->consumer_reserved)
+		return -EBUSY;
+	ring->state = SPF_DDR_RING_STATE_COMPLETE;
+	ring->terminal_reason = SPF_DDR_RING_REASON_TARGET_COMPLETE;
+	ring->error_code = 0;
 	return 0;
 }
 

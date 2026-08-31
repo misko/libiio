@@ -1213,16 +1213,24 @@ class MetadataBuffer(Buffer):
             raise ValueError("DDR ring values must not be negative")
         if ddr_burst_bytes and ddr_ring_bytes:
             raise ValueError("DDR burst and DDR ring are mutually exclusive")
-        if direct_async_frames and (ddr_burst_bytes or ddr_ring_bytes):
-            raise ValueError("direct async capture requires the DDR/RAM ring off")
+        if direct_async_frames and ddr_burst_bytes:
+            raise ValueError("direct async capture cannot use the sealed DDR burst")
         if ddr_ring_bytes and batch_frames != 1:
             raise ValueError("device DDR ring requires batch_frames=1")
         if ddr_ring_bytes:
+            if direct_async_frames and (ddr_ring_frames or ddr_ring_continuous):
+                raise ValueError(
+                    "direct async RAM extension owns the finite frame target"
+                )
             if ddr_ring_continuous and ddr_ring_frames:
                 raise ValueError(
                     "continuous DDR ring must not specify ddr_ring_frames"
                 )
-            if not ddr_ring_continuous and not ddr_ring_frames:
+            if (
+                not direct_async_frames
+                and not ddr_ring_continuous
+                and not ddr_ring_frames
+            ):
                 raise ValueError(
                     "finite DDR ring requires a positive ddr_ring_frames"
                 )
@@ -1247,6 +1255,13 @@ class MetadataBuffer(Buffer):
             context_attrs = getattr(getattr(device, "_ctx", None), "attrs", {})
             if context_attrs.get("iio,buffer-direct-async") != "1":
                 raise OSError("IIO context does not advertise direct async capture")
+            if (
+                ddr_ring_bytes
+                and context_attrs.get("iio,buffer-direct-async-ring") != "1"
+            ):
+                raise OSError(
+                    "IIO context does not advertise direct async RAM extension"
+                )
         if ddr_burst_bytes:
             context_attrs = getattr(getattr(device, "_ctx", None), "attrs", {})
             if context_attrs.get("iio,buffer-ddr-burst") != "1":
@@ -1303,7 +1318,13 @@ class MetadataBuffer(Buffer):
                 1,
                 48,
                 1,
-                2 if ddr_ring_continuous else 1,
+                (
+                    4
+                    if direct_async_frames
+                    else 2
+                    if ddr_ring_continuous
+                    else 1
+                ),
                 ddr_ring_bytes,
                 ddr_ring_frames,
                 0,
@@ -1334,6 +1355,9 @@ class MetadataBuffer(Buffer):
         self._batch_frames = batch_frames
         self._batch_cache_bytes = batch_cache_bytes
         self._direct_async_frames = direct_async_frames
+        self._direct_async_ring_extension = bool(
+            direct_async_frames and ddr_ring_bytes
+        )
         self._ddr_burst_requested_bytes = ddr_burst_bytes
         self._ddr_burst_admitted_bytes = ddr_burst_admitted_bytes
         self._ddr_burst_frames = ddr_burst_frames
@@ -1382,6 +1406,11 @@ class MetadataBuffer(Buffer):
     def direct_async_frames(self):
         """Finite DMA-to-network frame count, or zero when disabled."""
         return self._direct_async_frames
+
+    @property
+    def direct_async_ring_extension(self):
+        """Whether RAM slots extend the bounded direct DMA FIFO."""
+        return self._direct_async_ring_extension
 
     @property
     def ddr_burst_enabled(self):

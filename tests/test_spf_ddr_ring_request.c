@@ -53,6 +53,10 @@ int main(void)
 	assert(request.capture_frames == 900);
 	build_request(wire, SPF_DDR_RING_FLAG_CONTINUOUS, UINT64_C(300000000), 0);
 	assert(spf_ddr_ring_request_decode(&request, wire, sizeof(wire)) == 0);
+	build_request(wire, SPF_DDR_RING_FLAG_DIRECT_EXTENSION,
+		UINT64_C(100000000), 0);
+	assert(spf_ddr_ring_request_decode(&request, wire, sizeof(wire)) == 0);
+	assert(request.flags == SPF_DDR_RING_FLAG_DIRECT_EXTENSION);
 
 	assert(spf_ddr_ring_request_decode(NULL, wire, sizeof(wire)) == -EINVAL);
 	assert(spf_ddr_ring_request_decode(&request, wire, sizeof(wire) - 1U) ==
@@ -69,6 +73,8 @@ int main(void)
 	build_request(wire, SPF_DDR_RING_FLAG_FINITE, 1, 0);
 	assert(spf_ddr_ring_request_decode(&request, wire, sizeof(wire)) == -EINVAL);
 	build_request(wire, SPF_DDR_RING_FLAG_CONTINUOUS, 1, 1);
+	assert(spf_ddr_ring_request_decode(&request, wire, sizeof(wire)) == -EINVAL);
+	build_request(wire, SPF_DDR_RING_FLAG_DIRECT_EXTENSION, 1, 1);
 	assert(spf_ddr_ring_request_decode(&request, wire, sizeof(wire)) == -EINVAL);
 	build_request(wire, SPF_DDR_RING_FLAG_CONTINUOUS, 0, 0);
 	assert(spf_ddr_ring_request_decode(&request, wire, sizeof(wire)) == -EINVAL);

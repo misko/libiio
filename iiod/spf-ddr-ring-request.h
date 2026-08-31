@@ -11,6 +11,7 @@
 #define SPF_DDR_RING_FEATURE_QUEUE_IQ UINT32_C(1)
 #define SPF_DDR_RING_FLAG_FINITE UINT32_C(1)
 #define SPF_DDR_RING_FLAG_CONTINUOUS UINT32_C(2)
+#define SPF_DDR_RING_FLAG_DIRECT_EXTENSION UINT32_C(4)
 
 struct spf_ddr_ring_request {
 	uint32_t required_features;

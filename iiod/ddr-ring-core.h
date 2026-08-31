@@ -47,6 +47,7 @@ int iiod_ddr_ring_core_init(struct iiod_ddr_ring_core *ring,
 	enum iiod_ddr_ring_slot_state *slots, size_t slot_count,
 	uint64_t target_frames);
 int iiod_ddr_ring_core_start(struct iiod_ddr_ring_core *ring);
+int iiod_ddr_ring_core_start_extension(struct iiod_ddr_ring_core *ring);
 int iiod_ddr_ring_core_producer_reserve(struct iiod_ddr_ring_core *ring,
 	size_t *slot);
 int iiod_ddr_ring_core_producer_commit(struct iiod_ddr_ring_core *ring);
@@ -66,6 +67,7 @@ int iiod_ddr_ring_core_fail(struct iiod_ddr_ring_core *ring,
 	uint32_t reason, int error_code);
 int iiod_ddr_ring_core_cancel(struct iiod_ddr_ring_core *ring,
 	uint32_t reason);
+int iiod_ddr_ring_core_complete_extension(struct iiod_ddr_ring_core *ring);
 bool iiod_ddr_ring_core_is_terminal(const struct iiod_ddr_ring_core *ring);
 
 #endif
