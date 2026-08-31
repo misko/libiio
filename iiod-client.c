@@ -902,7 +902,7 @@ int iiod_client_prequeue_metadata_reads_async_unlocked(
 
 	if (!client || !desc || !dev || !len || !metadata_capacity || !frames)
 		return -EINVAL;
-	if (frames > IIO_BUFFER_METADATA_BATCH_MAX)
+	if (frames > IIO_BUFFER_METADATA_DIRECT_MAX)
 		return -E2BIG;
 	if ((size_t)(unsigned long)len != len ||
 		(size_t)(unsigned long)metadata_capacity != metadata_capacity)

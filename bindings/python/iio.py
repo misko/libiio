@@ -1179,8 +1179,8 @@ class MetadataBuffer(Buffer):
             direct_async_frames, int
         ):
             raise TypeError("direct_async_frames must be an integer")
-        if not 0 <= direct_async_frames <= 64:
-            raise ValueError("direct_async_frames must be in [0, 64]")
+        if not 0 <= direct_async_frames <= 4096:
+            raise ValueError("direct_async_frames must be in [0, 4096]")
         if direct_async_frames and batch_frames != 1:
             raise ValueError("direct async capture requires batch_frames=1")
         batch_cache_bytes = 0

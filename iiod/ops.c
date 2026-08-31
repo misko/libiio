@@ -2730,7 +2730,7 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 			nb != entry->sample_size * entry->samples_count))
 		return -EINVAL;
 	if (async_frames && (!metadata_capacity || is_write ||
-		async_frames > IIO_BUFFER_METADATA_BATCH_MAX ||
+		async_frames > IIO_BUFFER_METADATA_DIRECT_MAX ||
 		entry->burst_plan.requested_iq_bytes ||
 		(entry->burst_plan.ring_capacity_iq_bytes && !ring_extension)))
 		return -EINVAL;

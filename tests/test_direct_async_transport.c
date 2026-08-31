@@ -303,10 +303,37 @@ static void test_gates_and_early_close(void)
 	assert(early.state.cancel_event < early.state.close_event);
 }
 
+static void test_long_capture_is_one_command(void)
+{
+	static const char command[] = "READBUFMA dev0 16 16 250\r\n";
+	struct fixture fixture = {0};
+	struct iio_buffer *buffer = fixture_buffer(&fixture);
+
+	assert(iio_buffer_set_metadata_read_prequeue_async(buffer, 250,
+		TEST_METADATA_BYTES) == 0);
+	assert(fixture.state.write_calls == 1);
+	assert(fixture.state.write_bytes == sizeof(command) - 1U);
+	assert(!memcmp(fixture.state.writes, command, sizeof(command) - 1U));
+	destroy_fixture_buffer(&fixture, buffer);
+}
+
+static void test_direct_capture_limit(void)
+{
+	struct fixture fixture = {0};
+	struct iio_buffer *buffer = fixture_buffer(&fixture);
+
+	assert(iio_buffer_set_metadata_read_prequeue_async(buffer,
+		IIO_BUFFER_METADATA_DIRECT_MAX + 1U, TEST_METADATA_BYTES) == -E2BIG);
+	assert(fixture.state.write_calls == 0);
+	destroy_fixture_buffer(&fixture, buffer);
+}
+
 int main(void)
 {
 	test_fifo_drain_single_command();
 	test_gates_and_early_close();
+	test_long_capture_is_one_command();
+	test_direct_capture_limit();
 	puts("direct async transport: PASS");
 	return 0;
 }

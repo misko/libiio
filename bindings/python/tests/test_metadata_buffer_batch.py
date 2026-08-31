@@ -117,11 +117,11 @@ def test_direct_async_configures_one_finite_capture(monkeypatch):
         1024,
         b"provider",
         metadata_capacity=32768,
-        direct_async_frames=23,
+        direct_async_frames=250,
     )
 
-    assert configured == [(created, 23, 32768)]
-    assert buffer.direct_async_frames == 23
+    assert configured == [(created, 250, 32768)]
+    assert buffer.direct_async_frames == 250
     assert buffer.direct_async_ring_extension is False
     assert buffer.ddr_burst_enabled is False
     assert buffer.ddr_ring_enabled is False
@@ -223,6 +223,21 @@ def test_direct_async_frame_type_is_exact(monkeypatch, frames):
             1024,
             b"provider",
             direct_async_frames=frames,
+        )
+
+
+def test_direct_async_frame_limit_is_independent_of_batch_limit(monkeypatch):
+    monkeypatch.setattr(
+        iio,
+        "_create_buffer_with_metadata",
+        lambda *args: pytest.fail("validation must happen before buffer creation"),
+    )
+    with pytest.raises(ValueError, match=r"\[0, 4096\]"):
+        iio.MetadataBuffer(
+            DirectAsyncFakeDevice(),
+            1024,
+            b"provider",
+            direct_async_frames=4097,
         )
 
 

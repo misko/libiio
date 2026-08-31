@@ -1487,6 +1487,9 @@ __api __check_ret struct iio_buffer * iio_device_create_buffer(const struct iio_
 /** Maximum number of ordinary metadata reads that may be prequeued. */
 #define IIO_BUFFER_METADATA_BATCH_MAX 64U
 
+/** Maximum frame target for one finite direct-async capture session. */
+#define IIO_BUFFER_METADATA_DIRECT_MAX 4096U
+
 /** Maximum host memory retained by one metadata refill batch. */
 #define IIO_BUFFER_METADATA_BATCH_BYTES_MAX (64U * 1024U * 1024U)
 
@@ -1535,8 +1538,11 @@ __api __check_ret int iio_buffer_set_metadata_batch_size(
  *
  * This network-only opt-in requires iio,buffer-direct-async=1. It preserves
  * the ordinary READBUFM response format and is mutually exclusive with host
- * batching and device DDR burst/ring storage. Each subsequent
- * iio_buffer_refill_with_metadata() consumes one response. */
+ * batching, sealed DDR burst, and standalone DDR ring capture. An admitted
+ * direct-async RAM extension adds its slots to the DMA queue. Each subsequent
+ * iio_buffer_refill_with_metadata() consumes one response. The finite target
+ * is bounded by IIO_BUFFER_METADATA_DIRECT_MAX; unlike an ordinary metadata
+ * batch, it does not retain the complete capture in host memory. */
 __api __check_ret int iio_buffer_set_metadata_read_prequeue_async(
 		struct iio_buffer *buf, unsigned int frames,
 		size_t metadata_capacity);

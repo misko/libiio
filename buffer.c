@@ -240,7 +240,7 @@ int iio_buffer_set_metadata_read_prequeue_async(struct iio_buffer *buffer,
 	if (!buffer || !buffer->metadata_enabled || !frames ||
 		!metadata_capacity)
 		return -EINVAL;
-	if (frames > IIO_BUFFER_METADATA_BATCH_MAX)
+	if (frames > IIO_BUFFER_METADATA_DIRECT_MAX)
 		return -E2BIG;
 	if (metadata_batch_is_failed(buffer))
 		return -EBADF;
