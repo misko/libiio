@@ -79,6 +79,7 @@ struct iio_context;
 struct iio_device;
 struct iio_channel;
 struct iio_buffer;
+struct iio_buffer_block;
 
 struct iio_context_info;
 struct iio_scan_context;
@@ -1525,6 +1526,21 @@ iio_device_create_buffer_with_metadata(const struct iio_device *dev,
 __api __check_ret int iio_buffer_set_metadata_batch_size(
 		struct iio_buffer *buf, unsigned int frames);
 
+/** @brief Start a finite metadata capture whose local iiOD provider acquires
+ * DMA blocks independently of network transmission.
+ * @param buf A metadata-enabled input buffer
+ * @param frames Exact number of frames to capture and transmit
+ * @param metadata_capacity Per-frame metadata capacity
+ * @return 0 on success, a negative errno code otherwise
+ *
+ * This network-only opt-in requires iio,buffer-direct-async=1. It preserves
+ * the ordinary READBUFM response format and is mutually exclusive with host
+ * batching and device DDR burst/ring storage. Each subsequent
+ * iio_buffer_refill_with_metadata() consumes one response. */
+__api __check_ret int iio_buffer_set_metadata_read_prequeue_async(
+		struct iio_buffer *buf, unsigned int frames,
+		size_t metadata_capacity);
+
 /** @brief Read the provider-owned status blob for an open metadata buffer.
  * @param buf A metadata-enabled input buffer
  * @param status Destination for the opaque, provider-versioned status bytes
@@ -1574,6 +1590,27 @@ __api __check_ret int iio_buffer_set_blocking_mode(struct iio_buffer *buf, bool 
  *
  * <b>NOTE:</b> Only valid for input buffers */
 __api __check_ret ssize_t iio_buffer_refill(struct iio_buffer *buf);
+
+/** @brief Acquire one completed high-speed input block without releasing any
+ * previously acquired block.
+ * @return A block lease on success; NULL with errno set otherwise
+ *
+ * The parent buffer must outlive every lease. This API must not be mixed with
+ * iio_buffer_refill() on the same buffer. */
+__api __check_ret struct iio_buffer_block *
+iio_buffer_block_acquire(struct iio_buffer *buf);
+
+/** @brief Return the start address of a leased block. */
+__api __check_ret __pure void *
+iio_buffer_block_start(const struct iio_buffer_block *block);
+
+/** @brief Return the valid byte count in a leased block. */
+__api __check_ret __pure size_t
+iio_buffer_block_bytes_used(const struct iio_buffer_block *block);
+
+/** @brief Return a leased block to the capture engine. */
+__api __check_ret int
+iio_buffer_block_release(struct iio_buffer_block *block);
 
 /** @brief Refill an input buffer and return metadata associated with the
  * exact captured sample range.

@@ -71,6 +71,7 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token READ
 %token READBUF
 %token READBUFM
+%token READBUFMA
 %token READBUFMSTAT
 %token WRITEBUF
 %token WRITE
@@ -131,6 +132,7 @@ Line:
 		"\tREADBUF <device> <bytes_count>\n"
 		"\t\tRead raw data from the specified device\n"
 		"\tREADBUFM <device> <bytes_count> <metadata_capacity>\n"
+		"\tREADBUFMA <device> <bytes_count> <metadata_capacity> <frames>\n"
 		"\t\tRead raw data and its capture-associated metadata\n"
 		"\tREADBUFMSTAT <device> <status_capacity>\n"
 		"\t\tRead the open metadata buffer's provider status\n"
@@ -327,6 +329,23 @@ Line:
 		ssize_t ret = rw_dev_with_metadata(pdata, $3, nb, cap);
 		free(len);
 		free(metadata_capacity);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| READBUFMA SPACE DEVICE SPACE WORD SPACE WORD SPACE WORD END {
+		char *len = $5;
+		char *metadata_capacity = $7;
+		char *frames = $9;
+		unsigned long nb = strtoul(len, NULL, 10);
+		unsigned long cap = strtoul(metadata_capacity, NULL, 10);
+		unsigned long count = strtoul(frames, NULL, 10);
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = rw_dev_with_metadata_async(pdata, $3, nb, cap, count);
+		free(len);
+		free(metadata_capacity);
+		free(frames);
 		if (ret < 0)
 			YYABORT;
 		else

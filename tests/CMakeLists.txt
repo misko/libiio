@@ -44,6 +44,13 @@ target_include_directories(test_iiod_command_batch PRIVATE ..)
 add_executable(test_metadata_batch_core test_metadata_batch_core.c)
 target_include_directories(test_metadata_batch_core PRIVATE ..)
 target_link_libraries(test_metadata_batch_core iio)
+add_executable(test_buffer_block_lease test_buffer_block_lease.c)
+target_include_directories(test_buffer_block_lease PRIVATE ..)
+target_link_libraries(test_buffer_block_lease iio)
+add_executable(test_direct_async_transport test_direct_async_transport.c
+	../iiod-client.c ../iiod-command-batch.c ../lock.c ../utilities.c)
+target_include_directories(test_direct_async_transport PRIVATE ..)
+target_link_libraries(test_direct_async_transport iio)
 if((PTHREAD_LIBRARIES OR ANDROID) AND NOT WIN32 AND NOT NO_THREADS)
 	target_compile_definitions(test_metadata_batch_core PRIVATE
 		METADATA_BATCH_TEST_PTHREAD=1)
@@ -154,7 +161,8 @@ set_target_properties(${IIO_TESTS_TARGETS} iio_tests_helper PROPERTIES
 	C_STANDARD_REQUIRED ON
 	C_EXTENSIONS OFF
 )
-set_target_properties(test_iiod_command_batch test_metadata_batch_core PROPERTIES
+set_target_properties(test_iiod_command_batch test_metadata_batch_core
+	test_buffer_block_lease test_direct_async_transport PROPERTIES
 	C_STANDARD 99
 	C_STANDARD_REQUIRED ON
 	C_EXTENSIONS OFF

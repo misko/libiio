@@ -78,6 +78,11 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 	return READBUFM;
 }
 
+<INITIAL>READBUFMA|readbufma {
+	BEGIN(WANT_DEVICE);
+	return READBUFMA;
+}
+
 <INITIAL>READBUFMSTAT|readbufmstat {
 	BEGIN(WANT_DEVICE);
 	return READBUFMSTAT;

@@ -579,6 +579,21 @@ static ssize_t network_get_buffer_metadata_status(const struct iio_device *dev,
 	return ret;
 }
 
+static int network_prequeue_metadata_reads_async(const struct iio_device *dev,
+		size_t len, size_t metadata_capacity, unsigned int frames)
+{
+	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *pdata = dev->pdata;
+	int ret;
+
+	iio_mutex_lock(pdata->lock);
+	ret = iiod_client_prequeue_metadata_reads_async_unlocked(
+		ctx_pdata->iiod_client, &pdata->io_ctx, dev, len,
+		metadata_capacity, frames);
+	iio_mutex_unlock(pdata->lock);
+	return ret;
+}
+
 static ssize_t network_write(const struct iio_device *dev,
 		const void *src, size_t len)
 {
@@ -1122,6 +1137,7 @@ static const struct iio_backend_ops network_ops = {
 	.read_with_metadata = network_read_with_metadata,
 	.read_with_metadata_batch = network_read_with_metadata_batch,
 	.get_buffer_metadata_status = network_get_buffer_metadata_status,
+	.prequeue_metadata_reads_async = network_prequeue_metadata_reads_async,
 	.write = network_write,
 #ifdef WITH_NETWORK_GET_BUFFER
 	.get_buffer = network_get_buffer,
@@ -1451,7 +1467,7 @@ struct iio_context * network_create_context(const char *hostname)
 	 * with those corresponding to the network context */
 	ctx->name = "network";
 	ctx->ops = &network_ops;
-	ctx->backend_api_version = IIO_BACKEND_API_V5;
+	ctx->backend_api_version = IIO_BACKEND_API_V6;
 	ctx->pdata = pdata;
 
 	uri_len = strlen(description);

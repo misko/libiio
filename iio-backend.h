@@ -9,6 +9,7 @@
 #define __IIO_BACKEND_H__
 
 #include <stdbool.h>
+#include <stdint.h>
 
 struct iio_device;
 struct iio_context;
@@ -19,7 +20,16 @@ enum iio_backend_api_ver {
 	IIO_BACKEND_API_V3 = 3,
 	IIO_BACKEND_API_V4 = 4,
 	IIO_BACKEND_API_V5 = 5,
+	IIO_BACKEND_API_V6 = 6,
 };
+
+#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V6
+
+static inline bool iio_backend_api_version_supported(unsigned int version)
+{
+	return version >= IIO_BACKEND_API_V1 &&
+		version <= IIO_BACKEND_API_CURRENT;
+}
 
 enum iio_attr_type {
 	IIO_ATTR_TYPE_DEVICE = 0,
@@ -101,6 +111,18 @@ struct iio_backend_ops {
 	 * buffer without changing the refill stream. */
 	ssize_t (*get_buffer_metadata_status)(const struct iio_device *dev,
 			void *status, size_t status_capacity);
+
+	/* API v6: start one bounded asynchronous metadata capture. Responses
+	 * retain the ordinary READBUFM wire format. */
+	int (*prequeue_metadata_reads_async)(const struct iio_device *dev,
+			size_t len, size_t metadata_capacity,
+			unsigned int frames);
+
+	/* API v6: independently lease completed high-speed input blocks. */
+	int (*acquire_buffer_block)(const struct iio_device *dev,
+			void **addr, size_t *bytes_used, uintptr_t *token);
+	int (*release_buffer_block)(const struct iio_device *dev,
+			uintptr_t token, size_t bytes_used);
 };
 
 /**

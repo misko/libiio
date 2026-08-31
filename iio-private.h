@@ -212,7 +212,19 @@ struct iio_buffer {
 	size_t *metadata_batch_metadata_bytes;
 	unsigned int metadata_batch_cached_frames;
 	unsigned int metadata_batch_next_frame;
+	unsigned int metadata_direct_frames;
+	unsigned int metadata_direct_pending;
+	size_t metadata_direct_capacity;
+	uint32_t *metadata_direct_mask;
 	volatile long metadata_batch_failed;
+	bool block_lease_mode;
+};
+
+struct iio_buffer_block {
+	struct iio_buffer *buffer;
+	void *data;
+	size_t bytes_used;
+	uintptr_t backend_token;
 };
 
 struct iio_context_info {

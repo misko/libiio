@@ -142,7 +142,12 @@ static struct iio_buffer * create_buffer(const struct iio_device *dev,
 	buf->metadata_batch_metadata_bytes = NULL;
 	buf->metadata_batch_cached_frames = 0;
 	buf->metadata_batch_next_frame = 0;
+	buf->metadata_direct_frames = 0;
+	buf->metadata_direct_pending = 0;
+	buf->metadata_direct_capacity = 0;
+	buf->metadata_direct_mask = NULL;
 	buf->metadata_batch_failed = false;
+	buf->block_lease_mode = false;
 	return buf;
 
 err_close_device:
@@ -209,6 +214,8 @@ int iio_buffer_set_metadata_batch_size(struct iio_buffer *buffer,
 	if (buffer->metadata_batch_cached_frames !=
 			buffer->metadata_batch_next_frame)
 		return -EBUSY;
+	if (buffer->metadata_direct_frames)
+		return -EBUSY;
 
 	ops = buffer->dev->ctx->ops;
 	if (frames > 1 && (buffer->dev->ctx->backend_api_version <
@@ -223,6 +230,55 @@ int iio_buffer_set_metadata_batch_size(struct iio_buffer *buffer,
 	return 0;
 }
 
+int iio_buffer_set_metadata_read_prequeue_async(struct iio_buffer *buffer,
+		unsigned int frames, size_t metadata_capacity)
+{
+	const struct iio_backend_ops *ops;
+	const char *capability;
+	int ret;
+
+	if (!buffer || !buffer->metadata_enabled || !frames ||
+		!metadata_capacity)
+		return -EINVAL;
+	if (frames > IIO_BUFFER_METADATA_BATCH_MAX)
+		return -E2BIG;
+	if (metadata_batch_is_failed(buffer))
+		return -EBADF;
+	if (buffer->metadata_direct_frames || buffer->metadata_batch_size != 1 ||
+		buffer->metadata_batch_cached_frames !=
+			buffer->metadata_batch_next_frame)
+		return -EBUSY;
+
+	ops = buffer->dev->ctx->ops;
+	capability = iio_context_get_attr_value(buffer->dev->ctx,
+		"iio,buffer-direct-async");
+	if (!capability || strcmp(capability, "1"))
+		return -EPERM;
+	if (buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V6 ||
+		!ops->cancel || !ops->prequeue_metadata_reads_async ||
+		(buffer->dev_is_high_speed ?
+			!ops->get_buffer_with_metadata_batch :
+			!ops->read_with_metadata_batch))
+		return -ENOSYS;
+
+	buffer->metadata_direct_mask = malloc(buffer->dev->words *
+		sizeof(*buffer->metadata_direct_mask));
+	if (!buffer->metadata_direct_mask)
+		return -ENOMEM;
+	memcpy(buffer->metadata_direct_mask, buffer->mask,
+		buffer->dev->words * sizeof(*buffer->metadata_direct_mask));
+	buffer->metadata_direct_frames = frames;
+	buffer->metadata_direct_pending = frames;
+	buffer->metadata_direct_capacity = metadata_capacity;
+	ret = ops->prequeue_metadata_reads_async(buffer->dev, buffer->length,
+		metadata_capacity, frames);
+	if (ret < 0) {
+		fail_metadata_batch(buffer);
+		return ret;
+	}
+	return 0;
+}
+
 ssize_t iio_buffer_get_metadata_status(struct iio_buffer *buffer,
 		void *status, size_t status_capacity)
 {
@@ -232,6 +288,8 @@ ssize_t iio_buffer_get_metadata_status(struct iio_buffer *buffer,
 		return -EINVAL;
 	if (!buffer->metadata_enabled)
 		return -EINVAL;
+	if (buffer->metadata_direct_pending)
+		return -EBUSY;
 	ops = buffer->dev->ctx->ops;
 	if (buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V5 ||
 		!ops->get_buffer_metadata_status)
@@ -242,8 +300,12 @@ ssize_t iio_buffer_get_metadata_status(struct iio_buffer *buffer,
 
 void iio_buffer_destroy(struct iio_buffer *buffer)
 {
+	if (buffer->metadata_direct_pending &&
+		!metadata_batch_is_failed(buffer))
+		fail_metadata_batch(buffer);
 	iio_device_close(buffer->dev);
 	free_metadata_batch_cache(buffer);
+	free(buffer->metadata_direct_mask);
 	if (!buffer->dev_is_high_speed)
 		free(buffer->buffer);
 	free(buffer->mask);
@@ -265,6 +327,8 @@ ssize_t iio_buffer_refill(struct iio_buffer *buffer)
 	ssize_t read;
 	const struct iio_device *dev = buffer->dev;
 	ssize_t ret;
+	if (buffer->block_lease_mode)
+		return -EBUSY;
 	if (buffer->metadata_enabled)
 		return -EINVAL;
 
@@ -284,6 +348,71 @@ ssize_t iio_buffer_refill(struct iio_buffer *buffer)
 		buffer->sample_size = (unsigned int)ret;
 	}
 	return read;
+}
+
+struct iio_buffer_block *iio_buffer_block_acquire(struct iio_buffer *buffer)
+{
+	const struct iio_backend_ops *ops;
+	struct iio_buffer_block *block;
+	int ret;
+
+	if (!buffer) {
+		errno = EINVAL;
+		return NULL;
+	}
+	ops = buffer->dev->ctx->ops;
+	if (!buffer->dev_is_high_speed ||
+		buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V6 ||
+		!ops->acquire_buffer_block || !ops->release_buffer_block) {
+		errno = ENOSYS;
+		return NULL;
+	}
+	block = calloc(1, sizeof(*block));
+	if (!block) {
+		errno = ENOMEM;
+		return NULL;
+	}
+	ret = ops->acquire_buffer_block(buffer->dev, &block->data,
+		&block->bytes_used, &block->backend_token);
+	if (ret < 0) {
+		free(block);
+		errno = -ret;
+		return NULL;
+	}
+	block->buffer = buffer;
+	buffer->buffer = block->data;
+	buffer->data_length = block->bytes_used;
+	buffer->block_lease_mode = true;
+	return block;
+}
+
+void *iio_buffer_block_start(const struct iio_buffer_block *block)
+{
+	return block ? block->data : NULL;
+}
+
+size_t iio_buffer_block_bytes_used(const struct iio_buffer_block *block)
+{
+	return block ? block->bytes_used : 0;
+}
+
+int iio_buffer_block_release(struct iio_buffer_block *block)
+{
+	struct iio_buffer *buffer;
+	const struct iio_backend_ops *ops;
+	int ret;
+
+	if (!block || !block->buffer)
+		return -EINVAL;
+	buffer = block->buffer;
+	ops = buffer->dev->ctx->ops;
+	ret = ops->release_buffer_block(buffer->dev, block->backend_token,
+		block->bytes_used);
+	if (ret < 0)
+		return ret;
+	block->buffer = NULL;
+	free(block);
+	return 0;
 }
 
 ssize_t iio_buffer_refill_with_metadata(struct iio_buffer *buffer,
@@ -307,6 +436,36 @@ ssize_t iio_buffer_refill_with_metadata(struct iio_buffer *buffer,
 	if (metadata_batch_is_failed(buffer)) {
 		free_metadata_batch_cache(buffer);
 		return -EBADF;
+	}
+	if (buffer->metadata_direct_frames) {
+		if (!buffer->metadata_direct_pending)
+			return -ENODATA;
+		if (metadata_capacity != buffer->metadata_direct_capacity ||
+			memcmp(buffer->mask, buffer->metadata_direct_mask,
+				dev->words * sizeof(*buffer->mask))) {
+			fail_metadata_batch(buffer);
+			return -EINVAL;
+		}
+		if (buffer->dev_is_high_speed)
+			read = ops->get_buffer_with_metadata_batch(dev,
+				&buffer->buffer, buffer->length, buffer->mask,
+				dev->words, metadata, metadata_capacity,
+				metadata_bytes, 0);
+		else
+			read = ops->read_with_metadata_batch(dev, buffer->buffer,
+				buffer->length, buffer->mask, dev->words, metadata,
+				metadata_capacity, metadata_bytes, 0);
+		if (read <= 0 || (size_t)read != buffer->length ||
+			!*metadata_bytes || *metadata_bytes > metadata_capacity ||
+			memcmp(buffer->mask, buffer->metadata_direct_mask,
+				dev->words * sizeof(*buffer->mask))) {
+			ret = read < 0 ? read : -EIO;
+			*metadata_bytes = 0;
+			fail_metadata_batch(buffer);
+			return ret;
+		}
+		buffer->metadata_direct_pending--;
+		goto update_buffer;
 	}
 
 	if (buffer->metadata_batch_cached_frames !=

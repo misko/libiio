@@ -36,6 +36,7 @@ from ctypes import (
 )
 from ctypes.util import find_library
 from enum import Enum
+from errno import ENOSYS as _ENOSYS
 from os import strerror as _strerror
 from platform import system as _system
 import abc
@@ -641,6 +642,21 @@ _buffer_set_metadata_batch_size.restype = c_int
 _buffer_set_metadata_batch_size.argtypes = (_BufferPtr, c_uint)
 _buffer_set_metadata_batch_size.errcheck = _check_negative
 
+try:
+    _buffer_set_metadata_read_prequeue_async = (
+        _lib.iio_buffer_set_metadata_read_prequeue_async
+    )
+except AttributeError:
+    _buffer_set_metadata_read_prequeue_async = None
+else:
+    _buffer_set_metadata_read_prequeue_async.restype = c_int
+    _buffer_set_metadata_read_prequeue_async.argtypes = (
+        _BufferPtr,
+        c_uint,
+        c_size_t,
+    )
+    _buffer_set_metadata_read_prequeue_async.errcheck = _check_negative
+
 _buffer_get_metadata_status = _lib.iio_buffer_get_metadata_status
 _buffer_get_metadata_status.restype = c_ssize_t
 _buffer_get_metadata_status.argtypes = (_BufferPtr, c_void_p, c_size_t)
@@ -1150,6 +1166,7 @@ class MetadataBuffer(Buffer):
         ddr_ring_bytes=0,
         ddr_ring_frames=0,
         ddr_ring_continuous=False,
+        direct_async_frames=0,
     ):
         self._buffer = None
         if metadata_capacity <= 0:
@@ -1158,6 +1175,14 @@ class MetadataBuffer(Buffer):
             raise TypeError("batch_frames must be an integer")
         if not 1 <= batch_frames <= 64:
             raise ValueError("batch_frames must be in [1, 64]")
+        if isinstance(direct_async_frames, bool) or not isinstance(
+            direct_async_frames, int
+        ):
+            raise TypeError("direct_async_frames must be an integer")
+        if not 0 <= direct_async_frames <= 64:
+            raise ValueError("direct_async_frames must be in [0, 64]")
+        if direct_async_frames and batch_frames != 1:
+            raise ValueError("direct async capture requires batch_frames=1")
         batch_cache_bytes = 0
         if batch_frames > 1:
             batch_cache_bytes = batch_frames * (
@@ -1188,6 +1213,8 @@ class MetadataBuffer(Buffer):
             raise ValueError("DDR ring values must not be negative")
         if ddr_burst_bytes and ddr_ring_bytes:
             raise ValueError("DDR burst and DDR ring are mutually exclusive")
+        if direct_async_frames and (ddr_burst_bytes or ddr_ring_bytes):
+            raise ValueError("direct async capture requires the DDR/RAM ring off")
         if ddr_ring_bytes and batch_frames != 1:
             raise ValueError("device DDR ring requires batch_frames=1")
         if ddr_ring_bytes:
@@ -1211,6 +1238,15 @@ class MetadataBuffer(Buffer):
         ddr_burst_admitted_bytes = 0
         ddr_ring_admitted_bytes = 0
         ddr_ring_capacity_frames = 0
+        if direct_async_frames:
+            if _buffer_set_metadata_read_prequeue_async is None:
+                raise OSError(
+                    _ENOSYS,
+                    "loaded libiio does not support direct async capture",
+                )
+            context_attrs = getattr(getattr(device, "_ctx", None), "attrs", {})
+            if context_attrs.get("iio,buffer-direct-async") != "1":
+                raise OSError("IIO context does not advertise direct async capture")
         if ddr_burst_bytes:
             context_attrs = getattr(getattr(device, "_ctx", None), "attrs", {})
             if context_attrs.get("iio,buffer-ddr-burst") != "1":
@@ -1281,6 +1317,12 @@ class MetadataBuffer(Buffer):
                 device._device, samples_count, request_storage, len(request)
             )
             _buffer_set_metadata_batch_size(self._buffer, batch_frames)
+            if direct_async_frames:
+                _buffer_set_metadata_read_prequeue_async(
+                    self._buffer,
+                    direct_async_frames,
+                    int(metadata_capacity),
+                )
         except Exception:
             if self._buffer is not None:
                 _buffer_destroy(self._buffer)
@@ -1291,6 +1333,7 @@ class MetadataBuffer(Buffer):
         self._metadata_capacity = int(metadata_capacity)
         self._batch_frames = batch_frames
         self._batch_cache_bytes = batch_cache_bytes
+        self._direct_async_frames = direct_async_frames
         self._ddr_burst_requested_bytes = ddr_burst_bytes
         self._ddr_burst_admitted_bytes = ddr_burst_admitted_bytes
         self._ddr_burst_frames = ddr_burst_frames
@@ -1334,6 +1377,11 @@ class MetadataBuffer(Buffer):
     def batch_cache_bytes(self):
         """Configured retained-cache bound (zero when batching is disabled)."""
         return self._batch_cache_bytes
+
+    @property
+    def direct_async_frames(self):
+        """Finite DMA-to-network frame count, or zero when disabled."""
+        return self._direct_async_frames
 
     @property
     def ddr_burst_enabled(self):

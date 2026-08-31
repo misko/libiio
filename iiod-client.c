@@ -892,6 +892,30 @@ ssize_t iiod_client_read_with_metadata_batch_unlocked(
 		dst, len, mask, words, metadata, metadata_capacity, metadata_bytes);
 }
 
+int iiod_client_prequeue_metadata_reads_async_unlocked(
+		struct iiod_client *client, struct iiod_client_pdata *desc,
+		const struct iio_device *dev, size_t len,
+		size_t metadata_capacity, unsigned int frames)
+{
+	char command[1024];
+	ssize_t ret;
+
+	if (!client || !desc || !dev || !len || !metadata_capacity || !frames)
+		return -EINVAL;
+	if (frames > IIO_BUFFER_METADATA_BATCH_MAX)
+		return -E2BIG;
+	if ((size_t)(unsigned long)len != len ||
+		(size_t)(unsigned long)metadata_capacity != metadata_capacity)
+		return -E2BIG;
+	ret = iio_snprintf(command, sizeof(command),
+		"READBUFMA %s %lu %lu %u\r\n", iio_device_get_id(dev),
+		(unsigned long)len, (unsigned long)metadata_capacity, frames);
+	if (ret < 0)
+		return (int)ret;
+	ret = iiod_client_write_all(client, desc, command, strlen(command));
+	return ret < 0 ? (int)ret : 0;
+}
+
 ssize_t iiod_client_read_with_metadata_unlocked(
 		struct iiod_client *client, struct iiod_client_pdata *desc,
 		const struct iio_device *dev, void *dst, size_t len,

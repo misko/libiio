@@ -14,6 +14,10 @@ class FakeDevice:
     sample_size = 8
 
 
+class DirectAsyncFakeDevice(FakeDevice):
+    _ctx = SimpleNamespace(attrs={"iio,buffer-direct-async": "1"})
+
+
 class BurstFakeDevice(FakeDevice):
     _ctx = SimpleNamespace(
         attrs={
@@ -71,6 +75,7 @@ def test_batch_one_preserves_uncached_behavior(monkeypatch):
     )
     assert buffer.batch_frames == 1
     assert buffer.batch_cache_bytes == 0
+    assert buffer.direct_async_frames == 0
     assert buffer.ddr_burst_enabled is False
     assert buffer.ddr_burst_requested_bytes == 0
     assert buffer.ddr_burst_admitted_bytes == 0
@@ -82,6 +87,77 @@ def test_batch_one_preserves_uncached_behavior(monkeypatch):
     assert buffer.ddr_ring_capture_frames == 0
     assert buffer.ddr_ring_continuous is False
     buffer.close()
+
+
+def test_direct_async_configures_one_finite_capture(monkeypatch):
+    created = object()
+    configured = []
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: created)
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(
+        iio,
+        "_buffer_set_metadata_read_prequeue_async",
+        lambda *args: configured.append(args),
+    )
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+
+    buffer = iio.MetadataBuffer(
+        DirectAsyncFakeDevice(),
+        1024,
+        b"provider",
+        metadata_capacity=32768,
+        direct_async_frames=23,
+    )
+
+    assert configured == [(created, 23, 32768)]
+    assert buffer.direct_async_frames == 23
+    assert buffer.ddr_burst_enabled is False
+    assert buffer.ddr_ring_enabled is False
+    buffer.close()
+
+
+def test_direct_async_validation_precedes_creation(monkeypatch):
+    monkeypatch.setattr(iio, "_buffer_set_metadata_read_prequeue_async", lambda *a: 0)
+    monkeypatch.setattr(
+        iio,
+        "_create_buffer_with_metadata",
+        lambda *args: pytest.fail("validation must happen before buffer creation"),
+    )
+    with pytest.raises(OSError, match="does not advertise"):
+        iio.MetadataBuffer(FakeDevice(), 1024, b"provider", direct_async_frames=2)
+    with pytest.raises(ValueError, match="batch_frames=1"):
+        iio.MetadataBuffer(
+            DirectAsyncFakeDevice(),
+            1024,
+            b"provider",
+            batch_frames=2,
+            direct_async_frames=2,
+        )
+    with pytest.raises(ValueError, match="DDR/RAM ring off"):
+        iio.MetadataBuffer(
+            DirectAsyncFakeDevice(),
+            1024,
+            b"provider",
+            ddr_ring_bytes=8192,
+            ddr_ring_frames=1,
+            direct_async_frames=2,
+        )
+
+
+@pytest.mark.parametrize("frames", [True, 1.5, "2"])
+def test_direct_async_frame_type_is_exact(monkeypatch, frames):
+    monkeypatch.setattr(
+        iio,
+        "_create_buffer_with_metadata",
+        lambda *args: pytest.fail("validation must happen before buffer creation"),
+    )
+    with pytest.raises(TypeError):
+        iio.MetadataBuffer(
+            DirectAsyncFakeDevice(),
+            1024,
+            b"provider",
+            direct_async_frames=frames,
+        )
 
 
 def test_device_ddr_burst_appends_versioned_request(monkeypatch):
