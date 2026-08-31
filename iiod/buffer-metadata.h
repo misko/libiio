@@ -18,6 +18,12 @@ struct iiod_buffer_burst_plan {
 	size_t metadata_capacity;
 };
 
+struct iiod_buffer_metadata_frame_info {
+	uint64_t first_sample_sequence;
+	uint64_t frame_end;
+	uint64_t missing_samples_before;
+};
+
 /*
  * Firmware may replace the default implementation at build time. Requests and
  * records are deliberately opaque to iiOD: the provider alone owns their
@@ -47,5 +53,13 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		const struct iio_device *dev, const struct iio_buffer *buffer,
 		size_t raw_bytes, void *metadata, size_t metadata_capacity,
 		size_t *iq_offset, size_t *iq_bytes);
+/* Describe and, when backlog eviction requires it, rebase one provider-owned
+ * exact-gap record. These hooks keep metadata parsing out of the transport. */
+int iiod_buffer_metadata_describe_frame(void *provider_context,
+		const void *metadata, size_t metadata_bytes,
+		struct iiod_buffer_metadata_frame_info *info);
+int iiod_buffer_metadata_rebase_frame(void *provider_context,
+		void *metadata, size_t metadata_bytes,
+		uint64_t previous_frame_end);
 
 #endif

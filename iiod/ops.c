@@ -117,6 +117,7 @@ struct iiod_ddr_ring {
 
 struct iiod_direct_async_frame {
 	struct iio_buffer_block *block;
+	uint64_t frame_end;
 	size_t metadata_bytes;
 	size_t iq_offset;
 	size_t iq_bytes;
@@ -138,11 +139,17 @@ struct iiod_direct_async {
 	uint64_t target_frames;
 	uint64_t produced_frames;
 	uint64_t consumed_frames;
+	uint64_t dropped_frames;
+	uint64_t flush_events;
+	uint64_t last_consumed_frame_end;
 	int error;
+	enum iio_buffer_metadata_overrun_policy overrun_policy;
 	bool requested;
 	bool producer_started;
 	bool producer_exited;
 	bool cancelled;
+	bool consumer_active;
+	bool last_consumed_frame_valid;
 };
 
 enum iiod_timing_stage {
@@ -674,14 +681,17 @@ static void direct_async_release_storage(struct iiod_direct_async *direct)
 
 static int direct_async_prepare(struct iiod_direct_async *direct,
 		unsigned int dma_capacity, size_t ram_capacity,
-		size_t metadata_capacity, unsigned int target_frames)
+		size_t metadata_capacity, unsigned int target_frames,
+		enum iio_buffer_metadata_overrun_policy overrun_policy)
 {
 	size_t capacity, metadata_bytes, useful_ram;
 
 	if (!direct || dma_capacity < 2U ||
 		(ram_capacity && dma_capacity < 3U) ||
 		!metadata_capacity || !target_frames ||
-		metadata_capacity > IIOD_MAX_BUFFER_METADATA_BYTES)
+		metadata_capacity > IIOD_MAX_BUFFER_METADATA_BYTES ||
+		(overrun_policy != IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG &&
+		 overrun_policy != IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG))
 		return -EINVAL;
 	if (direct->requested)
 		return -EBUSY;
@@ -710,6 +720,7 @@ static int direct_async_prepare(struct iiod_direct_async *direct,
 	direct->capacity = capacity;
 	direct->dma_capacity = dma_capacity;
 	direct->target_frames = target_frames;
+	direct->overrun_policy = overrun_policy;
 	direct->requested = true;
 	return 0;
 }
@@ -755,6 +766,90 @@ struct DevEntry {
 	uint32_t *mask;
 	size_t nb_words;
 };
+
+/* Drop only frames that have not entered transport. ring_lock must be held.
+ * The active head, including an active RAM-ring reservation, stays in place. */
+static int direct_async_drop_pending(struct DevEntry *entry)
+{
+	struct iiod_direct_async *direct = &entry->direct;
+	struct iiod_ddr_ring *ring = &entry->ring;
+	uint64_t dropped = 0, ring_dropped = 0;
+	size_t pending, position, keep, expected_ring_slot = 0, i;
+	bool active_ring;
+	int ret;
+
+	keep = direct->consumer_active ? 1U : 0U;
+	if (direct->count < keep)
+		return -EIO;
+	active_ring = keep && direct->frames[direct->head].ring_backed;
+	if (ring->direct_extension &&
+			ring->core.consumer_reserved != active_ring)
+		return -EIO;
+	if (ring->direct_extension) {
+		expected_ring_slot = ring->core.consumer_position;
+		if (active_ring && ++expected_ring_slot == ring->core.slot_count)
+			expected_ring_slot = 0;
+	}
+	pending = direct->count - keep;
+	position = (direct->head + keep) % direct->capacity;
+	for (i = 0; i < pending; i++) {
+		struct iiod_direct_async_frame *frame =
+			&direct->frames[position];
+
+		if (frame->ring_backed) {
+			if (!ring->direct_extension ||
+					frame->ring_slot != expected_ring_slot)
+				return -EIO;
+			ring_dropped++;
+			if (++expected_ring_slot == ring->core.slot_count)
+				expected_ring_slot = 0;
+		} else if (!frame->block) {
+			return -EIO;
+		}
+		position = (position + 1U) % direct->capacity;
+	}
+	if (ring_dropped) {
+		uint64_t core_dropped = 0;
+
+		ret = iiod_ddr_ring_core_discard_pending(&ring->core,
+			&core_dropped);
+		if (ret)
+			return ret;
+		if (core_dropped != ring_dropped)
+			return -EIO;
+	}
+	position = (direct->head + keep) % direct->capacity;
+	for (i = 0; i < pending; i++) {
+		struct iiod_direct_async_frame *frame =
+			&direct->frames[position];
+
+		if (!frame->ring_backed) {
+			if (!frame->block)
+				return -EIO;
+			ret = iio_buffer_block_release(frame->block);
+			if (ret)
+				return ret;
+			direct->dma_count--;
+		}
+		memset(frame, 0, sizeof(*frame));
+		position = (position + 1U) % direct->capacity;
+		direct->dropped_frames++;
+		dropped++;
+	}
+	direct->count = keep;
+	direct->tail = (direct->head + keep) % direct->capacity;
+	if (!keep)
+		direct->head = direct->tail;
+	if (dropped) {
+		direct->flush_events++;
+		IIO_WARNING("Direct async overrun: dropped %llu queued frames "
+			"(event=%llu total=%llu)\n",
+			(unsigned long long)dropped,
+			(unsigned long long)direct->flush_events,
+			(unsigned long long)direct->dropped_frames);
+	}
+	return 0;
+}
 
 static inline const char *dev_label_or_name_or_id(const struct iio_device *dev);
 
@@ -1655,6 +1750,7 @@ static ssize_t send_direct_async_data(struct DevEntry *entry,
 	struct iio_buffer_block *block = NULL;
 	void *metadata;
 	void *iq;
+	uint64_t frame_end;
 	size_t iq_bytes, ring_slot = 0, slot;
 	bool ring_backed;
 	ssize_t ret;
@@ -1683,6 +1779,7 @@ static ssize_t send_direct_async_data(struct DevEntry *entry,
 		return -ENOSPC;
 	}
 	iq_bytes = frame->iq_bytes;
+	frame_end = frame->frame_end;
 	metadata = direct_async_metadata_slot(direct, slot);
 	if (ring_backed) {
 		ret = iiod_ddr_ring_core_consumer_reserve(&ring->core, &ring_slot);
@@ -1702,6 +1799,7 @@ static ssize_t send_direct_async_data(struct DevEntry *entry,
 		block = frame->block;
 		iq = (uint8_t *)iio_buffer_block_start(block) + frame->iq_offset;
 	}
+	direct->consumer_active = true;
 	pthread_mutex_unlock(&entry->ring_lock);
 
 	print_value(pdata, frame->iq_bytes);
@@ -1740,21 +1838,25 @@ complete:
 	if (!ring_backed)
 		release_ret = iio_buffer_block_release(block);
 	pthread_mutex_lock(&entry->ring_lock);
+	direct->consumer_active = false;
 	if (ring_backed)
 		release_ret = iiod_ddr_ring_core_consumer_release(&ring->core);
 	if (ret >= 0 && release_ret < 0)
 		ret = release_ret;
 	/* A failed DMA release keeps the lease reachable for teardown retry. */
 	if (!release_ret) {
-		frame->block = NULL;
-		frame->ring_backed = false;
-		frame->ring_slot = 0;
+		memset(frame, 0, sizeof(*frame));
 		if (!ring_backed)
 			direct->dma_count--;
 	}
 	direct->head = (direct->head + 1U) % direct->capacity;
 	direct->count--;
 	direct->consumed_frames++;
+	if (ret >= 0 && direct->overrun_policy ==
+			IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG) {
+		direct->last_consumed_frame_end = frame_end;
+		direct->last_consumed_frame_valid = true;
+	}
 	if (ret < 0) {
 		direct->error = (int)ret;
 		direct->cancelled = true;
@@ -1852,6 +1954,7 @@ static void direct_async_producer_thd(struct thread_pool *pool, void *data)
 
 	while (!thread_pool_is_stopped(pool)) {
 		struct iiod_direct_async_frame *frame;
+		struct iiod_buffer_metadata_frame_info frame_info = {0};
 		struct iio_buffer_block *block = NULL;
 		ssize_t metadata_len = 0;
 		size_t iq_offset = 0;
@@ -1863,8 +1966,9 @@ static void direct_async_producer_thd(struct thread_pool *pool, void *data)
 		pthread_mutex_lock(&entry->ring_lock);
 		while (!direct->cancelled && direct->count == direct->capacity)
 			pthread_cond_wait(&entry->ring_ready_cond, &entry->ring_lock);
-		if (direct->cancelled ||
-			direct->produced_frames >= direct->target_frames) {
+		if (direct->cancelled || direct->consumed_frames >=
+				direct->target_frames || direct->count >=
+				direct->target_frames - direct->consumed_frames) {
 			pthread_mutex_unlock(&entry->ring_lock);
 			break;
 		}
@@ -1906,14 +2010,68 @@ static void direct_async_producer_thd(struct thread_pool *pool, void *data)
 			error = -EIO;
 			goto release_block;
 		}
+		if (direct->overrun_policy ==
+				IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG) {
+			ret = iiod_buffer_metadata_describe_frame(
+				entry->metadata_provider_context,
+				direct_async_metadata_slot(direct, slot),
+				(size_t)metadata_len, &frame_info);
+			if (ret) {
+				error = ret;
+				goto release_block;
+			}
+		}
 
 		pthread_mutex_lock(&entry->ring_lock);
 		if (direct->cancelled) {
 			pthread_mutex_unlock(&entry->ring_lock);
 			goto release_block;
 		}
+		if (direct->overrun_policy ==
+				IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG &&
+				frame_info.missing_samples_before) {
+			ret = direct_async_drop_pending(entry);
+			if (ret) {
+				error = ret;
+				pthread_mutex_unlock(&entry->ring_lock);
+				goto release_block;
+			}
+			if (slot != direct->tail) {
+				memcpy(direct_async_metadata_slot(direct, direct->tail),
+					direct_async_metadata_slot(direct, slot),
+					(size_t)metadata_len);
+				slot = direct->tail;
+			}
+			if (direct->consumer_active) {
+				struct iiod_direct_async_frame *active =
+					&direct->frames[direct->head];
+
+				ret = iiod_buffer_metadata_rebase_frame(
+					entry->metadata_provider_context,
+					direct_async_metadata_slot(direct, slot),
+					(size_t)metadata_len,
+					active->frame_end);
+				if (ret) {
+					error = ret;
+					pthread_mutex_unlock(&entry->ring_lock);
+					goto release_block;
+				}
+			} else if (direct->last_consumed_frame_valid) {
+				ret = iiod_buffer_metadata_rebase_frame(
+					entry->metadata_provider_context,
+					direct_async_metadata_slot(direct, slot),
+					(size_t)metadata_len,
+					direct->last_consumed_frame_end);
+				if (ret) {
+					error = ret;
+					pthread_mutex_unlock(&entry->ring_lock);
+					goto release_block;
+				}
+			}
+		}
 		frame = &direct->frames[slot];
 		frame->block = block;
+		frame->frame_end = frame_info.frame_end;
 		frame->metadata_bytes = (size_t)metadata_len;
 		frame->iq_offset = iq_offset;
 		frame->iq_bytes = iq_bytes;
@@ -2708,7 +2866,8 @@ static struct ThdEntry *parser_lookup_thd_entry(struct parser_pdata *pdata,
 
 static ssize_t rw_buffer(struct parser_pdata *pdata,
 		struct iio_device *dev, unsigned int nb, bool is_write,
-		unsigned int metadata_capacity, unsigned int async_frames)
+		unsigned int metadata_capacity, unsigned int async_frames,
+		enum iio_buffer_metadata_overrun_policy overrun_policy)
 {
 	struct DevEntry *entry;
 	struct ThdEntry *thd;
@@ -2754,7 +2913,7 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 		ret = direct_async_prepare(&entry->direct,
 			iio_device_get_kernel_buffers_count(dev),
 			ring_extension ? entry->ring.core.slot_count : 0U,
-			metadata_capacity, async_frames);
+			metadata_capacity, async_frames, overrun_policy);
 		if (ret) {
 			pthread_mutex_unlock(&entry->thdlist_lock);
 			return ret;
@@ -3230,7 +3389,8 @@ int close_dev(struct parser_pdata *pdata, struct iio_device *dev)
 ssize_t rw_dev(struct parser_pdata *pdata, struct iio_device *dev,
 		unsigned int nb, bool is_write)
 {
-	ssize_t ret = rw_buffer(pdata, dev, nb, is_write, 0, 0);
+	ssize_t ret = rw_buffer(pdata, dev, nb, is_write, 0, 0,
+		IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG);
 	if (ret <= 0 || is_write)
 		print_value(pdata, ret);
 	return ret;
@@ -3244,7 +3404,8 @@ ssize_t rw_dev_with_metadata(struct parser_pdata *pdata,
 		ret = -EOVERFLOW;
 	else
 		ret = rw_buffer(pdata, dev, (unsigned int)nb, false,
-				(unsigned int)metadata_capacity, 0);
+				(unsigned int)metadata_capacity, 0,
+				IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG);
 	if (ret <= 0)
 		print_value(pdata, ret);
 	return ret;
@@ -3252,18 +3413,23 @@ ssize_t rw_dev_with_metadata(struct parser_pdata *pdata,
 
 ssize_t rw_dev_with_metadata_async(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t nb, size_t metadata_capacity,
-		size_t frames)
+		size_t frames,
+		enum iio_buffer_metadata_overrun_policy overrun_policy)
 {
 	ssize_t ret;
 
-	if (!frames)
+	if (!frames ||
+			(overrun_policy !=
+			 IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG &&
+			 overrun_policy != IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG))
 		ret = -EINVAL;
 	else if (nb > UINT_MAX || metadata_capacity > UINT_MAX ||
 			frames > UINT_MAX)
 		ret = -EOVERFLOW;
 	else
 		ret = rw_buffer(pdata, dev, (unsigned int)nb, false,
-			(unsigned int)metadata_capacity, (unsigned int)frames);
+			(unsigned int)metadata_capacity, (unsigned int)frames,
+			overrun_policy);
 	if (ret <= 0)
 		print_value(pdata, ret);
 	return ret;

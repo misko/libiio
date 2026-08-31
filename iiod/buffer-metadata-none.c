@@ -70,3 +70,25 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	(void)iq_bytes;
 	return -ENOSYS;
 }
+
+int iiod_buffer_metadata_describe_frame(void *provider_context,
+		const void *metadata, size_t metadata_bytes,
+		struct iiod_buffer_metadata_frame_info *info)
+{
+	(void)provider_context;
+	(void)metadata;
+	(void)metadata_bytes;
+	(void)info;
+	return -ENOSYS;
+}
+
+int iiod_buffer_metadata_rebase_frame(void *provider_context,
+		void *metadata, size_t metadata_bytes,
+		uint64_t previous_frame_end)
+{
+	(void)provider_context;
+	(void)metadata;
+	(void)metadata_bytes;
+	(void)previous_frame_end;
+	return -ENOSYS;
+}

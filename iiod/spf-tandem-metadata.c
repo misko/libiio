@@ -175,3 +175,33 @@ bool spf_radio_frame_v6_build(void *destination, size_t destination_bytes,
 	*crc = spf_gain_meta_crc32(destination, v6_bytes);
 	return true;
 }
+
+bool spf_radio_frame_v6_rebase_gap(void *metadata, size_t metadata_bytes,
+		uint64_t previous_frame_end)
+{
+	spf_radio_meta_v3_prefix_t *header = metadata;
+	uint64_t missing;
+	uint32_t *crc;
+
+	if (!metadata || metadata_bytes < sizeof(*header) + sizeof(uint32_t) ||
+			header->magic != SPF_GAIN_META_MAGIC ||
+			header->version != SPF_GAIN_META_VERSION_V6 ||
+			header->header_bytes != metadata_bytes ||
+			(header->features & SPF_META_FEATURE_EXACT_GAP_ACCOUNTING) == 0 ||
+			header->first_sample_sequence < previous_frame_end)
+		return false;
+	missing = header->first_sample_sequence - previous_frame_end;
+	header->reserved1 = (uint32_t)missing;
+	header->reserved2 = (uint32_t)(missing >> 32);
+	if (missing) {
+		header->flags |= SPF_META_DEVICE_IIO_OVERFLOW;
+		header->flags |= SPF_META_SAMPLE_GAP_BEFORE;
+	} else {
+		header->flags &= ~SPF_META_DEVICE_IIO_OVERFLOW;
+		header->flags &= ~SPF_META_SAMPLE_GAP_BEFORE;
+	}
+	crc = (uint32_t *)((uint8_t *)metadata + metadata_bytes - sizeof(*crc));
+	*crc = 0;
+	*crc = spf_gain_meta_crc32(metadata, metadata_bytes);
+	return true;
+}

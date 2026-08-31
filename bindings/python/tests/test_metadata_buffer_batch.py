@@ -15,7 +15,14 @@ class FakeDevice:
 
 
 class DirectAsyncFakeDevice(FakeDevice):
-    _ctx = SimpleNamespace(attrs={"iio,buffer-direct-async": "1"})
+    _ctx = SimpleNamespace(
+        attrs={
+            "iio,buffer-direct-async": "1",
+            "iio,buffer-direct-async-overrun-policies": (
+                "drop-backlog,preserve-backlog"
+            ),
+        }
+    )
 
 
 class BurstFakeDevice(FakeDevice):
@@ -43,6 +50,9 @@ class DirectRingFakeDevice(RingFakeDevice):
             **RingFakeDevice._ctx.attrs,
             "iio,buffer-direct-async": "1",
             "iio,buffer-direct-async-ring": "1",
+            "iio,buffer-direct-async-overrun-policies": (
+                "drop-backlog,preserve-backlog"
+            ),
         }
     )
 
@@ -107,7 +117,7 @@ def test_direct_async_configures_one_finite_capture(monkeypatch):
     monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
     monkeypatch.setattr(
         iio,
-        "_buffer_set_metadata_read_prequeue_async",
+        "_buffer_set_metadata_read_prequeue_async_policy",
         lambda *args: configured.append(args),
     )
     monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
@@ -120,16 +130,19 @@ def test_direct_async_configures_one_finite_capture(monkeypatch):
         direct_async_frames=250,
     )
 
-    assert configured == [(created, 250, 32768)]
+    assert configured == [(created, 250, 32768, 1)]
     assert buffer.direct_async_frames == 250
     assert buffer.direct_async_ring_extension is False
+    assert buffer.drop_backlog_on_overrun is True
     assert buffer.ddr_burst_enabled is False
     assert buffer.ddr_ring_enabled is False
     buffer.close()
 
 
 def test_direct_async_validation_precedes_creation(monkeypatch):
-    monkeypatch.setattr(iio, "_buffer_set_metadata_read_prequeue_async", lambda *a: 0)
+    monkeypatch.setattr(
+        iio, "_buffer_set_metadata_read_prequeue_async_policy", lambda *a: 0
+    )
     monkeypatch.setattr(
         iio,
         "_create_buffer_with_metadata",
@@ -176,7 +189,7 @@ def test_direct_async_ram_ring_extends_the_dma_queue(monkeypatch):
     monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
     monkeypatch.setattr(
         iio,
-        "_buffer_set_metadata_read_prequeue_async",
+        "_buffer_set_metadata_read_prequeue_async_policy",
         lambda *args: direct_calls.append(args),
     )
     monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
@@ -190,7 +203,7 @@ def test_direct_async_ram_ring_extends_the_dma_queue(monkeypatch):
         ddr_ring_bytes=32769,
     )
 
-    assert direct_calls == [(created, 23, 32768)]
+    assert direct_calls == [(created, 23, 32768, 1)]
     assert buffer.direct_async_frames == 23
     assert buffer.direct_async_ring_extension is True
     assert buffer.ddr_ring_capacity_frames == 4
@@ -207,6 +220,31 @@ def test_direct_async_ram_ring_extends_the_dma_queue(monkeypatch):
         0,
         0,
     )
+    buffer.close()
+
+
+def test_direct_async_can_preserve_backlog_explicitly(monkeypatch):
+    created = object()
+    configured = []
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: created)
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(
+        iio,
+        "_buffer_set_metadata_read_prequeue_async_policy",
+        lambda *args: configured.append(args),
+    )
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+
+    buffer = iio.MetadataBuffer(
+        DirectAsyncFakeDevice(),
+        1024,
+        b"provider",
+        direct_async_frames=2,
+        drop_backlog_on_overrun=False,
+    )
+
+    assert configured == [(created, 2, 65536, 0)]
+    assert buffer.drop_backlog_on_overrun is False
     buffer.close()
 
 

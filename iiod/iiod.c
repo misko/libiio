@@ -719,6 +719,20 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
 	}
+	ret = iio_context_add_attr(ctx,
+		"iio,buffer-direct-async-overrun-policies",
+		"drop-backlog,preserve-backlog");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx,
+		"iio,buffer-direct-async-default-overrun-policy",
+		"drop-backlog");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
 #endif
 
 	xml_zstd = get_xml_zstd_data(ctx, &xml_zstd_len);

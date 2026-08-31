@@ -504,3 +504,61 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	*iq_bytes = ctx->layout.iq_bytes;
 	return (ssize_t)header_bytes;
 }
+
+static int spf_exact_gap_header(
+		const struct spf_iiod_metadata_context *ctx,
+		const void *metadata, size_t metadata_bytes,
+		const spf_radio_meta_v3_prefix_t **header)
+{
+	const spf_radio_meta_v3_prefix_t *record = metadata;
+
+	if (!ctx || !metadata || !header ||
+			metadata_bytes < sizeof(*record) + sizeof(uint32_t))
+		return -EINVAL;
+	if (record->magic != SPF_GAIN_META_MAGIC ||
+			record->version != SPF_GAIN_META_VERSION_V6 ||
+			record->header_bytes != metadata_bytes ||
+			(record->features & SPF_META_FEATURE_EXACT_GAP_ACCOUNTING) == 0 ||
+			record->samples_per_channel != ctx->samples_per_channel ||
+			record->first_sample_sequence >
+				UINT64_MAX - record->samples_per_channel)
+		return -EBADMSG;
+	*header = record;
+	return 0;
+}
+
+int iiod_buffer_metadata_describe_frame(void *provider_context,
+		const void *metadata, size_t metadata_bytes,
+		struct iiod_buffer_metadata_frame_info *info)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	const spf_radio_meta_v3_prefix_t *header;
+	int ret;
+
+	if (!info)
+		return -EINVAL;
+	ret = spf_exact_gap_header(ctx, metadata, metadata_bytes, &header);
+	if (ret)
+		return ret;
+	info->first_sample_sequence = header->first_sample_sequence;
+	info->frame_end = header->first_sample_sequence +
+		header->samples_per_channel;
+	info->missing_samples_before =
+		spf_radio_meta_v6_missing_samples_before(header);
+	return 0;
+}
+
+int iiod_buffer_metadata_rebase_frame(void *provider_context,
+		void *metadata, size_t metadata_bytes,
+		uint64_t previous_frame_end)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	const spf_radio_meta_v3_prefix_t *const_header;
+	int ret;
+
+	ret = spf_exact_gap_header(ctx, metadata, metadata_bytes, &const_header);
+	if (ret)
+		return ret;
+	return spf_radio_frame_v6_rebase_gap(metadata, metadata_bytes,
+		previous_frame_end) ? 0 : -ERANGE;
+}

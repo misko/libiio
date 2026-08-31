@@ -55,6 +55,8 @@ int iiod_ddr_ring_core_producer_abort(struct iiod_ddr_ring_core *ring);
 int iiod_ddr_ring_core_consumer_reserve(struct iiod_ddr_ring_core *ring,
 	size_t *slot);
 int iiod_ddr_ring_core_consumer_release(struct iiod_ddr_ring_core *ring);
+int iiod_ddr_ring_core_discard_pending(struct iiod_ddr_ring_core *ring,
+	uint64_t *discarded_frames);
 bool iiod_ddr_ring_core_consumer_ready(
 	const struct iiod_ddr_ring_core *ring);
 bool iiod_ddr_ring_core_prefix_complete(

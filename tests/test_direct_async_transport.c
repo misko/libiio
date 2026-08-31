@@ -44,8 +44,8 @@ struct fixture {
 	struct iio_channel channel;
 	struct iio_channel *channels[1];
 	uint32_t device_mask[1];
-	char *context_attrs[1];
-	char *context_values[1];
+	char *context_attrs[2];
+	char *context_values[2];
 	struct transport_state state;
 };
 
@@ -149,6 +149,17 @@ static int fake_prequeue_async(const struct iio_device *dev, size_t len,
 		metadata_capacity, frames);
 }
 
+static int fake_prequeue_async_policy(const struct iio_device *dev, size_t len,
+		size_t metadata_capacity, unsigned int frames,
+		unsigned int overrun_policy)
+{
+	struct transport_state *state = device_state(dev);
+
+	return iiod_client_prequeue_metadata_reads_async_policy_unlocked(
+		state->client, (struct iiod_client_pdata *)(void *)state, dev, len,
+		metadata_capacity, frames, overrun_policy);
+}
+
 static ssize_t fake_read(const struct iio_device *dev, void *dst, size_t len,
 		uint32_t *mask, size_t words, void *metadata,
 		size_t metadata_capacity, size_t *metadata_bytes,
@@ -184,6 +195,7 @@ static const struct iio_backend_ops backend_ops = {
 	.cancel = fake_cancel,
 	.read_with_metadata_batch = fake_read,
 	.prequeue_metadata_reads_async = fake_prequeue_async,
+	.prequeue_metadata_reads_async_policy = fake_prequeue_async_policy,
 };
 
 static struct iio_buffer *fixture_buffer(struct fixture *fixture)
@@ -192,12 +204,14 @@ static struct iio_buffer *fixture_buffer(struct fixture *fixture)
 
 	assert(buffer);
 	fixture->context.ops = &backend_ops;
-	fixture->context.backend_api_version = IIO_BACKEND_API_V6;
+	fixture->context.backend_api_version = IIO_BACKEND_API_V7;
 	fixture->context.attrs = fixture->context_attrs;
 	fixture->context.values = fixture->context_values;
-	fixture->context.nb_attrs = 1;
+	fixture->context.nb_attrs = 2;
 	fixture->context_attrs[0] = "iio,buffer-direct-async";
 	fixture->context_values[0] = "1";
+	fixture->context_attrs[1] = "iio,buffer-direct-async-overrun-policies";
+	fixture->context_values[1] = "drop-backlog,preserve-backlog";
 	fixture->device.ctx = &fixture->context;
 	fixture->device.pdata =
 		(struct iio_device_pdata *)(void *)&fixture->state;
@@ -317,6 +331,32 @@ static void test_long_capture_is_one_command(void)
 	destroy_fixture_buffer(&fixture, buffer);
 }
 
+static void test_explicit_overrun_policy_commands(void)
+{
+	static const char drop_command[] = "READBUFMA dev0 16 16 2 1\r\n";
+	static const char preserve_command[] = "READBUFMA dev0 16 16 2 0\r\n";
+	struct fixture drop = {0};
+	struct iio_buffer *buffer = fixture_buffer(&drop);
+
+	assert(iio_buffer_set_metadata_read_prequeue_async_policy(buffer, 2,
+		TEST_METADATA_BYTES,
+		IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG) == 0);
+	assert(drop.state.write_bytes == sizeof(drop_command) - 1U);
+	assert(!memcmp(drop.state.writes, drop_command,
+		sizeof(drop_command) - 1U));
+	destroy_fixture_buffer(&drop, buffer);
+
+	struct fixture preserve = {0};
+	buffer = fixture_buffer(&preserve);
+	assert(iio_buffer_set_metadata_read_prequeue_async_policy(buffer, 2,
+		TEST_METADATA_BYTES,
+		IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG) == 0);
+	assert(preserve.state.write_bytes == sizeof(preserve_command) - 1U);
+	assert(!memcmp(preserve.state.writes, preserve_command,
+		sizeof(preserve_command) - 1U));
+	destroy_fixture_buffer(&preserve, buffer);
+}
+
 static void test_direct_capture_limit(void)
 {
 	struct fixture fixture = {0};
@@ -333,6 +373,7 @@ int main(void)
 	test_fifo_drain_single_command();
 	test_gates_and_early_close();
 	test_long_capture_is_one_command();
+	test_explicit_overrun_policy_commands();
 	test_direct_capture_limit();
 	puts("direct async transport: PASS");
 	return 0;

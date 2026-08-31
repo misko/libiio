@@ -120,6 +120,14 @@ int iiod_client_prequeue_metadata_reads_async_unlocked(
 				  size_t len, size_t metadata_capacity,
 				  unsigned int frames);
 
+int iiod_client_prequeue_metadata_reads_async_policy_unlocked(
+				  struct iiod_client *client,
+				  struct iiod_client_pdata *desc,
+				  const struct iio_device *dev,
+				  size_t len, size_t metadata_capacity,
+				  unsigned int frames,
+				  unsigned int overrun_policy);
+
 ssize_t iiod_client_get_buffer_metadata_status_unlocked(
 				  struct iiod_client *client,
 				  struct iiod_client_pdata *desc,

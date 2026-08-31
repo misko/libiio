@@ -132,7 +132,8 @@ Line:
 		"\tREADBUF <device> <bytes_count>\n"
 		"\t\tRead raw data from the specified device\n"
 		"\tREADBUFM <device> <bytes_count> <metadata_capacity>\n"
-		"\tREADBUFMA <device> <bytes_count> <metadata_capacity> <frames>\n"
+		"\tREADBUFMA <device> <bytes_count> <metadata_capacity> <frames> "
+		"[overrun_policy]\n"
 		"\t\tRead raw data and its capture-associated metadata\n"
 		"\tREADBUFMSTAT <device> <status_capacity>\n"
 		"\t\tRead the open metadata buffer's provider status\n"
@@ -342,10 +343,32 @@ Line:
 		unsigned long cap = strtoul(metadata_capacity, NULL, 10);
 		unsigned long count = strtoul(frames, NULL, 10);
 		struct parser_pdata *pdata = yyget_extra(scanner);
-		ssize_t ret = rw_dev_with_metadata_async(pdata, $3, nb, cap, count);
+		ssize_t ret = rw_dev_with_metadata_async(pdata, $3, nb, cap, count,
+			IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG);
 		free(len);
 		free(metadata_capacity);
 		free(frames);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| READBUFMA SPACE DEVICE SPACE WORD SPACE WORD SPACE WORD SPACE WORD END {
+		char *len = $5;
+		char *metadata_capacity = $7;
+		char *frames = $9;
+		char *policy = $11;
+		unsigned long nb = strtoul(len, NULL, 10);
+		unsigned long cap = strtoul(metadata_capacity, NULL, 10);
+		unsigned long count = strtoul(frames, NULL, 10);
+		unsigned long mode = strtoul(policy, NULL, 10);
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = rw_dev_with_metadata_async(pdata, $3, nb, cap, count,
+			(enum iio_buffer_metadata_overrun_policy)mode);
+		free(len);
+		free(metadata_capacity);
+		free(frames);
+		free(policy);
 		if (ret < 0)
 			YYABORT;
 		else

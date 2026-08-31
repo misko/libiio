@@ -657,6 +657,22 @@ else:
     )
     _buffer_set_metadata_read_prequeue_async.errcheck = _check_negative
 
+try:
+    _buffer_set_metadata_read_prequeue_async_policy = (
+        _lib.iio_buffer_set_metadata_read_prequeue_async_policy
+    )
+except AttributeError:
+    _buffer_set_metadata_read_prequeue_async_policy = None
+else:
+    _buffer_set_metadata_read_prequeue_async_policy.restype = c_int
+    _buffer_set_metadata_read_prequeue_async_policy.argtypes = (
+        _BufferPtr,
+        c_uint,
+        c_size_t,
+        c_int,
+    )
+    _buffer_set_metadata_read_prequeue_async_policy.errcheck = _check_negative
+
 _buffer_get_metadata_status = _lib.iio_buffer_get_metadata_status
 _buffer_get_metadata_status.restype = c_ssize_t
 _buffer_get_metadata_status.argtypes = (_BufferPtr, c_void_p, c_size_t)
@@ -1167,6 +1183,7 @@ class MetadataBuffer(Buffer):
         ddr_ring_frames=0,
         ddr_ring_continuous=False,
         direct_async_frames=0,
+        drop_backlog_on_overrun=True,
     ):
         self._buffer = None
         if metadata_capacity <= 0:
@@ -1183,6 +1200,8 @@ class MetadataBuffer(Buffer):
             raise ValueError("direct_async_frames must be in [0, 4096]")
         if direct_async_frames and batch_frames != 1:
             raise ValueError("direct async capture requires batch_frames=1")
+        if not isinstance(drop_backlog_on_overrun, bool):
+            raise TypeError("drop_backlog_on_overrun must be a bool")
         batch_cache_bytes = 0
         if batch_frames > 1:
             batch_cache_bytes = batch_frames * (
@@ -1247,10 +1266,10 @@ class MetadataBuffer(Buffer):
         ddr_ring_admitted_bytes = 0
         ddr_ring_capacity_frames = 0
         if direct_async_frames:
-            if _buffer_set_metadata_read_prequeue_async is None:
+            if _buffer_set_metadata_read_prequeue_async_policy is None:
                 raise OSError(
                     _ENOSYS,
-                    "loaded libiio does not support direct async capture",
+                    "loaded libiio does not support direct async overrun policies",
                 )
             context_attrs = getattr(getattr(device, "_ctx", None), "attrs", {})
             if context_attrs.get("iio,buffer-direct-async") != "1":
@@ -1261,6 +1280,19 @@ class MetadataBuffer(Buffer):
             ):
                 raise OSError(
                     "IIO context does not advertise direct async RAM extension"
+                )
+            policies = context_attrs.get(
+                "iio,buffer-direct-async-overrun-policies", ""
+            ).split(",")
+            requested_policy = (
+                "drop-backlog"
+                if drop_backlog_on_overrun
+                else "preserve-backlog"
+            )
+            if requested_policy not in policies:
+                raise OSError(
+                    f"IIO context does not advertise {requested_policy} "
+                    "direct async overrun handling"
                 )
         if ddr_burst_bytes:
             context_attrs = getattr(getattr(device, "_ctx", None), "attrs", {})
@@ -1339,10 +1371,11 @@ class MetadataBuffer(Buffer):
             )
             _buffer_set_metadata_batch_size(self._buffer, batch_frames)
             if direct_async_frames:
-                _buffer_set_metadata_read_prequeue_async(
+                _buffer_set_metadata_read_prequeue_async_policy(
                     self._buffer,
                     direct_async_frames,
                     int(metadata_capacity),
+                    1 if drop_backlog_on_overrun else 0,
                 )
         except Exception:
             if self._buffer is not None:
@@ -1355,6 +1388,9 @@ class MetadataBuffer(Buffer):
         self._batch_frames = batch_frames
         self._batch_cache_bytes = batch_cache_bytes
         self._direct_async_frames = direct_async_frames
+        self._drop_backlog_on_overrun = bool(
+            direct_async_frames and drop_backlog_on_overrun
+        )
         self._direct_async_ring_extension = bool(
             direct_async_frames and ddr_ring_bytes
         )
@@ -1406,6 +1442,11 @@ class MetadataBuffer(Buffer):
     def direct_async_frames(self):
         """Finite DMA-to-network frame count, or zero when disabled."""
         return self._direct_async_frames
+
+    @property
+    def drop_backlog_on_overrun(self):
+        """Whether direct async capture evicts queued stale frames on a gap."""
+        return self._drop_backlog_on_overrun
 
     @property
     def direct_async_ring_extension(self):

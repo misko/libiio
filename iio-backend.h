@@ -21,9 +21,10 @@ enum iio_backend_api_ver {
 	IIO_BACKEND_API_V4 = 4,
 	IIO_BACKEND_API_V5 = 5,
 	IIO_BACKEND_API_V6 = 6,
+	IIO_BACKEND_API_V7 = 7,
 };
 
-#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V6
+#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V7
 
 static inline bool iio_backend_api_version_supported(unsigned int version)
 {
@@ -123,6 +124,11 @@ struct iio_backend_ops {
 			void **addr, size_t *bytes_used, uintptr_t *token);
 	int (*release_buffer_block)(const struct iio_device *dev,
 			uintptr_t token, size_t bytes_used);
+
+	/* API v7: select the direct-async queue policy explicitly. */
+	int (*prequeue_metadata_reads_async_policy)(const struct iio_device *dev,
+			size_t len, size_t metadata_capacity,
+			unsigned int frames, unsigned int overrun_policy);
 };
 
 /**

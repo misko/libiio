@@ -214,6 +214,46 @@ int iiod_ddr_ring_core_consumer_release(struct iiod_ddr_ring_core *ring)
 	return 0;
 }
 
+int iiod_ddr_ring_core_discard_pending(struct iiod_ddr_ring_core *ring,
+	uint64_t *discarded_frames)
+{
+	size_t keep, pending, position, i;
+
+	if (!ring || !discarded_frames)
+		return -EINVAL;
+	if (ring->state != SPF_DDR_RING_STATE_RUNNING || ring->producer_reserved)
+		return -EBUSY;
+	keep = ring->consumer_reserved ? 1U : 0U;
+	if (ring->occupied < keep)
+		return -EIO;
+	pending = ring->occupied - keep;
+	position = ring->consumer_position;
+	if (keep && ++position == ring->slot_count)
+		position = 0;
+	for (i = 0; i < pending; i++) {
+		if (ring->slots[position] != IIOD_DDR_RING_SLOT_COMMITTED)
+			return -EIO;
+		position++;
+		if (position == ring->slot_count)
+			position = 0;
+	}
+	position = ring->consumer_position;
+	if (keep && ++position == ring->slot_count)
+		position = 0;
+	for (i = 0; i < pending; i++) {
+		ring->slots[position] = IIOD_DDR_RING_SLOT_FREE;
+		position++;
+		if (position == ring->slot_count)
+			position = 0;
+	}
+	ring->occupied = keep;
+	ring->producer_position = ring->consumer_position;
+	if (keep && ++ring->producer_position == ring->slot_count)
+		ring->producer_position = 0;
+	*discarded_frames = pending;
+	return 0;
+}
+
 int iiod_ddr_ring_core_fail(struct iiod_ddr_ring_core *ring,
 	uint32_t reason, int error_code)
 {

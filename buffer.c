@@ -279,6 +279,66 @@ int iio_buffer_set_metadata_read_prequeue_async(struct iio_buffer *buffer,
 	return 0;
 }
 
+int iio_buffer_set_metadata_read_prequeue_async_policy(
+		struct iio_buffer *buffer, unsigned int frames,
+		size_t metadata_capacity,
+		enum iio_buffer_metadata_overrun_policy policy)
+{
+	const struct iio_backend_ops *ops;
+	const char *capability;
+	int ret;
+
+	if (!buffer || !buffer->metadata_enabled || !frames ||
+			!metadata_capacity ||
+			(policy != IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG &&
+			 policy != IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG))
+		return -EINVAL;
+	if (frames > IIO_BUFFER_METADATA_DIRECT_MAX)
+		return -E2BIG;
+	if (metadata_batch_is_failed(buffer))
+		return -EBADF;
+	if (buffer->metadata_direct_frames || buffer->metadata_batch_size != 1 ||
+		buffer->metadata_batch_cached_frames !=
+			buffer->metadata_batch_next_frame)
+		return -EBUSY;
+
+	ops = buffer->dev->ctx->ops;
+	capability = iio_context_get_attr_value(buffer->dev->ctx,
+		"iio,buffer-direct-async");
+	if (!capability || strcmp(capability, "1"))
+		return -EPERM;
+	capability = iio_context_get_attr_value(buffer->dev->ctx,
+		"iio,buffer-direct-async-overrun-policies");
+	if (!capability ||
+			(policy == IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG ?
+			 !strstr(capability, "drop-backlog") :
+			 !strstr(capability, "preserve-backlog")))
+		return -EPERM;
+	if (buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V7 ||
+		!ops->cancel || !ops->prequeue_metadata_reads_async_policy ||
+		(buffer->dev_is_high_speed ?
+			!ops->get_buffer_with_metadata_batch :
+			!ops->read_with_metadata_batch))
+		return -ENOSYS;
+
+	buffer->metadata_direct_mask = malloc(buffer->dev->words *
+		sizeof(*buffer->metadata_direct_mask));
+	if (!buffer->metadata_direct_mask)
+		return -ENOMEM;
+	memcpy(buffer->metadata_direct_mask, buffer->mask,
+		buffer->dev->words * sizeof(*buffer->metadata_direct_mask));
+	buffer->metadata_direct_frames = frames;
+	buffer->metadata_direct_pending = frames;
+	buffer->metadata_direct_capacity = metadata_capacity;
+	ret = ops->prequeue_metadata_reads_async_policy(buffer->dev,
+		buffer->length, metadata_capacity, frames, (unsigned int)policy);
+	if (ret < 0) {
+		fail_metadata_batch(buffer);
+		return ret;
+	}
+	return 0;
+}
+
 ssize_t iio_buffer_get_metadata_status(struct iio_buffer *buffer,
 		void *status, size_t status_capacity)
 {

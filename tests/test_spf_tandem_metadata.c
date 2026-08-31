@@ -229,6 +229,20 @@ static void test_v6_single_rx_and_exact_gap(void)
 	memset(output + bytes - sizeof(stored_crc), 0, sizeof(stored_crc));
 	assert(stored_crc == spf_gain_meta_crc32(output, bytes));
 
+	/* Rebase the next delivered record across discarded queued frames. */
+	assert(spf_radio_frame_v6_rebase_gap(output, bytes,
+		UINT64_C(0xffff0020)));
+	assert(spf_radio_meta_v6_missing_samples_before(prefix) ==
+		UINT64_C(0x10000));
+	assert(prefix->flags & SPF_META_SAMPLE_GAP_BEFORE);
+	assert(prefix->flags & SPF_META_DEVICE_IIO_OVERFLOW);
+	memcpy(&stored_crc, output + bytes - sizeof(stored_crc),
+		sizeof(stored_crc));
+	memset(output + bytes - sizeof(stored_crc), 0, sizeof(stored_crc));
+	assert(stored_crc == spf_gain_meta_crc32(output, bytes));
+	assert(!spf_radio_frame_v6_rebase_gap(output, bytes,
+		UINT64_C(0x100000021)));
+
 	args.frame.enabled_scan_mask = UINT32_C(0x0c);
 	args.missing_samples_before = 0;
 	assert(spf_radio_frame_v6_build(output, sizeof(output), &args));

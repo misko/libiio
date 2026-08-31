@@ -150,6 +150,43 @@ static void test_direct_extension_drains_without_prefill(void)
 	assert(iiod_ddr_ring_core_complete_extension(&ring) == 0);
 }
 
+static void test_discard_pending_preserves_reserved_consumer(void)
+{
+	enum iiod_ddr_ring_slot_state slots[4];
+	struct iiod_ddr_ring_core ring;
+	uint64_t discarded = 0;
+	size_t slot;
+
+	assert(iiod_ddr_ring_core_init(&ring, slots, 4, 0) == 0);
+	assert(iiod_ddr_ring_core_start_extension(&ring) == 0);
+	for (slot = 0; slot < 4; slot++) {
+		size_t produced;
+
+		assert(iiod_ddr_ring_core_producer_reserve(&ring, &produced) == 0);
+		assert(produced == slot);
+		assert(iiod_ddr_ring_core_producer_commit(&ring) == 0);
+	}
+	assert(iiod_ddr_ring_core_consumer_reserve(&ring, &slot) == 0);
+	assert(slot == 0);
+	assert(iiod_ddr_ring_core_discard_pending(&ring, &discarded) == 0);
+	assert(discarded == 3);
+	assert(ring.occupied == 1);
+	assert(ring.produced_frames == 4);
+	assert(ring.consumed_frames == 0);
+	assert(ring.consumer_reserved);
+	assert(ring.producer_position == 1);
+	assert(slots[0] == IIOD_DDR_RING_SLOT_CONSUMER);
+	assert(slots[1] == IIOD_DDR_RING_SLOT_FREE);
+	assert(slots[2] == IIOD_DDR_RING_SLOT_FREE);
+	assert(slots[3] == IIOD_DDR_RING_SLOT_FREE);
+	assert(iiod_ddr_ring_core_consumer_release(&ring) == 0);
+	assert(ring.consumed_frames == 1);
+	assert(ring.consumer_position == ring.producer_position);
+	assert(iiod_ddr_ring_core_producer_reserve(&ring, &slot) == 0);
+	assert(slot == 1);
+	assert(iiod_ddr_ring_core_producer_abort(&ring) == 0);
+}
+
 static void test_abort_and_cancel(void)
 {
 	enum iiod_ddr_ring_slot_state slots[1];
@@ -196,6 +233,7 @@ int main(void)
 	test_finite_capture_prefills_target();
 	test_continuous_capture_uses_low_watermark();
 	test_direct_extension_drains_without_prefill();
+	test_discard_pending_preserves_reserved_consumer();
 	test_failure_drains_committed();
 	test_abort_and_cancel();
 	test_sample_continuity_stops_at_first_gap();

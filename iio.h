@@ -1547,6 +1547,31 @@ __api __check_ret int iio_buffer_set_metadata_read_prequeue_async(
 		struct iio_buffer *buf, unsigned int frames,
 		size_t metadata_capacity);
 
+/** @brief Direct-async behavior after the device reports a source overrun. */
+enum iio_buffer_metadata_overrun_policy {
+	/** Preserve queued frames and account each source discontinuity in order. */
+	IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG = 0,
+	/** Drop queued-but-unsent frames, account the complete jump once, and refill. */
+	IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG = 1,
+};
+
+/** @brief Start a direct-async metadata capture with an explicit overrun policy.
+ * @param buf A metadata-enabled input buffer
+ * @param frames Exact number of frames to deliver to the host
+ * @param metadata_capacity Per-frame metadata capacity
+ * @param policy Queue behavior after a source overrun
+ * @return 0 on success, a negative errno code otherwise
+ *
+ * DROP_BACKLOG never releases the frame currently being transmitted. It
+ * discards only queued frames, rebases the next exact-gap metadata record over
+ * the discarded interval, and acquires replacements until @p frames have been
+ * delivered. The server advertises supported values through
+ * iio,buffer-direct-async-overrun-policies. */
+__api __check_ret int iio_buffer_set_metadata_read_prequeue_async_policy(
+		struct iio_buffer *buf, unsigned int frames,
+		size_t metadata_capacity,
+		enum iio_buffer_metadata_overrun_policy policy);
+
 /** @brief Read the provider-owned status blob for an open metadata buffer.
  * @param buf A metadata-enabled input buffer
  * @param status Destination for the opaque, provider-versioned status bytes
