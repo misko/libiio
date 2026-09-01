@@ -15,6 +15,7 @@
 #define TEST_FRAMES 64U
 #define TEST_IQ_BYTES 16U
 #define TEST_METADATA_BYTES 16U
+#define TEST_STATUS_BYTES 16U
 
 struct test_metadata {
 	uint32_t magic;
@@ -29,9 +30,11 @@ struct transport_state {
 	char writes[1024];
 	size_t write_bytes;
 	unsigned int write_calls;
+	unsigned int status_calls;
 	unsigned int cancel_calls;
 	unsigned int close_calls;
 	unsigned int event;
+	unsigned int status_event;
 	unsigned int cancel_event;
 	unsigned int close_event;
 	bool short_write;
@@ -173,6 +176,19 @@ static ssize_t fake_read(const struct iio_device *dev, void *dst, size_t len,
 		words, metadata, metadata_capacity, metadata_bytes, 0);
 }
 
+static ssize_t fake_status(const struct iio_device *dev, void *status,
+		size_t status_capacity)
+{
+	struct transport_state *state = device_state(dev);
+
+	if (status_capacity < TEST_STATUS_BYTES)
+		return -ENOSPC;
+	state->status_calls++;
+	state->status_event = ++state->event;
+	memset(status, 0x5a, TEST_STATUS_BYTES);
+	return TEST_STATUS_BYTES;
+}
+
 static void fake_cancel(const struct iio_device *dev)
 {
 	struct transport_state *state = device_state(dev);
@@ -194,6 +210,7 @@ static const struct iio_backend_ops backend_ops = {
 	.close = fake_close,
 	.cancel = fake_cancel,
 	.read_with_metadata_batch = fake_read,
+	.get_buffer_metadata_status = fake_status,
 	.prequeue_metadata_reads_async = fake_prequeue_async,
 	.prequeue_metadata_reads_async_policy = fake_prequeue_async_policy,
 };
@@ -368,6 +385,36 @@ static void test_direct_capture_limit(void)
 	destroy_fixture_buffer(&fixture, buffer);
 }
 
+static void test_terminal_status_survives_early_direct_failure(void)
+{
+	struct fixture fixture = {0};
+	struct iio_buffer *buffer = fixture_buffer(&fixture);
+	struct test_metadata metadata;
+	uint8_t status[TEST_STATUS_BYTES];
+	size_t metadata_bytes = 0;
+
+	/* Keep exactly one complete response. The next direct refill fails while
+	 * two frames remain pending, which must not hide the provider's sticky
+	 * terminal status. */
+	fixture.state.response_bytes /= TEST_FRAMES;
+	assert(iio_buffer_set_metadata_read_prequeue_async(buffer, 3,
+		TEST_METADATA_BYTES) == 0);
+	assert(iio_buffer_refill_with_metadata(buffer, &metadata,
+		sizeof(metadata), &metadata_bytes) == TEST_IQ_BYTES);
+	metadata_bytes = 123;
+	assert(iio_buffer_refill_with_metadata(buffer, &metadata,
+		sizeof(metadata), &metadata_bytes) == -EPIPE);
+	assert(metadata_bytes == 0);
+	assert(fixture.state.status_calls == 1);
+	assert(fixture.state.status_event < fixture.state.cancel_event);
+	assert(iio_buffer_get_metadata_status(buffer, status, sizeof(status)) ==
+		TEST_STATUS_BYTES);
+	assert(fixture.state.status_calls == 1);
+	for (size_t i = 0; i < sizeof(status); ++i)
+		assert(status[i] == 0x5a);
+	destroy_fixture_buffer(&fixture, buffer);
+}
+
 int main(void)
 {
 	test_fifo_drain_single_command();
@@ -375,6 +422,7 @@ int main(void)
 	test_long_capture_is_one_command();
 	test_explicit_overrun_policy_commands();
 	test_direct_capture_limit();
+	test_terminal_status_survives_early_direct_failure();
 	puts("direct async transport: PASS");
 	return 0;
 }

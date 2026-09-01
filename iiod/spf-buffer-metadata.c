@@ -398,7 +398,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			(unsigned long long)ctx->frames_emitted, observation_count,
 			ctx->startup_frames_discarded,
 			(ctx->burst_enabled || ctx->ring_enabled) ? 1U : 0U);
-		return -ENODATA;
+		return -ESTALE;
 	}
 	if (!spf_gain_sampler_collect_rssi(&ctx->sampler,
 			first_sample_sequence, ctx->samples_per_channel,
@@ -410,7 +410,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			(unsigned long long)first_sample_sequence,
 			ctx->samples_per_channel, observation_count,
 			(ctx->burst_enabled || ctx->ring_enabled) ? 1U : 0U);
-		return -ENODATA;
+		return -ESTALE;
 	}
 	if (rssi_overflow_count) {
 		fprintf(stderr,

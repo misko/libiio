@@ -216,6 +216,9 @@ struct iio_buffer {
 	unsigned int metadata_direct_pending;
 	size_t metadata_direct_capacity;
 	uint32_t *metadata_direct_mask;
+	void *metadata_terminal_status;
+	size_t metadata_terminal_status_bytes;
+	int metadata_terminal_status_error;
 	volatile long metadata_batch_failed;
 	bool block_lease_mode;
 };

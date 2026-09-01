@@ -12,6 +12,8 @@
 #include <errno.h>
 #include <string.h>
 
+#define IIO_BUFFER_METADATA_STATUS_CACHE_MAX 4096U
+
 #ifdef _MSC_VER
 #include <intrin.h>
 #endif
@@ -146,6 +148,9 @@ static struct iio_buffer * create_buffer(const struct iio_device *dev,
 	buf->metadata_direct_pending = 0;
 	buf->metadata_direct_capacity = 0;
 	buf->metadata_direct_mask = NULL;
+	buf->metadata_terminal_status = NULL;
+	buf->metadata_terminal_status_bytes = 0;
+	buf->metadata_terminal_status_error = 0;
 	buf->metadata_batch_failed = false;
 	buf->block_lease_mode = false;
 	return buf;
@@ -198,6 +203,39 @@ static void fail_metadata_batch(struct iio_buffer *buffer)
 	free_metadata_batch_cache(buffer);
 	if (first_failure && ops->cancel)
 		ops->cancel(buffer->dev);
+}
+
+static void cache_terminal_metadata_status(struct iio_buffer *buffer)
+{
+	const struct iio_backend_ops *ops = buffer->dev->ctx->ops;
+	void *status;
+	ssize_t ret;
+
+	if (buffer->metadata_terminal_status ||
+			buffer->metadata_terminal_status_error)
+		return;
+	if (buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V5 ||
+			!ops->get_buffer_metadata_status) {
+		buffer->metadata_terminal_status_error = -ENOSYS;
+		return;
+	}
+	status = malloc(IIO_BUFFER_METADATA_STATUS_CACHE_MAX);
+	if (!status) {
+		buffer->metadata_terminal_status_error = -ENOMEM;
+		return;
+	}
+	/* The direct transport is still usable here. fail_metadata_batch() will
+	 * cancel it immediately after this snapshot, so this is the last reliable
+	 * opportunity to preserve the radio's terminal reason for the caller. */
+	ret = ops->get_buffer_metadata_status(buffer->dev, status,
+		IIO_BUFFER_METADATA_STATUS_CACHE_MAX);
+	if (ret > 0) {
+		buffer->metadata_terminal_status = status;
+		buffer->metadata_terminal_status_bytes = (size_t)ret;
+		return;
+	}
+	free(status);
+	buffer->metadata_terminal_status_error = ret < 0 ? (int)ret : -EIO;
 }
 
 int iio_buffer_set_metadata_batch_size(struct iio_buffer *buffer,
@@ -348,7 +386,23 @@ ssize_t iio_buffer_get_metadata_status(struct iio_buffer *buffer,
 		return -EINVAL;
 	if (!buffer->metadata_enabled)
 		return -EINVAL;
-	if (buffer->metadata_direct_pending)
+	if (buffer->metadata_terminal_status) {
+		if (status_capacity < buffer->metadata_terminal_status_bytes)
+			return -ENOSPC;
+		memcpy(status, buffer->metadata_terminal_status,
+			buffer->metadata_terminal_status_bytes);
+		return (ssize_t)buffer->metadata_terminal_status_bytes;
+	}
+	if (metadata_batch_is_failed(buffer) &&
+			buffer->metadata_terminal_status_error)
+		return buffer->metadata_terminal_status_error;
+	/*
+	 * A failed direct batch can leave unread frame slots behind.  They are no
+	 * longer in flight, so do not hide the backend's terminal status behind an
+	 * EBUSY that can never clear.
+	 */
+	if (buffer->metadata_direct_pending &&
+		!metadata_batch_is_failed(buffer))
 		return -EBUSY;
 	ops = buffer->dev->ctx->ops;
 	if (buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V5 ||
@@ -366,6 +420,7 @@ void iio_buffer_destroy(struct iio_buffer *buffer)
 	iio_device_close(buffer->dev);
 	free_metadata_batch_cache(buffer);
 	free(buffer->metadata_direct_mask);
+	free(buffer->metadata_terminal_status);
 	if (!buffer->dev_is_high_speed)
 		free(buffer->buffer);
 	free(buffer->mask);
@@ -521,6 +576,7 @@ ssize_t iio_buffer_refill_with_metadata(struct iio_buffer *buffer,
 				dev->words * sizeof(*buffer->mask))) {
 			ret = read < 0 ? read : -EIO;
 			*metadata_bytes = 0;
+			cache_terminal_metadata_status(buffer);
 			fail_metadata_batch(buffer);
 			return ret;
 		}

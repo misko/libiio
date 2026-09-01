@@ -60,6 +60,7 @@ struct ThdEntry {
 #define IIOD_BURST_MEMORY_RESERVE_BYTES (UINT64_C(128) * 1024U * 1024U)
 #define IIOD_BURST_CMA_RESERVE_BYTES (UINT64_C(16) * 1024U * 1024U)
 #define IIOD_BURST_MAX_STARTUP_DISCARDS 8U
+#define IIOD_DIRECT_STALE_RETRY_MARGIN 8U
 #define IIOD_BURST_SEALED_IDLE_SECONDS 30
 
 enum iiod_burst_state {
@@ -141,6 +142,8 @@ struct iiod_direct_async {
 	uint64_t consumed_frames;
 	uint64_t dropped_frames;
 	uint64_t flush_events;
+	uint64_t stale_metadata_frames;
+	unsigned int stale_metadata_streak;
 	uint64_t last_consumed_frame_end;
 	int error;
 	enum iio_buffer_metadata_overrun_policy overrun_policy;
@@ -1999,6 +2002,38 @@ static void direct_async_producer_thd(struct thread_pool *pool, void *data)
 				error = -ETIMEDOUT;
 			goto release_block;
 		}
+		if (metadata_len == -ESTALE && direct->overrun_policy ==
+				IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG) {
+			uint64_t dropped_before;
+
+			pthread_mutex_lock(&entry->ring_lock);
+			if (direct->cancelled) {
+				pthread_mutex_unlock(&entry->ring_lock);
+				goto release_block;
+			}
+			dropped_before = direct->dropped_frames;
+			ret = direct_async_drop_pending(entry);
+			if (!ret) {
+				direct->dropped_frames++;
+				direct->stale_metadata_frames++;
+				direct->stale_metadata_streak++;
+				IIO_WARNING("Direct async stale metadata: retired one "
+					"uncovered DMA frame and %llu queued frames "
+					"(streak=%u total=%llu)\n",
+					(unsigned long long)(direct->dropped_frames -
+						dropped_before - 1U),
+					direct->stale_metadata_streak,
+					(unsigned long long)direct->stale_metadata_frames);
+				if (direct->stale_metadata_streak >
+						direct->dma_capacity +
+						IIOD_DIRECT_STALE_RETRY_MARGIN)
+					error = -ESTALE;
+			} else {
+				error = ret;
+			}
+			pthread_mutex_unlock(&entry->ring_lock);
+			goto release_block;
+		}
 		if (metadata_len < 0) {
 			error = (int)metadata_len;
 			goto release_block;
@@ -2010,6 +2045,7 @@ static void direct_async_producer_thd(struct thread_pool *pool, void *data)
 			error = -EIO;
 			goto release_block;
 		}
+		direct->stale_metadata_streak = 0;
 		if (direct->overrun_policy ==
 				IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG) {
 			ret = iiod_buffer_metadata_describe_frame(
@@ -2097,7 +2133,8 @@ release_block:
 				error = release_ret;
 			}
 		}
-		if (metadata_len == -EAGAIN && !error)
+		if ((metadata_len == -EAGAIN || metadata_len == -ESTALE) &&
+				!error)
 			continue;
 		break;
 	}

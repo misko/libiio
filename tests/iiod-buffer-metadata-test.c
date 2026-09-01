@@ -23,6 +23,11 @@ static const uint8_t failure_session_request[] = {
 	0x01, 0x00, 0x08, 0x01,
 };
 
+static const uint8_t stale_once_session_request[] = {
+	0x53, 0x50, 0x46, 0x54, /* SPFT */
+	0x01, 0x00, 0x08, 0x02,
+};
+
 #define TEST_BURST_REQUEST_BYTES 32U
 #define TEST_RING_REQUEST_BYTES 48U
 
@@ -45,6 +50,8 @@ static uint64_t get_le64(const uint8_t *source)
 struct test_context {
 	uint64_t sequence;
 	bool fail_after_first;
+	bool stale_once_after_first;
+	bool stale_injected;
 };
 
 int iiod_buffer_metadata_open(const struct iio_device *dev,
@@ -98,13 +105,16 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	}
 	if (base_bytes != sizeof(expected_session_request) ||
 		(memcmp(request, expected_session_request, base_bytes) &&
-		 memcmp(request, failure_session_request, base_bytes)))
+		 memcmp(request, failure_session_request, base_bytes) &&
+		 memcmp(request, stale_once_session_request, base_bytes)))
 		return -EINVAL;
 	context = calloc(1, sizeof(*context));
 	if (!context)
 		return -ENOMEM;
 	context->fail_after_first =
 		!memcmp(request, failure_session_request, base_bytes);
+	context->stale_once_after_first =
+		!memcmp(request, stale_once_session_request, base_bytes);
 	*provider_context = context;
 	*extra_samples = 0;
 	return 0;
@@ -129,6 +139,13 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 	return 0;
 }
 
+void iiod_buffer_metadata_ring_prefix_complete(void *provider_context,
+	bool complete)
+{
+	(void)provider_context;
+	(void)complete;
+}
+
 void iiod_buffer_metadata_close(void *provider_context)
 {
 	free(provider_context);
@@ -148,6 +165,11 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		return -EINVAL;
 	if (context->fail_after_first && context->sequence == 1)
 		return -EIO;
+	if (context->stale_once_after_first && context->sequence == 1 &&
+			!context->stale_injected) {
+		context->stale_injected = true;
+		return -ESTALE;
+	}
 	record.magic = UINT32_C(0x54454d49); /* IMET */
 	record.bytes = sizeof(record);
 	record.sequence = context->sequence++;
