@@ -1468,6 +1468,17 @@ __api __check_ret __pure enum iio_modifier iio_channel_get_modifier(
 __api __check_ret __pure const struct iio_device * iio_buffer_get_device(
 		const struct iio_buffer *buf);
 
+/** @brief Read the number of kernel DMA blocks backing the open buffer.
+ * @param buf A pointer to an open iio_buffer structure
+ * @param count Destination for the allocated block count
+ * @return 0 on success, or a negative errno code
+ *
+ * This reports the allocation admitted by the backend, which can be smaller
+ * than iio_device_get_kernel_buffers_count().  Backends without authoritative
+ * allocation reporting return -ENOSYS. */
+__api __check_ret int iio_buffer_get_allocated_kernel_buffers_count(
+		const struct iio_buffer *buf, unsigned int *count);
+
 
 /** @brief Create an input or output buffer associated to the given device
  * @param dev A pointer to an iio_device structure

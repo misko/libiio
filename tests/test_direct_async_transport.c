@@ -37,6 +37,7 @@ struct transport_state {
 	unsigned int status_event;
 	unsigned int cancel_event;
 	unsigned int close_event;
+	unsigned int allocated_kernel_buffers;
 	bool short_write;
 	struct iiod_client *client;
 };
@@ -47,10 +48,13 @@ struct fixture {
 	struct iio_channel channel;
 	struct iio_channel *channels[1];
 	uint32_t device_mask[1];
-	char *context_attrs[2];
-	char *context_values[2];
+	char *context_attrs[3];
+	char *context_values[3];
 	struct transport_state state;
 };
+
+static void destroy_fixture_buffer(struct fixture *fixture,
+		struct iio_buffer *buffer);
 
 static struct transport_state *transport_state(struct iio_context_pdata *pdata)
 {
@@ -206,6 +210,17 @@ static int fake_close(const struct iio_device *dev)
 	return 0;
 }
 
+static int fake_get_allocated_kernel_buffers_count(
+		const struct iio_device *dev, unsigned int *count)
+{
+	struct transport_state *state = device_state(dev);
+
+	if (!count)
+		return -EINVAL;
+	*count = state->allocated_kernel_buffers;
+	return 0;
+}
+
 static const struct iio_backend_ops backend_ops = {
 	.close = fake_close,
 	.cancel = fake_cancel,
@@ -213,6 +228,8 @@ static const struct iio_backend_ops backend_ops = {
 	.get_buffer_metadata_status = fake_status,
 	.prequeue_metadata_reads_async = fake_prequeue_async,
 	.prequeue_metadata_reads_async_policy = fake_prequeue_async_policy,
+	.get_allocated_kernel_buffers_count =
+		fake_get_allocated_kernel_buffers_count,
 };
 
 static struct iio_buffer *fixture_buffer(struct fixture *fixture)
@@ -221,14 +238,16 @@ static struct iio_buffer *fixture_buffer(struct fixture *fixture)
 
 	assert(buffer);
 	fixture->context.ops = &backend_ops;
-	fixture->context.backend_api_version = IIO_BACKEND_API_V7;
+	fixture->context.backend_api_version = IIO_BACKEND_API_V8;
 	fixture->context.attrs = fixture->context_attrs;
 	fixture->context.values = fixture->context_values;
-	fixture->context.nb_attrs = 2;
+	fixture->context.nb_attrs = 3;
 	fixture->context_attrs[0] = "iio,buffer-direct-async";
 	fixture->context_values[0] = "1";
 	fixture->context_attrs[1] = "iio,buffer-direct-async-overrun-policies";
 	fixture->context_values[1] = "drop-backlog,preserve-backlog";
+	fixture->context_attrs[2] = "iio,buffer-direct-async-exact-kernel-queue";
+	fixture->context_values[2] = "1";
 	fixture->device.ctx = &fixture->context;
 	fixture->device.pdata =
 		(struct iio_device_pdata *)(void *)&fixture->state;
@@ -249,6 +268,7 @@ static struct iio_buffer *fixture_buffer(struct fixture *fixture)
 	fixture->state.client = iiod_client_new(
 		(struct iio_context_pdata *)(void *)&fixture->state, &client_ops);
 	assert(fixture->state.client);
+	fixture->state.allocated_kernel_buffers = 12;
 	build_responses(&fixture->state);
 
 	buffer->dev = &fixture->device;
@@ -263,6 +283,33 @@ static struct iio_buffer *fixture_buffer(struct fixture *fixture)
 	buffer->metadata_enabled = true;
 	buffer->metadata_batch_size = 1;
 	return buffer;
+}
+
+static void test_allocated_kernel_buffer_count_is_backend_authoritative(void)
+{
+	struct fixture fixture = {0};
+	struct iio_buffer *buffer = fixture_buffer(&fixture);
+	unsigned int allocated = 0;
+
+	fixture.device.kernel_buffers_count = 47;
+	assert(iio_buffer_get_allocated_kernel_buffers_count(buffer,
+		&allocated) == 0);
+	assert(allocated == 12);
+	assert(iio_device_get_kernel_buffers_count(&fixture.device) == 47);
+	destroy_fixture_buffer(&fixture, buffer);
+}
+
+static void test_exact_kernel_queue_capability_is_required(void)
+{
+	struct fixture fixture = {0};
+	struct iio_buffer *buffer = fixture_buffer(&fixture);
+
+	fixture.context_values[2] = "0";
+	assert(iio_buffer_set_metadata_read_prequeue_async_policy(buffer, 2,
+		TEST_METADATA_BYTES,
+		IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG) == -EPERM);
+	assert(fixture.state.write_calls == 0);
+	destroy_fixture_buffer(&fixture, buffer);
 }
 
 static void destroy_fixture_buffer(struct fixture *fixture,
@@ -417,6 +464,8 @@ static void test_terminal_status_survives_early_direct_failure(void)
 
 int main(void)
 {
+	test_allocated_kernel_buffer_count_is_backend_authoritative();
+	test_exact_kernel_queue_capability_is_required();
 	test_fifo_drain_single_command();
 	test_gates_and_early_close();
 	test_long_capture_is_one_command();

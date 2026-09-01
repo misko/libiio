@@ -2024,6 +2024,21 @@ static int local_set_timeout(struct iio_context *ctx, unsigned int timeout)
 	return 0;
 }
 
+static int local_get_allocated_kernel_buffers_count(
+		const struct iio_device *dev, unsigned int *count)
+{
+	struct iio_device_pdata *pdata;
+
+	if (!dev || !count)
+		return -EINVAL;
+	pdata = dev->pdata;
+	if (pdata->fd < 0 || !pdata->is_high_speed ||
+			!pdata->allocated_nb_blocks)
+		return -EBADF;
+	*count = pdata->allocated_nb_blocks;
+	return 0;
+}
+
 static void local_cancel(const struct iio_device *dev)
 {
 	struct iio_device_pdata *pdata = dev->pdata;
@@ -2085,10 +2100,12 @@ static const struct iio_backend_ops local_ops = {
 	.cancel = local_cancel,
 	.acquire_buffer_block = local_acquire_buffer_block,
 	.release_buffer_block = local_release_buffer_block,
+	.get_allocated_kernel_buffers_count =
+		local_get_allocated_kernel_buffers_count,
 };
 
 static const struct iio_backend local_backend = {
-	.api_version = IIO_BACKEND_API_V6,
+	.api_version = IIO_BACKEND_API_V8,
 	.name = "local",
 	.uri_prefix = "local:",
 	.ops = &local_ops,

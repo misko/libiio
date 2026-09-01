@@ -742,6 +742,8 @@ struct DevEntry {
 	struct iio_buffer *buf;
 	unsigned int sample_size, nb_clients;
 	unsigned int samples_count;
+	unsigned int requested_kernel_buffers;
+	unsigned int allocated_kernel_buffers;
 	size_t metadata_extra_samples;
 	void *metadata_provider_context;
 	struct iiod_buffer_burst_plan burst_plan;
@@ -2477,6 +2479,9 @@ static void rw_thd(struct thread_pool *pool, void *d)
 					break;
 			}
 
+			entry->requested_kernel_buffers =
+				iio_device_get_kernel_buffers_count(dev);
+			entry->allocated_kernel_buffers = 0;
 			entry->buf = iio_device_create_buffer(dev,
 					samples_count + entry->metadata_extra_samples,
 					entry->cyclic);
@@ -2486,9 +2491,22 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				break;
 			}
 			if (entry->metadata_enabled) {
+				ret = iio_buffer_get_allocated_kernel_buffers_count(
+					entry->buf, &entry->allocated_kernel_buffers);
+				if (ret < 0) {
+					IIO_ERROR("Unable to attest allocated kernel buffers: "
+						"%zd\n", ret);
+					iio_buffer_destroy(entry->buf);
+					entry->buf = NULL;
+					break;
+				}
+				IIO_DEBUG("Kernel DMA admission: requested=%u "
+					"allocated=%u\n",
+					entry->requested_kernel_buffers,
+					entry->allocated_kernel_buffers);
 				ret = iiod_buffer_metadata_buffer_opened(
 					entry->metadata_provider_context,
-					iio_device_get_kernel_buffers_count(dev));
+					entry->allocated_kernel_buffers);
 				if (ret < 0) {
 					iio_buffer_destroy(entry->buf);
 					entry->buf = NULL;
@@ -2947,8 +2965,18 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 		return -EBUSY;
 	}
 	if (async_frames) {
+		if (!entry->allocated_kernel_buffers ||
+				entry->allocated_kernel_buffers !=
+				entry->requested_kernel_buffers) {
+			IIO_ERROR("Direct async exact DMA admission failed: "
+				"requested=%u allocated=%u\n",
+				entry->requested_kernel_buffers,
+				entry->allocated_kernel_buffers);
+			pthread_mutex_unlock(&entry->thdlist_lock);
+			return -ENOSPC;
+		}
 		ret = direct_async_prepare(&entry->direct,
-			iio_device_get_kernel_buffers_count(dev),
+			entry->allocated_kernel_buffers,
 			ring_extension ? entry->ring.core.slot_count : 0U,
 			metadata_capacity, async_frames, overrun_policy);
 		if (ret) {

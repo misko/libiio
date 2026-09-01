@@ -50,6 +50,20 @@ static bool device_is_high_speed(const struct iio_device *dev)
 		(ops->get_buffer(dev, NULL, 0, NULL, 0) != -ENOSYS);
 }
 
+int iio_buffer_get_allocated_kernel_buffers_count(
+		const struct iio_buffer *buffer, unsigned int *count)
+{
+	const struct iio_backend_ops *ops;
+
+	if (!buffer || !count)
+		return -EINVAL;
+	ops = buffer->dev->ctx->ops;
+	if (buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V8 ||
+			!ops->get_allocated_kernel_buffers_count)
+		return -ENOSYS;
+	return ops->get_allocated_kernel_buffers_count(buffer->dev, count);
+}
+
 static struct iio_buffer * create_buffer(const struct iio_device *dev,
 		size_t samples_count, bool cyclic, bool metadata_enabled,
 		const void *metadata_request, size_t metadata_request_bytes)
@@ -292,6 +306,10 @@ int iio_buffer_set_metadata_read_prequeue_async(struct iio_buffer *buffer,
 		"iio,buffer-direct-async");
 	if (!capability || strcmp(capability, "1"))
 		return -EPERM;
+	capability = iio_context_get_attr_value(buffer->dev->ctx,
+		"iio,buffer-direct-async-exact-kernel-queue");
+	if (!capability || strcmp(capability, "1"))
+		return -EPERM;
 	if (buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V6 ||
 		!ops->cancel || !ops->prequeue_metadata_reads_async ||
 		(buffer->dev_is_high_speed ?
@@ -343,6 +361,10 @@ int iio_buffer_set_metadata_read_prequeue_async_policy(
 	ops = buffer->dev->ctx->ops;
 	capability = iio_context_get_attr_value(buffer->dev->ctx,
 		"iio,buffer-direct-async");
+	if (!capability || strcmp(capability, "1"))
+		return -EPERM;
+	capability = iio_context_get_attr_value(buffer->dev->ctx,
+		"iio,buffer-direct-async-exact-kernel-queue");
 	if (!capability || strcmp(capability, "1"))
 		return -EPERM;
 	capability = iio_context_get_attr_value(buffer->dev->ctx,

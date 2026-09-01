@@ -22,9 +22,10 @@ enum iio_backend_api_ver {
 	IIO_BACKEND_API_V5 = 5,
 	IIO_BACKEND_API_V6 = 6,
 	IIO_BACKEND_API_V7 = 7,
+	IIO_BACKEND_API_V8 = 8,
 };
 
-#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V7
+#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V8
 
 static inline bool iio_backend_api_version_supported(unsigned int version)
 {
@@ -129,6 +130,12 @@ struct iio_backend_ops {
 	int (*prequeue_metadata_reads_async_policy)(const struct iio_device *dev,
 			size_t len, size_t metadata_capacity,
 			unsigned int frames, unsigned int overrun_policy);
+
+	/* API v8: report the blocks allocated for the currently open kernel
+	 * buffer.  This is intentionally distinct from the requested device
+	 * configuration because Linux may admit a smaller partial allocation. */
+	int (*get_allocated_kernel_buffers_count)(const struct iio_device *dev,
+			unsigned int *count);
 };
 
 /**
