@@ -81,9 +81,14 @@ add_executable(test_spf_hop_protocol test_spf_hop_protocol.c
 	../iiod/spf-hop-protocol.c)
 add_executable(test_spf_hop_session test_spf_hop_session.c
 	../iiod/spf-hop-protocol.c ../iiod/spf-hop-session.c)
+add_executable(test_spf_hop_scheduler test_spf_hop_scheduler.c
+	../iiod/spf-hop-protocol.c ../iiod/spf-hop-scheduler.c)
 target_include_directories(test_spf_hop_protocol PRIVATE ../iiod)
 target_include_directories(test_spf_hop_session PRIVATE ../iiod)
-list(APPEND IIO_TESTS_TARGETS test_spf_hop_protocol test_spf_hop_session)
+target_include_directories(test_spf_hop_scheduler PRIVATE ../iiod)
+target_link_libraries(test_spf_hop_scheduler ${PTHREAD_LIBRARIES})
+list(APPEND IIO_TESTS_TARGETS test_spf_hop_protocol test_spf_hop_session
+	test_spf_hop_scheduler)
 
 if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	set(SPF_RADIO_FRAME_V3_SOURCE "")
@@ -122,6 +127,10 @@ if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 		../iiod/ddr-ring-core.c)
 	target_include_directories(test_spf_tandem_session PRIVATE ../iiod
 		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+	if(IIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER)
+		target_compile_definitions(test_spf_tandem_session PRIVATE
+			IIOD_HAS_BUFFER_PERSISTENT_HOP=1)
+	endif()
 	target_include_directories(test_spf_tandem_metadata PRIVATE ../iiod
 		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
 	target_include_directories(test_spf_temperature_cache PRIVATE ../iiod

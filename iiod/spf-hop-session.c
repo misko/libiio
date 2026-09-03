@@ -56,7 +56,7 @@ static int restore(struct spf_hop_session_v1 *session, uint16_t reason,
 		receipt.transition_before <= receipt.transition_after &&
 		receipt.restored_lo_frequency_hz) {
 		if (reason == SPF_HOP_REASON_PLAN_COMPLETE &&
-			receipt.transition_before != required_final_counter) {
+			receipt.transition_before < required_final_counter) {
 			session->status.restore_error = -ERANGE;
 		} else {
 			session->status.flags |= SPF_HOP_STATUS_RESTORE_SUCCEEDED;

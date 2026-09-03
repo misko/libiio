@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "spf-hop-session.h"
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <errno.h>
 #include <stdint.h>
@@ -132,7 +135,9 @@ static void test_complete_valid_visits(void)
 	device.events[1] = make_event(&request, 1, 1115, 1117); /* end 1127 */
 	device.events[2] = make_event(&request, 2, 1231, 1233); /* end 1243 */
 	device.event_count = 3;
-	init_receipt(&device, 1343);
+	/* The terminal block is observed after the exact final dwell.  Restoration
+	 * may begin later; the intervening samples are deliberately unassigned. */
+	init_receipt(&device, 1375);
 	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
 	assert(spf_hop_session_v1_start(&session) == 0);
 	assert(device.submit_calls == 1);
@@ -152,6 +157,7 @@ static void test_complete_valid_visits(void)
 	assert(sidecar.state == SPF_HOP_STATE_COMPLETED);
 	assert(sidecar.terminal_reason == SPF_HOP_REASON_PLAN_COMPLETE);
 	assert(session.status.final_counter == 1343);
+	assert(session.status.restore_before == 1375);
 	assert(session.status.final_counter - session.last_event.invalid_end ==
 		request.dwell_samples);
 	assert(session.status.visits_started == 3);
@@ -176,6 +182,35 @@ static void test_event_sequence_fails_closed(void)
 	assert(session.status.terminal_reason == SPF_HOP_REASON_EVENT_SEQUENCE);
 	assert(session.status.flags & SPF_HOP_STATUS_CONTINUITY_FAULT);
 	assert(device.restore_calls == 1);
+}
+
+static void test_restore_cannot_truncate_final_dwell(void)
+{
+	struct spf_hop_request_v1 request = make_request();
+	struct spf_hop_session_v1 session;
+	struct spf_hop_sidecar_v1 sidecar;
+	struct fake_device device = {0};
+
+	device.events[0] = make_event(&request, 0, 1000, 1002);
+	device.events[1] = make_event(&request, 1, 1115, 1117);
+	device.events[2] = make_event(&request, 2, 1231, 1233);
+	device.event_count = 3;
+	/* The exact terminal counter is 1343.  A provider must not restore early
+	 * and silently shorten the final target-assigned dwell. */
+	init_receipt(&device, 1342);
+	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
+	assert(spf_hop_session_v1_start(&session) == 0);
+	assert(spf_hop_session_v1_on_block(&session, 0, 900, 1100,
+		&sidecar) == 0);
+	assert(spf_hop_session_v1_on_block(&session, 1, 1100, 1200,
+		&sidecar) == 0);
+	assert(spf_hop_session_v1_on_block(&session, 2, 1200, 1300,
+		&sidecar) == 0);
+	assert(spf_hop_session_v1_on_block(&session, 3, 1300, 1400,
+		&sidecar) == -ERANGE);
+	assert(session.status.state == SPF_HOP_STATE_FAILED);
+	assert(session.status.terminal_reason == SPF_HOP_REASON_RESTORE_ERROR);
+	assert(!(session.status.flags & SPF_HOP_STATUS_RESTORE_SUCCEEDED));
 }
 
 static void test_bad_valid_dwell_fails_closed(void)
@@ -265,6 +300,7 @@ static void test_cancel_and_restore_once(void)
 int main(void)
 {
 	test_complete_valid_visits();
+	test_restore_cannot_truncate_final_dwell();
 	test_event_sequence_fails_closed();
 	test_bad_valid_dwell_fails_closed();
 	test_counter_gap_and_overflow_fail_closed();

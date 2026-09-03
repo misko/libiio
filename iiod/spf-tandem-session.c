@@ -30,6 +30,18 @@ _Static_assert(sizeof(struct adi_tandem_agc_acquire) == 180,
 	"unexpected tandem acquire ABI size");
 _Static_assert(sizeof(struct adi_tandem_agc_event) == 16,
 	"unexpected tandem event ABI size");
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+_Static_assert(sizeof(struct adi_persistent_hop_caps_v1) == 48,
+	"unexpected persistent-hop capabilities ABI size");
+_Static_assert(sizeof(struct adi_persistent_hop_counter_v1) == 32,
+	"unexpected persistent-hop counter ABI size");
+_Static_assert(sizeof(struct adi_persistent_hop_start_v1) == 48,
+	"unexpected persistent-hop start ABI size");
+_Static_assert(sizeof(struct adi_persistent_hop_transition_v1) == 64,
+	"unexpected persistent-hop transition ABI size");
+_Static_assert(sizeof(struct adi_persistent_hop_restore_v1) == 64,
+	"unexpected persistent-hop restore ABI size");
+#endif
 
 static uint16_t get_le16(const uint8_t *source)
 {
@@ -443,6 +455,105 @@ process_queue:
 	*event_count = produced;
 	return 0;
 }
+
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+int spf_tandem_session_hop_start(struct spf_tandem_session *session,
+	uint64_t expected_original_lo_hz)
+{
+	struct adi_persistent_hop_caps_v1 caps = {0};
+	struct adi_persistent_hop_start_v1 start = {0};
+
+	if (!session || !session->acquired || !expected_original_lo_hz)
+		return -EINVAL;
+	if (session->syscalls.ioctl_device(session->fd,
+			ADI_PERSISTENT_HOP_IOC_GET_CAPS, &caps,
+			session->syscalls.opaque) < 0)
+		return -errno;
+	if (caps.version != ADI_PERSISTENT_HOP_ABI_VERSION ||
+		caps.size != sizeof(caps) ||
+		caps.features != ADI_PERSISTENT_HOP_REQUIRED_FEATURES ||
+		caps.maximum_profiles != 8U)
+		return -EPROTONOSUPPORT;
+	start.version = ADI_PERSISTENT_HOP_ABI_VERSION;
+	start.size = sizeof(start);
+	start.required_features = ADI_PERSISTENT_HOP_REQUIRED_FEATURES;
+	start.expected_original_lo_hz = expected_original_lo_hz;
+	if (session->syscalls.ioctl_device(session->fd,
+			ADI_PERSISTENT_HOP_IOC_START, &start,
+			session->syscalls.opaque) < 0)
+		return -errno;
+	if (start.actual_original_lo_hz != expected_original_lo_hz ||
+		start.active_profile != ADI_PERSISTENT_HOP_PROFILE_NONE)
+		return -ESTALE;
+	return 0;
+}
+
+int spf_tandem_session_hop_get_counter(struct spf_tandem_session *session,
+	uint64_t *sample_counter)
+{
+	struct adi_persistent_hop_counter_v1 counter = {0};
+
+	if (!session || !session->acquired || !sample_counter)
+		return -EINVAL;
+	if (session->syscalls.ioctl_device(session->fd,
+			ADI_PERSISTENT_HOP_IOC_GET_COUNTER, &counter,
+			session->syscalls.opaque) < 0)
+		return -errno;
+	if (counter.version != ADI_PERSISTENT_HOP_ABI_VERSION ||
+		counter.size != sizeof(counter))
+		return -EPROTO;
+	*sample_counter = counter.sample_counter;
+	return 0;
+}
+
+int spf_tandem_session_hop_recall(struct spf_tandem_session *session,
+	uint32_t profile, uint64_t expected_lo_hz,
+	struct adi_persistent_hop_transition_v1 *transition)
+{
+	if (!session || !session->acquired || !expected_lo_hz || !transition ||
+		profile >= 8U)
+		return -EINVAL;
+	memset(transition, 0, sizeof(*transition));
+	transition->version = ADI_PERSISTENT_HOP_ABI_VERSION;
+	transition->size = sizeof(*transition);
+	transition->required_features = ADI_PERSISTENT_HOP_REQUIRED_FEATURES;
+	transition->profile = profile;
+	transition->expected_lo_hz = expected_lo_hz;
+	if (session->syscalls.ioctl_device(session->fd,
+			ADI_PERSISTENT_HOP_IOC_RECALL, transition,
+			session->syscalls.opaque) < 0)
+		return -errno;
+	if (transition->active_profile != profile ||
+		transition->actual_lo_hz != expected_lo_hz ||
+		!transition->device_event_id ||
+		transition->transition_before > transition->transition_after)
+		return -ESTALE;
+	return 0;
+}
+
+int spf_tandem_session_hop_restore(struct spf_tandem_session *session,
+	uint64_t expected_original_lo_hz,
+	struct adi_persistent_hop_restore_v1 *restore)
+{
+	if (!session || !session->acquired || !expected_original_lo_hz ||
+		!restore)
+		return -EINVAL;
+	memset(restore, 0, sizeof(*restore));
+	restore->version = ADI_PERSISTENT_HOP_ABI_VERSION;
+	restore->size = sizeof(*restore);
+	restore->required_features = ADI_PERSISTENT_HOP_REQUIRED_FEATURES;
+	restore->expected_original_lo_hz = expected_original_lo_hz;
+	if (session->syscalls.ioctl_device(session->fd,
+			ADI_PERSISTENT_HOP_IOC_RESTORE, restore,
+			session->syscalls.opaque) < 0)
+		return -errno;
+	if (restore->active_profile != ADI_PERSISTENT_HOP_PROFILE_NONE ||
+		restore->actual_lo_hz != expected_original_lo_hz ||
+		restore->transition_before > restore->transition_after)
+		return -ESTALE;
+	return 0;
+}
+#endif
 
 void spf_tandem_session_close(struct spf_tandem_session *session)
 {

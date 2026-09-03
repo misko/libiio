@@ -288,7 +288,8 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			return -ret;
 		}
 		ctx->hop_lock_initialized = true;
-		ret = spf_hop_device_v1_open(ctx->rx, ctx->phy, &ctx->hop_request,
+		ret = spf_hop_device_v1_open(ctx->rx, ctx->phy, &ctx->tandem,
+			&ctx->hop_request,
 			&ctx->hop_device_context, &ctx->hop_ops);
 		if (ret) {
 			iiod_buffer_metadata_close(ctx);
