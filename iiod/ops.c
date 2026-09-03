@@ -13,6 +13,7 @@
 #include "ddr-ring-core.h"
 #include "spf-ddr-ring-request.h"
 #include "spf-ddr-ring-status.h"
+#include "spf-hop-protocol.h"
 #include "../debug.h"
 
 #include <errno.h>
@@ -3503,7 +3504,7 @@ ssize_t rw_dev_with_metadata_async(struct parser_pdata *pdata,
 ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t status_capacity)
 {
-	uint8_t wire_status[SPF_DDR_RING_STATUS_BYTES];
+	uint8_t wire_status[SPF_HOP_STATUS_BYTES];
 	struct spf_ddr_ring_status status = {0};
 	struct ThdEntry *thd;
 	struct DevEntry *entry;
@@ -3511,51 +3512,69 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 
 	if (!dev)
 		ret = -ENODEV;
-	else if (status_capacity < sizeof(wire_status))
-		ret = -ENOSPC;
 	else if (!(thd = parser_lookup_thd_entry(pdata, dev)))
 		ret = -EBADF;
 	else {
 		entry = thd->entry;
-		pthread_mutex_lock(&entry->ring_lock);
-		if (!entry->ring.producer_started && !entry->ring.direct_extension) {
-			ret = -ENODATA;
-		} else {
-			status.state = entry->ring.core.state;
-			status.terminal_reason = entry->ring.core.terminal_reason;
-			status.error_code = entry->ring.core.error_code;
-			status.requested_capacity_iq_bytes =
-				entry->ring.requested_iq_bytes;
-			status.admitted_capacity_iq_bytes =
-				entry->ring.admitted_iq_bytes;
-			status.target_frames = entry->ring.core.target_frames;
-			status.produced_frames = entry->ring.core.produced_frames;
-			status.consumed_frames = entry->ring.core.consumed_frames;
-			status.high_water_frames = entry->ring.core.high_water_frames;
-			status.wrap_count = entry->ring.core.wrap_count;
-			status.producer_position = entry->ring.core.producer_position;
-			status.consumer_position = entry->ring.core.consumer_position;
-			if (entry->ring.core.last_contiguous_valid) {
-				status.valid_fields |=
-					SPF_DDR_RING_STATUS_VALID_LAST_CONTIGUOUS;
-				status.last_contiguous_sample_sequence =
-					entry->ring.core.last_contiguous_sample_sequence;
+		ret = iiod_buffer_metadata_status(entry->metadata_provider_context,
+			wire_status, status_capacity < sizeof(wire_status) ?
+				status_capacity : sizeof(wire_status));
+		if (ret == -ENODATA) {
+			if (status_capacity < SPF_DDR_RING_STATUS_BYTES) {
+				ret = -ENOSPC;
+			} else {
+				pthread_mutex_lock(&entry->ring_lock);
+				if (!entry->ring.producer_started &&
+						!entry->ring.direct_extension) {
+					ret = -ENODATA;
+				} else {
+					status.state = entry->ring.core.state;
+					status.terminal_reason =
+						entry->ring.core.terminal_reason;
+					status.error_code = entry->ring.core.error_code;
+					status.requested_capacity_iq_bytes =
+						entry->ring.requested_iq_bytes;
+					status.admitted_capacity_iq_bytes =
+						entry->ring.admitted_iq_bytes;
+					status.target_frames = entry->ring.core.target_frames;
+					status.produced_frames =
+						entry->ring.core.produced_frames;
+					status.consumed_frames =
+						entry->ring.core.consumed_frames;
+					status.high_water_frames =
+						entry->ring.core.high_water_frames;
+					status.wrap_count = entry->ring.core.wrap_count;
+					status.producer_position =
+						entry->ring.core.producer_position;
+					status.consumer_position =
+						entry->ring.core.consumer_position;
+					if (entry->ring.core.last_contiguous_valid) {
+						status.valid_fields |=
+							SPF_DDR_RING_STATUS_VALID_LAST_CONTIGUOUS;
+						status.last_contiguous_sample_sequence =
+							entry->ring.core.last_contiguous_sample_sequence;
+					}
+					if (entry->ring.core.first_unavailable_valid) {
+						status.valid_fields |=
+							SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE;
+						status.first_unavailable_sample_sequence =
+							entry->ring.core.first_unavailable_sample_sequence;
+					}
+					ret = spf_ddr_ring_status_encode(wire_status,
+						SPF_DDR_RING_STATUS_BYTES, &status);
+					if (!ret)
+						ret = SPF_DDR_RING_STATUS_BYTES;
+				}
+				pthread_mutex_unlock(&entry->ring_lock);
 			}
-			if (entry->ring.core.first_unavailable_valid) {
-				status.valid_fields |=
-					SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE;
-				status.first_unavailable_sample_sequence =
-					entry->ring.core.first_unavailable_sample_sequence;
-			}
-			ret = spf_ddr_ring_status_encode(wire_status,
-				sizeof(wire_status), &status);
 		}
-		pthread_mutex_unlock(&entry->ring_lock);
-		if (!ret) {
-			print_value(pdata, sizeof(wire_status));
-			ret = write_all(pdata, wire_status, sizeof(wire_status));
+		if (ret > 0) {
+			ssize_t status_bytes = ret;
+
+			print_value(pdata, status_bytes);
+			ret = write_all(pdata, wire_status, (size_t)status_bytes);
 			if (ret > 0)
-				ret = sizeof(wire_status);
+				ret = status_bytes;
 		}
 	}
 	if (ret < 0)

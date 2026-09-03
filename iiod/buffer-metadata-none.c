@@ -71,6 +71,15 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	return -ENOSYS;
 }
 
+ssize_t iiod_buffer_metadata_status(void *provider_context,
+		void *status, size_t status_capacity)
+{
+	(void)provider_context;
+	(void)status;
+	(void)status_capacity;
+	return -ENODATA;
+}
+
 int iiod_buffer_metadata_describe_frame(void *provider_context,
 		const void *metadata, size_t metadata_bytes,
 		struct iiod_buffer_metadata_frame_info *info)

@@ -739,6 +739,31 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
 	}
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	ret = iio_context_add_attr(ctx, "iio,buffer-persistent-hop", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx,
+		"iio,buffer-persistent-hop-request", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx,
+		"iio,buffer-persistent-hop-event", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx,
+		"iio,buffer-persistent-hop-status", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+#endif
 #endif
 
 	xml_zstd = get_xml_zstd_data(ctx, &xml_zstd_len);

@@ -77,6 +77,14 @@ target_link_libraries(iio_writedev iio iio_tests_helper)
 set(IIO_TESTS_TARGETS iio_genxml iio_info iio_attr iio_readdev iio_reg
 	iio_writedev)
 
+add_executable(test_spf_hop_protocol test_spf_hop_protocol.c
+	../iiod/spf-hop-protocol.c)
+add_executable(test_spf_hop_session test_spf_hop_session.c
+	../iiod/spf-hop-protocol.c ../iiod/spf-hop-session.c)
+target_include_directories(test_spf_hop_protocol PRIVATE ../iiod)
+target_include_directories(test_spf_hop_session PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_hop_protocol test_spf_hop_session)
+
 if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	set(SPF_RADIO_FRAME_V3_SOURCE "")
 	set(SPF_THREAD_JOIN_SOURCE "")

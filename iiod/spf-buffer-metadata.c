@@ -9,6 +9,11 @@
 #include "spf-tandem-metadata.h"
 #include "spf-tandem-session.h"
 #include "spf-temperature-cache.h"
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#include "spf-hop-device.h"
+#include "spf-hop-protocol.h"
+#include "spf-hop-session.h"
+#endif
 
 #include <spf_gain_metadata.h>
 #include <spf_gain_read.h>
@@ -19,6 +24,7 @@
 #include <errno.h>
 #include <iio.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -53,6 +59,17 @@ struct spf_iiod_metadata_context {
 	bool burst_enabled;
 	bool ring_enabled;
 	bool ring_prefix_complete;
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	struct spf_hop_request_v1 hop_request;
+	struct spf_hop_session_v1 hop_session;
+	const struct spf_hop_device_ops_v1 *hop_ops;
+	void *hop_device_context;
+	pthread_mutex_t hop_lock;
+	bool hop_enabled;
+	bool hop_lock_initialized;
+	bool hop_device_opened;
+	bool hop_session_initialized;
+#endif
 };
 
 static bool buffered_capture_is_strict(
@@ -88,12 +105,30 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	long long sample_rate_hz;
 	size_t tandem_request_bytes = request_bytes;
 	uint32_t timestamp_control;
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	struct spf_hop_request_v1 hop_request;
+	long long rf_bandwidth_hz = -1;
+	bool hop_enabled = false;
+#endif
 	int ret;
 
 	if (!dev || !request || !request_bytes || !provider_context ||
 		!extra_samples || !burst_plan)
 		return -EINVAL;
 	memset(burst_plan, 0, sizeof(*burst_plan));
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
+			SPF_HOP_REQUEST_BYTES) {
+		ret = spf_hop_request_v1_decode(&hop_request,
+			(const uint8_t *)request +
+				sizeof(struct adi_tandem_agc_request_v1),
+			SPF_HOP_REQUEST_BYTES);
+		if (ret)
+			return ret;
+		hop_enabled = true;
+		tandem_request_bytes = sizeof(struct adi_tandem_agc_request_v1);
+	} else
+#endif
 	if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
 			SPF_DDR_BURST_REQUEST_BYTES) {
 		ret = spf_ddr_burst_request_decode(&burst_request,
@@ -153,6 +188,11 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		SPF_DDR_BURST_REQUEST_BYTES;
 	ctx->ring_enabled = request_bytes == tandem_request_bytes +
 		SPF_DDR_RING_REQUEST_BYTES;
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	ctx->hop_enabled = hop_enabled;
+	if (ctx->hop_enabled)
+		ctx->hop_request = hop_request;
+#endif
 	ctx->layout = layout;
 	ctx->rx = (struct iio_device *)dev;
 	iio_ctx = iio_device_get_context(dev);
@@ -162,7 +202,11 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		free(ctx);
 		return -ENOTSUP;
 	}
-	if (ctx->burst_enabled || ctx->ring_enabled) {
+	if (ctx->burst_enabled || ctx->ring_enabled
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+			|| ctx->hop_enabled
+#endif
+			) {
 		rx0 = iio_device_find_channel(ctx->phy, "voltage0", false);
 		if (!rx0 || iio_channel_attr_read_longlong(rx0,
 				"sampling_frequency", &sample_rate_hz) != 0 ||
@@ -170,17 +214,37 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			free(ctx);
 			return -EIO;
 		}
-		ret = spf_ddr_burst_validate_frame_period((uint32_t)samples_count,
-			(uint32_t)sample_rate_hz);
-		if (ret) {
-			fprintf(stderr,
-				"SPF DDR buffered frame period is unsupported: samples=%zu "
-				"rate=%lld minimum_us=%u error=%d\n",
-				samples_count, sample_rate_hz,
-				SPF_DDR_BURST_MIN_FRAME_DURATION_US, ret);
-			free(ctx);
-			return ret;
+		if (ctx->burst_enabled || ctx->ring_enabled) {
+			ret = spf_ddr_burst_validate_frame_period((uint32_t)samples_count,
+				(uint32_t)sample_rate_hz);
+			if (ret) {
+				fprintf(stderr,
+					"SPF DDR buffered frame period is unsupported: samples=%zu "
+					"rate=%lld minimum_us=%u error=%d\n",
+					samples_count, sample_rate_hz,
+					SPF_DDR_BURST_MIN_FRAME_DURATION_US, ret);
+				free(ctx);
+				return ret;
+			}
 		}
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+		if (ctx->hop_enabled &&
+			((uint64_t)sample_rate_hz != ctx->hop_request.sample_rate_hz ||
+			 iio_channel_attr_read_longlong(rx0, "rf_bandwidth",
+				&rf_bandwidth_hz) != 0 || rf_bandwidth_hz <= 0 ||
+			 (uint64_t)rf_bandwidth_hz !=
+				ctx->hop_request.rf_bandwidth_hz)) {
+			fprintf(stderr,
+				"SPF persistent-hop settings do not match request: "
+				"sample_rate=%lld requested_rate=%llu bandwidth=%lld "
+				"requested_bandwidth=%llu\n", sample_rate_hz,
+				(unsigned long long)ctx->hop_request.sample_rate_hz,
+				rf_bandwidth_hz,
+				(unsigned long long)ctx->hop_request.rf_bandwidth_hz);
+			free(ctx);
+			return -ESTALE;
+		}
+#endif
 	}
 
 	if (iio_device_reg_read(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
@@ -216,6 +280,30 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	ctx->sampler_started = true;
 	ctx->temperature_sampler_started =
 		spf_temperature_sampler_start(&ctx->temperature_sampler);
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (ctx->hop_enabled) {
+		ret = pthread_mutex_init(&ctx->hop_lock, NULL);
+		if (ret) {
+			iiod_buffer_metadata_close(ctx);
+			return -ret;
+		}
+		ctx->hop_lock_initialized = true;
+		ret = spf_hop_device_v1_open(ctx->rx, ctx->phy, &ctx->hop_request,
+			&ctx->hop_device_context, &ctx->hop_ops);
+		if (ret) {
+			iiod_buffer_metadata_close(ctx);
+			return ret;
+		}
+		ctx->hop_device_opened = true;
+		ret = spf_hop_session_v1_init(&ctx->hop_session,
+			&ctx->hop_request, ctx->hop_ops, ctx->hop_device_context);
+		if (ret) {
+			iiod_buffer_metadata_close(ctx);
+			return ret;
+		}
+		ctx->hop_session_initialized = true;
+	}
+#endif
 
 	*provider_context = ctx;
 	*extra_samples = ctx->layout.extra_samples;
@@ -237,6 +325,20 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			return -EOVERFLOW;
 		}
 	}
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (ctx->hop_enabled) {
+		burst_plan->metadata_capacity = spf_radio_frame_v5_header_bytes(
+			(uint16_t)ctx->tandem.request.observation_capacity,
+			(uint16_t)ctx->tandem.request.event_capacity);
+		if (!burst_plan->metadata_capacity || burst_plan->metadata_capacity >
+				SIZE_MAX - SPF_HOP_SIDECAR_MAX_BYTES) {
+			iiod_buffer_metadata_close(ctx);
+			*provider_context = NULL;
+			return -EOVERFLOW;
+		}
+		burst_plan->metadata_capacity += SPF_HOP_SIDECAR_MAX_BYTES;
+	}
+#endif
 	return 0;
 }
 
@@ -261,6 +363,15 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 	ctx->refills_started = 0;
 	spf_gain_sampler_limit(&ctx->sampler,
 		ctx->sampler_coverage_window_samples);
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (ctx->hop_enabled) {
+		pthread_mutex_lock(&ctx->hop_lock);
+		ret = spf_hop_session_v1_start(&ctx->hop_session);
+		pthread_mutex_unlock(&ctx->hop_lock);
+		if (ret)
+			return ret;
+	}
+#endif
 	return 0;
 }
 
@@ -315,6 +426,14 @@ void iiod_buffer_metadata_close(void *provider_context)
 	struct spf_iiod_metadata_context *ctx = provider_context;
 	if (!ctx)
 		return;
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (ctx->hop_session_initialized) {
+		pthread_mutex_lock(&ctx->hop_lock);
+		(void)spf_hop_session_v1_cancel(&ctx->hop_session,
+			SPF_HOP_REASON_CLIENT_CLOSE);
+		pthread_mutex_unlock(&ctx->hop_lock);
+	}
+#endif
 	if (ctx->tandem_initialized)
 		spf_tandem_session_close(&ctx->tandem);
 	if (ctx->sampler_started)
@@ -324,6 +443,12 @@ void iiod_buffer_metadata_close(void *provider_context)
 	if (ctx->timestamp_configured)
 		(void)iio_device_reg_write(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
 				ctx->timestamp_control_previous);
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (ctx->hop_device_opened)
+		spf_hop_device_v1_destroy(ctx->hop_device_context);
+	if (ctx->hop_lock_initialized)
+		pthread_mutex_destroy(&ctx->hop_lock);
+#endif
 	free(ctx);
 }
 
@@ -345,6 +470,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	size_t event_count;
 	spf_gain_frame_decision_t frame_decision;
 	size_t header_bytes;
+	size_t total_metadata_bytes;
 	const uint8_t *raw;
 	int ret;
 
@@ -354,7 +480,15 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	header_bytes = spf_radio_frame_v5_header_bytes(
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		(uint16_t)ctx->tandem.request.event_capacity);
-	if (!header_bytes || metadata_capacity < header_bytes)
+	total_metadata_bytes = header_bytes;
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (ctx->hop_enabled) {
+		if (header_bytes > SIZE_MAX - SPF_HOP_SIDECAR_MAX_BYTES)
+			return -EOVERFLOW;
+		total_metadata_bytes += SPF_HOP_SIDECAR_MAX_BYTES;
+	}
+#endif
+	if (!header_bytes || metadata_capacity < total_metadata_bytes)
 		return -ENOSPC;
 	if (raw_bytes != ctx->layout.raw_bytes) {
 		fprintf(stderr,
@@ -498,11 +632,63 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (!spf_radio_frame_v6_build(metadata, metadata_capacity, &args))
 		return -EIO;
 
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (ctx->hop_enabled) {
+		struct spf_hop_sidecar_v1 sidecar;
+		int sidecar_bytes;
+
+		pthread_mutex_lock(&ctx->hop_lock);
+		ret = spf_hop_session_v1_on_block(&ctx->hop_session,
+			sequence.buffer_sequence, first_sample_sequence,
+			first_sample_sequence + ctx->samples_per_channel, &sidecar);
+		if (!ret)
+			sidecar_bytes = spf_hop_sidecar_v1_encode(
+				(uint8_t *)metadata + header_bytes,
+				metadata_capacity - header_bytes, &sidecar);
+		else
+			sidecar_bytes = ret;
+		pthread_mutex_unlock(&ctx->hop_lock);
+		if (sidecar_bytes < 0)
+			return sidecar_bytes;
+		total_metadata_bytes = header_bytes + (size_t)sidecar_bytes;
+	} else
+#endif
+	{
+		total_metadata_bytes = header_bytes;
+	}
+
 	spf_buffer_sequence_commit(&ctx->sequence, &sequence);
 	ctx->frames_emitted++;
 	*iq_offset = sizeof(first_sample_sequence);
 	*iq_bytes = ctx->layout.iq_bytes;
-	return (ssize_t)header_bytes;
+	return (ssize_t)total_metadata_bytes;
+}
+
+ssize_t iiod_buffer_metadata_status(void *provider_context,
+		void *status, size_t status_capacity)
+{
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	struct spf_hop_status_v1 hop_status;
+	int ret;
+
+	if (!ctx || !ctx->hop_enabled)
+		return -ENODATA;
+	if (!status)
+		return -EINVAL;
+	if (status_capacity < SPF_HOP_STATUS_BYTES)
+		return -ENOSPC;
+	pthread_mutex_lock(&ctx->hop_lock);
+	spf_hop_session_v1_get_status(&ctx->hop_session, &hop_status);
+	ret = spf_hop_status_v1_encode(status, status_capacity, &hop_status);
+	pthread_mutex_unlock(&ctx->hop_lock);
+	return ret ? ret : SPF_HOP_STATUS_BYTES;
+#else
+	(void)provider_context;
+	(void)status;
+	(void)status_capacity;
+	return -ENODATA;
+#endif
 }
 
 static int spf_exact_gap_header(
@@ -517,12 +703,33 @@ static int spf_exact_gap_header(
 		return -EINVAL;
 	if (record->magic != SPF_GAIN_META_MAGIC ||
 			record->version != SPF_GAIN_META_VERSION_V6 ||
-			record->header_bytes != metadata_bytes ||
+			record->header_bytes > metadata_bytes ||
 			(record->features & SPF_META_FEATURE_EXACT_GAP_ACCOUNTING) == 0 ||
 			record->samples_per_channel != ctx->samples_per_channel ||
 			record->first_sample_sequence >
 				UINT64_MAX - record->samples_per_channel)
 		return -EBADMSG;
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (ctx->hop_enabled) {
+		struct spf_hop_sidecar_v1 sidecar;
+		int ret;
+
+		if (record->header_bytes == metadata_bytes)
+			return -EBADMSG;
+		ret = spf_hop_sidecar_v1_decode(&sidecar,
+			(const uint8_t *)metadata + record->header_bytes,
+			metadata_bytes - record->header_bytes);
+		if (ret || sidecar.session_id != ctx->hop_request.session_id ||
+			sidecar.buffer_sequence != record->buffer_sequence ||
+			sidecar.block_first_sample != record->first_sample_sequence ||
+			sidecar.block_end_sample != record->first_sample_sequence +
+				record->samples_per_channel)
+			return -EBADMSG;
+	} else
+#endif
+	if (record->header_bytes != metadata_bytes) {
+		return -EBADMSG;
+	}
 	*header = record;
 	return 0;
 }
@@ -559,6 +766,6 @@ int iiod_buffer_metadata_rebase_frame(void *provider_context,
 	ret = spf_exact_gap_header(ctx, metadata, metadata_bytes, &const_header);
 	if (ret)
 		return ret;
-	return spf_radio_frame_v6_rebase_gap(metadata, metadata_bytes,
+	return spf_radio_frame_v6_rebase_gap(metadata, const_header->header_bytes,
 		previous_frame_end) ? 0 : -ERANGE;
 }

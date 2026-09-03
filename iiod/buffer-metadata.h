@@ -53,6 +53,10 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		const struct iio_device *dev, const struct iio_buffer *buffer,
 		size_t raw_bytes, void *metadata, size_t metadata_capacity,
 		size_t *iq_offset, size_t *iq_bytes);
+/* Provider-specific session status. Return -ENODATA when the active metadata
+ * request has no provider status, preserving the existing DDR status path. */
+ssize_t iiod_buffer_metadata_status(void *provider_context,
+		void *status, size_t status_capacity);
 /* A provider returns -ESTALE when a valid IQ block has fallen outside its
  * retained observation window.  Preserve-backlog treats that as terminal;
  * drop-backlog may retire the uncovered block and continue with fresh data.
