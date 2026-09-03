@@ -127,10 +127,12 @@ static void test_complete_valid_visits(void)
 	struct fake_device device = {0};
 
 	device.events[0] = make_event(&request, 0, 1000, 1002); /* end 1012 */
-	device.events[1] = make_event(&request, 1, 1112, 1114); /* end 1124 */
-	device.events[2] = make_event(&request, 2, 1224, 1226); /* end 1236 */
+	/* The scheduled invalid starts are 1112 and 1227.  Later before-counters
+	 * truthfully account for software-scheduler latency as invalid samples. */
+	device.events[1] = make_event(&request, 1, 1115, 1117); /* end 1127 */
+	device.events[2] = make_event(&request, 2, 1231, 1233); /* end 1243 */
 	device.event_count = 3;
-	init_receipt(&device, 1336);
+	init_receipt(&device, 1343);
 	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
 	assert(spf_hop_session_v1_start(&session) == 0);
 	assert(device.submit_calls == 1);
@@ -143,11 +145,13 @@ static void test_complete_valid_visits(void)
 		request.dwell_samples);
 	assert(spf_hop_session_v1_on_block(&session, 2, 1200, 1300,
 		&sidecar) == 0);
+	assert(sidecar.events[0].invalid_start == 1227);
+	assert(sidecar.events[0].device.transition_before == 1231);
 	assert(spf_hop_session_v1_on_block(&session, 3, 1300, 1400,
 		&sidecar) == 0);
 	assert(sidecar.state == SPF_HOP_STATE_COMPLETED);
 	assert(sidecar.terminal_reason == SPF_HOP_REASON_PLAN_COMPLETE);
-	assert(session.status.final_counter == 1336);
+	assert(session.status.final_counter == 1343);
 	assert(session.status.final_counter - session.last_event.invalid_end ==
 		request.dwell_samples);
 	assert(session.status.visits_started == 3);
@@ -182,7 +186,7 @@ static void test_bad_valid_dwell_fails_closed(void)
 	struct fake_device device = {0};
 
 	device.events[0] = make_event(&request, 0, 1000, 1002);
-	device.events[1] = make_event(&request, 1, 1111, 1114); /* one sample short */
+	device.events[1] = make_event(&request, 1, 1111, 1114); /* before deadline */
 	device.event_count = 2;
 	init_receipt(&device, 1115);
 	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
@@ -229,7 +233,10 @@ static void test_cancel_and_restore_once(void)
 {
 	struct spf_hop_request_v1 request = make_request();
 	struct spf_hop_session_v1 session;
+	struct spf_hop_status_v1 status = {0};
+	struct spf_hop_status_v1 decoded = {0};
 	struct fake_device device = {0};
+	uint8_t wire[SPF_HOP_STATUS_BYTES];
 
 	init_receipt(&device, 1234);
 	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
@@ -239,6 +246,17 @@ static void test_cancel_and_restore_once(void)
 	assert(session.status.state == SPF_HOP_STATE_CANCELLED);
 	assert(session.status.flags & SPF_HOP_STATUS_RESTORE_SUCCEEDED);
 	assert(device.restore_calls == 1);
+	spf_hop_session_v1_get_status(&session, &status);
+	assert(status.state == SPF_HOP_STATE_CANCELLED);
+	assert(status.terminal_reason == SPF_HOP_REASON_CLIENT_CLOSE);
+	assert(status.final_counter == 1234);
+	assert(status.restore_before == 1234);
+	assert(status.restore_after == 1236);
+	assert(spf_hop_status_v1_encode(wire, sizeof(wire), &status) == 0);
+	assert(spf_hop_status_v1_decode(&decoded, wire, sizeof(wire)) == 0);
+	assert(decoded.state == SPF_HOP_STATE_CANCELLED);
+	assert(decoded.flags & SPF_HOP_STATUS_RESTORE_SUCCEEDED);
+	assert(decoded.restore_before == 1234);
 	assert(spf_hop_session_v1_cancel(&session,
 		SPF_HOP_REASON_CLIENT_CLOSE) == 0);
 	assert(device.restore_calls == 1);

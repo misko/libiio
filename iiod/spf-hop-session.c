@@ -176,6 +176,10 @@ static int validate_device_event(struct spf_hop_session_v1 *session,
 		device->transition_after > UINT64_MAX -
 			session->request.transition_guard_samples)
 		return -EBADMSG;
+	if (session->have_last_event &&
+		session->last_event.invalid_end > UINT64_MAX -
+			session->request.dwell_samples)
+		return -ERANGE;
 	profile = &session->request.profiles[device->to_profile];
 	if (device->fastlock_slot != profile->fastlock_slot ||
 		device->actual_lo_frequency_hz != profile->lo_frequency_hz ||
@@ -186,13 +190,17 @@ static int validate_device_event(struct spf_hop_session_v1 *session,
 		return -EBADMSG;
 	memset(event, 0, sizeof(*event));
 	event->device = *device;
-	event->invalid_start = device->transition_before;
+	/* A device-local software scheduler cannot begin an SPI fastlock recall on
+	 * an exact sample edge.  Preserve the scheduled edge as invalid_start and
+	 * conservatively include scheduler lateness in the invalid span. */
+	event->invalid_start = session->have_last_event ?
+		session->last_event.invalid_end + session->request.dwell_samples :
+		device->transition_before;
 	event->invalid_end = device->transition_after +
 		session->request.transition_guard_samples;
 	if (session->have_last_event) {
 		if (event->invalid_start < session->last_event.invalid_end ||
-			event->invalid_start - session->last_event.invalid_end !=
-				session->request.dwell_samples ||
+			device->transition_before < event->invalid_start ||
 			device->device_event_id <= session->last_device_event_id)
 			return -ERANGE;
 		/* The previous visit reached the requested capture envelope.  The

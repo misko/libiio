@@ -188,6 +188,12 @@ ssize_t iiod_buffer_metadata_status(void *provider_context,
 	return -ENODATA;
 }
 
+int iiod_buffer_metadata_cancel(void *provider_context)
+{
+	(void)provider_context;
+	return -ENODATA;
+}
+
 int iiod_buffer_metadata_describe_frame(void *provider_context,
 		const void *metadata, size_t metadata_bytes,
 		struct iiod_buffer_metadata_frame_info *info)

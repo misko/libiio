@@ -41,7 +41,7 @@ static struct spf_hop_event_v1 make_event(void)
 	event.device.dwell_index = 0;
 	event.device.transition_before = UINT64_C(1000);
 	event.device.transition_after = UINT64_C(1004);
-	event.invalid_start = UINT64_C(1000);
+	event.invalid_start = UINT64_C(998);
 	event.invalid_end = UINT64_C(1014);
 	event.device.from_profile = SPF_HOP_PROFILE_NONE;
 	event.device.to_profile = 0;
@@ -136,6 +136,7 @@ static void test_sidecar_round_trip(void)
 	assert(decoded.event_count == 1);
 	assert(decoded.events[0].device.actual_if_offset_hz == INT64_C(1250000));
 	assert(decoded.events[0].invalid_end == UINT64_C(1014));
+	assert(decoded.events[0].invalid_start == UINT64_C(998));
 	wire[64 + 54] = 1;
 	assert(spf_hop_sidecar_v1_decode(&decoded, wire, (size_t)bytes) == -EBADMSG);
 }

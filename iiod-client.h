@@ -134,6 +134,11 @@ ssize_t iiod_client_get_buffer_metadata_status_unlocked(
 				  const struct iio_device *dev,
 				  void *status, size_t status_capacity);
 
+int iiod_client_cancel_buffer_metadata_unlocked(
+				  struct iiod_client *client,
+				  struct iiod_client_pdata *desc,
+				  const struct iio_device *dev);
+
 ssize_t iiod_client_write_unlocked(struct iiod_client *client,
 				   struct iiod_client_pdata *desc,
 				   const struct iio_device *dev,

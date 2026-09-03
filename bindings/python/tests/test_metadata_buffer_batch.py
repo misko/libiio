@@ -451,6 +451,24 @@ def test_device_ddr_ring_status_decodes_atomic_snapshot(monkeypatch):
     buffer.close()
 
 
+def test_inband_metadata_cancel_retains_buffer_for_status(monkeypatch):
+    created = object()
+    calls = []
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: created)
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+    monkeypatch.setattr(
+        iio,
+        "_buffer_cancel_metadata_session",
+        lambda target: calls.append(target),
+    )
+    buffer = iio.MetadataBuffer(FakeDevice(), 1, b"provider")
+    buffer.cancel_metadata_session()
+    assert calls == [created]
+    assert buffer._buffer is created
+    buffer.close()
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

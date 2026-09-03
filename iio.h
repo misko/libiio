@@ -1594,6 +1594,18 @@ __api __check_ret int iio_buffer_set_metadata_read_prequeue_async_policy(
 __api __check_ret ssize_t iio_buffer_get_metadata_status(
 		struct iio_buffer *buf, void *status, size_t status_capacity);
 
+/** @brief Cancel and restore a provider-owned metadata session in band.
+ * @param buf A metadata-enabled input buffer
+ * @return 0 on successful cancellation/restoration, a negative errno otherwise
+ *
+ * This operation preserves the buffer transport so callers can retrieve the
+ * terminal provider receipt with iio_buffer_get_metadata_status() before
+ * destroying the buffer. It is invalid while direct-async frame responses are
+ * still pending. Backends or servers without in-band cancellation return
+ * -ENOSYS. */
+__api __check_ret int iio_buffer_cancel_metadata_session(
+		struct iio_buffer *buf);
+
 
 /** @brief Destroy the given buffer
  * @param buf A pointer to an iio_buffer structure

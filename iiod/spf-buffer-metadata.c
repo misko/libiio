@@ -691,6 +691,25 @@ ssize_t iiod_buffer_metadata_status(void *provider_context,
 #endif
 }
 
+int iiod_buffer_metadata_cancel(void *provider_context)
+{
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	int ret;
+
+	if (!ctx || !ctx->hop_enabled || !ctx->hop_session_initialized)
+		return -ENODATA;
+	pthread_mutex_lock(&ctx->hop_lock);
+	ret = spf_hop_session_v1_cancel(&ctx->hop_session,
+		SPF_HOP_REASON_CLIENT_CLOSE);
+	pthread_mutex_unlock(&ctx->hop_lock);
+	return ret;
+#else
+	(void)provider_context;
+	return -ENODATA;
+#endif
+}
+
 static int spf_exact_gap_header(
 		const struct spf_iiod_metadata_context *ctx,
 		const void *metadata, size_t metadata_bytes,

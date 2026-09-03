@@ -434,6 +434,22 @@ ssize_t iio_buffer_get_metadata_status(struct iio_buffer *buffer,
 		status_capacity);
 }
 
+int iio_buffer_cancel_metadata_session(struct iio_buffer *buffer)
+{
+	const struct iio_backend_ops *ops;
+
+	if (!buffer || !buffer->metadata_enabled)
+		return -EINVAL;
+	/* A command cannot be inserted ahead of already queued wire responses. */
+	if (buffer->metadata_direct_pending || metadata_batch_is_failed(buffer))
+		return -EBUSY;
+	ops = buffer->dev->ctx->ops;
+	if (buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V9 ||
+		!ops->cancel_buffer_metadata_session)
+		return -ENOSYS;
+	return ops->cancel_buffer_metadata_session(buffer->dev);
+}
+
 void iio_buffer_destroy(struct iio_buffer *buffer)
 {
 	if (buffer->metadata_direct_pending &&

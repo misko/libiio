@@ -763,6 +763,12 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
 	}
+	ret = iio_context_add_attr(ctx,
+		"iio,buffer-persistent-hop-cancel", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
 #endif
 #endif
 

@@ -979,6 +979,19 @@ ssize_t iiod_client_get_buffer_metadata_status_unlocked(
 	return ret < 0 ? ret : response_bytes;
 }
 
+int iiod_client_cancel_buffer_metadata_unlocked(
+		struct iiod_client *client, struct iiod_client_pdata *desc,
+		const struct iio_device *dev)
+{
+	char command[1024];
+
+	if (!client || !desc || !dev)
+		return -EINVAL;
+	iio_snprintf(command, sizeof(command), "CANCELBUFM %s\r\n",
+		iio_device_get_id(dev));
+	return iiod_client_exec_command(client, desc, command);
+}
+
 ssize_t iiod_client_write_unlocked(struct iiod_client *client,
 				   struct iiod_client_pdata *desc,
 				   const struct iio_device *dev,

@@ -57,6 +57,10 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
  * request has no provider status, preserving the existing DDR status path. */
 ssize_t iiod_buffer_metadata_status(void *provider_context,
 		void *status, size_t status_capacity);
+/* Cancel only the provider-owned finite session while retaining the open iiOD
+ * buffer.  This lets the client read a terminal provider receipt before CLOSE.
+ * Providers without an independently cancellable session return -ENODATA. */
+int iiod_buffer_metadata_cancel(void *provider_context);
 /* A provider returns -ESTALE when a valid IQ block has fallen outside its
  * retained observation window.  Preserve-backlog treats that as terminal;
  * drop-backlog may retire the uncovered block and continue with fresh data.

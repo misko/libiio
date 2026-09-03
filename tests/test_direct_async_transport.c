@@ -31,6 +31,7 @@ struct transport_state {
 	size_t write_bytes;
 	unsigned int write_calls;
 	unsigned int status_calls;
+	unsigned int inband_cancel_calls;
 	unsigned int cancel_calls;
 	unsigned int close_calls;
 	unsigned int event;
@@ -201,6 +202,15 @@ static void fake_cancel(const struct iio_device *dev)
 	state->cancel_event = ++state->event;
 }
 
+static int fake_inband_cancel(const struct iio_device *dev)
+{
+	struct transport_state *state = device_state(dev);
+
+	state->inband_cancel_calls++;
+	return iiod_client_cancel_buffer_metadata_unlocked(state->client,
+		(struct iiod_client_pdata *)(void *)state, dev);
+}
+
 static int fake_close(const struct iio_device *dev)
 {
 	struct transport_state *state = device_state(dev);
@@ -226,6 +236,7 @@ static const struct iio_backend_ops backend_ops = {
 	.cancel = fake_cancel,
 	.read_with_metadata_batch = fake_read,
 	.get_buffer_metadata_status = fake_status,
+	.cancel_buffer_metadata_session = fake_inband_cancel,
 	.prequeue_metadata_reads_async = fake_prequeue_async,
 	.prequeue_metadata_reads_async_policy = fake_prequeue_async_policy,
 	.get_allocated_kernel_buffers_count =
@@ -238,7 +249,7 @@ static struct iio_buffer *fixture_buffer(struct fixture *fixture)
 
 	assert(buffer);
 	fixture->context.ops = &backend_ops;
-	fixture->context.backend_api_version = IIO_BACKEND_API_V8;
+	fixture->context.backend_api_version = IIO_BACKEND_API_V9;
 	fixture->context.attrs = fixture->context_attrs;
 	fixture->context.values = fixture->context_values;
 	fixture->context.nb_attrs = 3;
@@ -462,6 +473,42 @@ static void test_terminal_status_survives_early_direct_failure(void)
 	destroy_fixture_buffer(&fixture, buffer);
 }
 
+static void test_inband_cancel_command_preserves_transport(void)
+{
+	static const char command[] = "CANCELBUFM dev0\r\n";
+	static const char success[] = "0\n";
+	static const char failure[] = "-5\n";
+	struct fixture fixture = {0};
+	struct iio_buffer *buffer = fixture_buffer(&fixture);
+
+	fixture.state.response_bytes = 0;
+	fixture.state.response_offset = 0;
+	append_bytes(&fixture.state, success, sizeof(success) - 1U);
+	assert(iio_buffer_cancel_metadata_session(buffer) == 0);
+	assert(fixture.state.write_bytes == sizeof(command) - 1U);
+	assert(!memcmp(fixture.state.writes, command, sizeof(command) - 1U));
+	/* Unlike the backend's destructive cancel hook, the explicit command does
+	 * not mark or tear down the transport. Status and CLOSE remain available. */
+	assert(fixture.state.cancel_calls == 0);
+	assert(fixture.state.inband_cancel_calls == 1);
+	destroy_fixture_buffer(&fixture, buffer);
+	assert(fixture.state.close_calls == 1);
+
+	memset(&fixture, 0, sizeof(fixture));
+	buffer = fixture_buffer(&fixture);
+	fixture.state.response_bytes = 0;
+	fixture.state.response_offset = 0;
+	append_bytes(&fixture.state, failure, sizeof(failure) - 1U);
+	assert(iio_buffer_cancel_metadata_session(buffer) == -EIO);
+	destroy_fixture_buffer(&fixture, buffer);
+
+	memset(&fixture, 0, sizeof(fixture));
+	buffer = fixture_buffer(&fixture);
+	fixture.context.backend_api_version = IIO_BACKEND_API_V8;
+	assert(iio_buffer_cancel_metadata_session(buffer) == -ENOSYS);
+	destroy_fixture_buffer(&fixture, buffer);
+}
+
 int main(void)
 {
 	test_allocated_kernel_buffer_count_is_backend_authoritative();
@@ -472,6 +519,7 @@ int main(void)
 	test_explicit_overrun_policy_commands();
 	test_direct_capture_limit();
 	test_terminal_status_survives_early_direct_failure();
+	test_inband_cancel_command_preserves_transport();
 	puts("direct async transport: PASS");
 	return 0;
 }

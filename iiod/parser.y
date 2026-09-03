@@ -73,6 +73,7 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token READBUFM
 %token READBUFMA
 %token READBUFMSTAT
+%token CANCELBUFM
 %token WRITEBUF
 %token WRITE
 %token SETTRIG
@@ -137,6 +138,8 @@ Line:
 		"\t\tRead raw data and its capture-associated metadata\n"
 		"\tREADBUFMSTAT <device> <status_capacity>\n"
 		"\t\tRead the open metadata buffer's provider status\n"
+		"\tCANCELBUFM <device>\n"
+		"\t\tCancel and restore the provider session without closing its buffer\n"
 		"\tWRITEBUF <device> <bytes_count>\n"
 		"\t\tWrite raw data to the specified device\n"
 		"\tGETTRIG <device>\n"
@@ -380,6 +383,14 @@ Line:
 		struct parser_pdata *pdata = yyget_extra(scanner);
 		ssize_t ret = read_buffer_metadata_status(pdata, $3, cap);
 		free(status_capacity);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| CANCELBUFM SPACE DEVICE END {
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		int ret = cancel_buffer_metadata(pdata, $3);
 		if (ret < 0)
 			YYABORT;
 		else

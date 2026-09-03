@@ -23,9 +23,10 @@ enum iio_backend_api_ver {
 	IIO_BACKEND_API_V6 = 6,
 	IIO_BACKEND_API_V7 = 7,
 	IIO_BACKEND_API_V8 = 8,
+	IIO_BACKEND_API_V9 = 9,
 };
 
-#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V8
+#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V9
 
 static inline bool iio_backend_api_version_supported(unsigned int version)
 {
@@ -136,6 +137,10 @@ struct iio_backend_ops {
 	 * configuration because Linux may admit a smaller partial allocation. */
 	int (*get_allocated_kernel_buffers_count)(const struct iio_device *dev,
 			unsigned int *count);
+
+	/* API v9: cancel and restore only a provider-owned metadata session while
+	 * retaining the open buffer transport for terminal status and CLOSE. */
+	int (*cancel_buffer_metadata_session)(const struct iio_device *dev);
 };
 
 /**

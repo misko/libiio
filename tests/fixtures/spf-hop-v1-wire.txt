@@ -5,6 +5,13 @@ Capabilities (all must equal literal "1"):
   iio,buffer-persistent-hop-request
   iio,buffer-persistent-hop-event
   iio,buffer-persistent-hop-status
+  iio,buffer-persistent-hop-cancel
+
+In-band cancel command:
+  CANCELBUFM <device>\r\n
+  The server synchronously invokes cancel_restore and returns its normal signed
+  integer reply (0 on an attested successful restore). It retains the open
+  buffer and transport so READBUFMSTAT can return HOPT before CLOSE.
 
 HOPR request suffix: 288 bytes
   0 u32 magic HOPR; 4 u16 version; 6 u16 bytes
@@ -31,6 +38,11 @@ HOPT status: fixed 160 bytes. See spf-hop-protocol.h for the field map.
 
 Every counter and tuning attestation in an event or receipt is device evidence.
 iiOD must never substitute host time or an inferred buffer boundary.
+For each retune, invalid_start is the scheduled end of the prior valid dwell;
+the transition is conservatively bounded by:
+  invalid_start <= transition_before <= transition_after <= invalid_end
+and invalid_end == transition_after + transition_guard_samples. Scheduler
+lateness is therefore invalid rather than being misclassified as useful data.
 Each nonterminal visit proves exactly dwell_samples useful samples:
   next.invalid_start - current.invalid_end == dwell_samples
 Planned completion proves the last visit the same way:

@@ -201,7 +201,7 @@ static int validate_event(const struct spf_hop_event_v1 *event)
 		device->fastlock_slot >= SPF_HOP_PROFILE_COUNT ||
 		!device->device_event_id ||
 		device->transition_before > device->transition_after ||
-		event->invalid_start != device->transition_before ||
+		event->invalid_start > device->transition_before ||
 		event->invalid_end < device->transition_after)
 		return -EINVAL;
 	return 0;

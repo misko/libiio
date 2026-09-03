@@ -471,6 +471,26 @@ static ssize_t usb_get_buffer_metadata_status(const struct iio_device *dev,
 	return ret;
 }
 
+static int usb_cancel_buffer_metadata_session(const struct iio_device *dev)
+{
+	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *pdata = dev->pdata;
+	const char *capability = iio_context_get_attr_value(dev->ctx,
+		"iio,buffer-persistent-hop-cancel");
+	int ret;
+
+	if (!capability || strcmp(capability, "1"))
+		return -ENOSYS;
+	iio_mutex_lock(pdata->lock);
+	if (pdata->io_ctx.cancelled)
+		ret = -EBADF;
+	else
+		ret = iiod_client_cancel_buffer_metadata_unlocked(
+			ctx_pdata->iiod_client, &pdata->io_ctx, dev);
+	iio_mutex_unlock(pdata->lock);
+	return ret;
+}
+
 static ssize_t usb_write(const struct iio_device *dev,
 		const void *src, size_t len)
 {
@@ -681,6 +701,7 @@ static const struct iio_backend_ops usb_ops = {
 	.read_with_metadata = usb_read_with_metadata,
 	.read_with_metadata_batch = usb_read_with_metadata_batch,
 	.get_buffer_metadata_status = usb_get_buffer_metadata_status,
+	.cancel_buffer_metadata_session = usb_cancel_buffer_metadata_session,
 	.write = usb_write,
 	.read_device_attr = usb_read_dev_attr,
 	.read_channel_attr = usb_read_chn_attr,
@@ -1131,7 +1152,7 @@ static struct iio_context * usb_create_context(unsigned int bus,
 
 	ctx->name = "usb";
 	ctx->ops = &usb_ops;
-	ctx->backend_api_version = IIO_BACKEND_API_V5;
+	ctx->backend_api_version = IIO_BACKEND_API_V9;
 	ctx->pdata = pdata;
 
 	for (i = 0; i < iio_context_get_devices_count(ctx); i++) {

@@ -88,6 +88,11 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 	return READBUFMSTAT;
 }
 
+<INITIAL>CANCELBUFM|cancelbufm {
+	BEGIN(WANT_DEVICE);
+	return CANCELBUFM;
+}
+
 <INITIAL>WRITEBUF|writebuf {
 	BEGIN(WANT_DEVICE);
 	return WRITEBUF;

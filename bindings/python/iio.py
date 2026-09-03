@@ -678,6 +678,15 @@ _buffer_get_metadata_status.restype = c_ssize_t
 _buffer_get_metadata_status.argtypes = (_BufferPtr, c_void_p, c_size_t)
 _buffer_get_metadata_status.errcheck = _check_negative
 
+try:
+    _buffer_cancel_metadata_session = _lib.iio_buffer_cancel_metadata_session
+except AttributeError:
+    _buffer_cancel_metadata_session = None
+else:
+    _buffer_cancel_metadata_session.restype = c_int
+    _buffer_cancel_metadata_session.argtypes = (_BufferPtr,)
+    _buffer_cancel_metadata_session.errcheck = _check_negative
+
 _buffer_push_partial = _lib.iio_buffer_push_partial
 _buffer_push_partial.restype = c_ssize_t
 _buffer_push_partial.argtypes = (
@@ -1422,6 +1431,12 @@ class MetadataBuffer(Buffer):
         )
         self._metadata = storage.raw[: metadata_bytes.value]
         return self._metadata
+
+    def cancel_metadata_session(self):
+        """Cancel/restore in band, retaining the buffer for terminal status."""
+        if _buffer_cancel_metadata_session is None:
+            raise OSError("installed libiio does not support in-band metadata cancel")
+        _buffer_cancel_metadata_session(self._buffer)
 
     @property
     def metadata(self):

@@ -3582,6 +3582,33 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 	return ret;
 }
 
+int cancel_buffer_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev)
+{
+	struct ThdEntry *thd;
+	struct DevEntry *entry;
+	int ret;
+
+	if (!dev) {
+		ret = -ENODEV;
+	} else if (!(thd = parser_lookup_thd_entry(pdata, dev))) {
+		ret = -EBADF;
+	} else {
+		entry = thd->entry;
+		/* A producer that owns teardown also takes thdlist_lock before removing
+		 * the provider context. Keep it pinned through the synchronous restore. */
+		pthread_mutex_lock(&entry->thdlist_lock);
+		if (!entry->metadata_enabled || !entry->metadata_provider_context)
+			ret = -ENODATA;
+		else
+			ret = iiod_buffer_metadata_cancel(
+				entry->metadata_provider_context);
+		pthread_mutex_unlock(&entry->thdlist_lock);
+	}
+	print_value(pdata, ret);
+	return ret;
+}
+
 ssize_t read_dev_attr(struct parser_pdata *pdata, struct iio_device *dev,
 		const char *attr, enum iio_attr_type type)
 {
