@@ -12,6 +12,9 @@
 #include "dns-sd.h"
 #include "ops.h"
 #include "thread-pool.h"
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#include "spf-hop-device.h"
+#endif
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -740,34 +743,36 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		return EXIT_FAILURE;
 	}
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
-	ret = iio_context_add_attr(ctx, "iio,buffer-persistent-hop", "1");
-	if (ret < 0) {
-		iio_context_destroy(ctx);
-		return EXIT_FAILURE;
-	}
-	ret = iio_context_add_attr(ctx,
-		"iio,buffer-persistent-hop-request", "1");
-	if (ret < 0) {
-		iio_context_destroy(ctx);
-		return EXIT_FAILURE;
-	}
-	ret = iio_context_add_attr(ctx,
-		"iio,buffer-persistent-hop-event", "1");
-	if (ret < 0) {
-		iio_context_destroy(ctx);
-		return EXIT_FAILURE;
-	}
-	ret = iio_context_add_attr(ctx,
-		"iio,buffer-persistent-hop-status", "1");
-	if (ret < 0) {
-		iio_context_destroy(ctx);
-		return EXIT_FAILURE;
-	}
-	ret = iio_context_add_attr(ctx,
-		"iio,buffer-persistent-hop-cancel", "1");
-	if (ret < 0) {
-		iio_context_destroy(ctx);
-		return EXIT_FAILURE;
+	if (spf_hop_device_v1_capable()) {
+		ret = iio_context_add_attr(ctx, "iio,buffer-persistent-hop", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-request", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-event", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-status", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-cancel", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
 	}
 #endif
 #endif

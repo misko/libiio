@@ -33,6 +33,7 @@ struct mock_device {
 	int hop_start_count;
 	int hop_recall_count;
 	int hop_restore_count;
+	int hop_caps_unsupported;
 #endif
 };
 
@@ -155,6 +156,8 @@ static int mock_ioctl(int fd, unsigned long request, void *argument,
 		caps->maximum_profiles = 8;
 		caps->fpga_identity = UINT32_C(0x54414732);
 		caps->fpga_abi = 2;
+		if (mock->hop_caps_unsupported)
+			caps->fpga_abi = 1;
 		return 0;
 	}
 	if (request == ADI_PERSISTENT_HOP_IOC_START) {
@@ -318,6 +321,17 @@ static void test_owner_authenticated_hop_wrappers(void)
 	assert(restore.transition_after == 1007);
 	assert(mock.hop_start_count == 1 && mock.hop_recall_count == 1 &&
 		mock.hop_restore_count == 1);
+	spf_tandem_session_close(&session);
+
+	memset(&mock, 0, sizeof(mock));
+	mock.epoch = 10;
+	mock.hop_caps_unsupported = 1;
+	calls = mock_syscalls(&mock);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	assert(spf_tandem_session_hop_start(&session,
+		UINT64_C(11000000000)) == -EPROTONOSUPPORT);
+	assert(mock.hop_start_count == 0);
 	spf_tandem_session_close(&session);
 }
 #endif

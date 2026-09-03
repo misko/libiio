@@ -6,12 +6,16 @@
 #include "spf-tandem-session.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <iio.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <time.h>
+#include <unistd.h>
 
 struct spf_local_hop_io {
 	struct spf_tandem_session *tandem;
@@ -186,6 +190,33 @@ static const struct spf_hop_scheduler_io_v1 local_io = {
 	.sleep_ns = local_sleep_ns,
 	.destroy = local_destroy,
 };
+
+bool spf_hop_device_v1_capable(void)
+{
+	struct adi_persistent_hop_caps_v1 caps = {0};
+	bool capable = false;
+	unsigned int i;
+	int fd;
+
+	fd = open(SPF_TANDEM_DEVICE, O_RDWR | O_CLOEXEC | O_NONBLOCK);
+	if (fd < 0)
+		return false;
+	if (ioctl(fd, ADI_PERSISTENT_HOP_IOC_GET_CAPS, &caps) == 0 &&
+		caps.version == ADI_PERSISTENT_HOP_ABI_VERSION &&
+		caps.size == sizeof(caps) &&
+		caps.features == ADI_PERSISTENT_HOP_REQUIRED_FEATURES &&
+		caps.maximum_profiles == SPF_HOP_PROFILE_COUNT &&
+		caps.fpga_identity == UINT32_C(0x54414732) && caps.fpga_abi == 2U) {
+		capable = true;
+		for (i = 0; i < sizeof(caps.reserved) / sizeof(caps.reserved[0]);
+				i++)
+			if (caps.reserved[i])
+				capable = false;
+	}
+	if (close(fd))
+		return false;
+	return capable;
+}
 
 int spf_hop_device_v1_open(const struct iio_device *rx,
 	const struct iio_device *phy, struct spf_tandem_session *tandem,

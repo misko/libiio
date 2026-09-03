@@ -54,6 +54,25 @@ static uint32_t get_le32(const uint8_t *source)
 		(uint32_t)source[2] << 16 | (uint32_t)source[3] << 24;
 }
 
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+static int persistent_hop_caps_valid(
+	const struct adi_persistent_hop_caps_v1 *caps)
+{
+	unsigned int i;
+
+	if (caps->version != ADI_PERSISTENT_HOP_ABI_VERSION ||
+		caps->size != sizeof(*caps) ||
+		caps->features != ADI_PERSISTENT_HOP_REQUIRED_FEATURES ||
+		caps->maximum_profiles != 8U ||
+		caps->fpga_identity != UINT32_C(0x54414732) || caps->fpga_abi != 2U)
+		return 0;
+	for (i = 0; i < sizeof(caps->reserved) / sizeof(caps->reserved[0]); i++)
+		if (caps->reserved[i])
+			return 0;
+	return 1;
+}
+#endif
+
 static int system_open(const char *path, int flags, void *opaque)
 {
 	(void)opaque;
@@ -469,10 +488,7 @@ int spf_tandem_session_hop_start(struct spf_tandem_session *session,
 			ADI_PERSISTENT_HOP_IOC_GET_CAPS, &caps,
 			session->syscalls.opaque) < 0)
 		return -errno;
-	if (caps.version != ADI_PERSISTENT_HOP_ABI_VERSION ||
-		caps.size != sizeof(caps) ||
-		caps.features != ADI_PERSISTENT_HOP_REQUIRED_FEATURES ||
-		caps.maximum_profiles != 8U)
+	if (!persistent_hop_caps_valid(&caps))
 		return -EPROTONOSUPPORT;
 	start.version = ADI_PERSISTENT_HOP_ABI_VERSION;
 	start.size = sizeof(start);
