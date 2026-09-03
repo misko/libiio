@@ -19,6 +19,21 @@ static bool center_matches_actual(uint64_t center, uint64_t lo,
 	return lo >= magnitude && center == lo - magnitude;
 }
 
+static uint64_t extend_counter_near(uint64_t reference, uint64_t observed)
+{
+	uint64_t candidate = (reference & UINT64_C(0xffffffff00000000)) |
+		(uint32_t)observed;
+
+	if (candidate < reference &&
+			reference - candidate > UINT64_C(0x80000000))
+		candidate += UINT64_C(0x100000000);
+	else if (candidate > reference &&
+			candidate - reference > UINT64_C(0x80000000) &&
+			candidate >= UINT64_C(0x100000000))
+		candidate -= UINT64_C(0x100000000);
+	return candidate;
+}
+
 static bool terminal(const struct spf_hop_session_v1 *session)
 {
 	return session->status.state >= SPF_HOP_STATE_COMPLETED;
@@ -44,6 +59,18 @@ static int restore(struct spf_hop_session_v1 *session, uint16_t reason,
 	ret = session->ops->cancel_restore(session->device_context, reason,
 		&receipt);
 	ret = normalize_error(ret);
+	/* Software-only devices observe the FPGA's low counter register while
+	 * metadata IQ carries the full inserted 64-bit counter.  Re-anchor either
+	 * representation at the last delivered block before publishing HOPT. */
+	if (session->have_last_block) {
+		uint64_t reference = required_final_counter ?
+			required_final_counter : session->status.last_block_end;
+
+		receipt.transition_before = extend_counter_near(reference,
+			receipt.transition_before);
+		receipt.transition_after = extend_counter_near(
+			receipt.transition_before, receipt.transition_after);
+	}
 	session->status.restore_before = receipt.transition_before;
 	session->status.restore_after = receipt.transition_after;
 	session->status.restored_lo_frequency_hz =
@@ -284,6 +311,14 @@ int spf_hop_session_v1_on_block(struct spf_hop_session_v1 *session,
 		return fail(session, SPF_HOP_REASON_EVENT_OVERFLOW, -EOVERFLOW);
 	memset(sidecar, 0, sizeof(*sidecar));
 	for (i = 0; i < event_count; i++) {
+		/* The userspace scheduler reads only the public low-32 register.  The
+		 * block timestamp is authoritative for its 64-bit epoch.  Kernel
+		 * provider counters pass through the same mapping unchanged. */
+		device_events[i].transition_before = extend_counter_near(first_sample,
+			device_events[i].transition_before);
+		device_events[i].transition_after = extend_counter_near(
+			device_events[i].transition_before,
+			device_events[i].transition_after);
 		ret = validate_device_event(session, &device_events[i],
 			&sidecar->events[i]);
 		if (ret)

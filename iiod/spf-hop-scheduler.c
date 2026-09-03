@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -108,6 +109,9 @@ static int enqueue_event(struct spf_hop_scheduler_v1 *scheduler,
 
 static void finish_worker(struct spf_hop_scheduler_v1 *scheduler, int error)
 {
+	if (error && error != -ECANCELED)
+		fprintf(stderr, "SPF hop scheduler failed: error=%d\n",
+			error);
 	pthread_mutex_lock(&scheduler->lock);
 	if (error != -ECANCELED)
 		scheduler->worker_error = error;

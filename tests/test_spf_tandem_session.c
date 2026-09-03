@@ -27,7 +27,7 @@ struct mock_device {
 	int acquire_count;
 	int status_count;
 	int release_count;
-#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
 	uint64_t hop_counter;
 	uint64_t hop_event_id;
 	int hop_start_count;
@@ -146,7 +146,7 @@ static int mock_ioctl(int fd, unsigned long request, void *argument,
 		mock->release_count++;
 		return 0;
 	}
-#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
 	if (request == ADI_PERSISTENT_HOP_IOC_GET_CAPS) {
 		struct adi_persistent_hop_caps_v1 *caps = argument;
 		memset(caps, 0, sizeof(*caps));
@@ -291,7 +291,7 @@ static void test_request_decoder(void)
 	assert(spf_tandem_request_decode(&decoded, wire, sizeof(wire)) == -EINVAL);
 }
 
-#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
 static void test_owner_authenticated_hop_wrappers(void)
 {
 	struct adi_persistent_hop_transition_v1 transition;
@@ -506,7 +506,7 @@ int main(void)
 	test_sequence_and_status_faults_fail_closed();
 	test_status_snapshot_catches_up_to_event_fifo();
 	test_status_counter_wraps_without_losing_continuity();
-#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
 	test_owner_authenticated_hop_wrappers();
 #endif
 	puts("SPF tandem session tests passed");

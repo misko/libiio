@@ -30,7 +30,7 @@ _Static_assert(sizeof(struct adi_tandem_agc_acquire) == 180,
 	"unexpected tandem acquire ABI size");
 _Static_assert(sizeof(struct adi_tandem_agc_event) == 16,
 	"unexpected tandem event ABI size");
-#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
 _Static_assert(sizeof(struct adi_persistent_hop_caps_v1) == 48,
 	"unexpected persistent-hop capabilities ABI size");
 _Static_assert(sizeof(struct adi_persistent_hop_counter_v1) == 32,
@@ -54,7 +54,7 @@ static uint32_t get_le32(const uint8_t *source)
 		(uint32_t)source[2] << 16 | (uint32_t)source[3] << 24;
 }
 
-#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
 static int persistent_hop_caps_valid(
 	const struct adi_persistent_hop_caps_v1 *caps)
 {
@@ -475,7 +475,7 @@ process_queue:
 	return 0;
 }
 
-#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
 int spf_tandem_session_hop_start(struct spf_tandem_session *session,
 	uint64_t expected_original_lo_hz)
 {

@@ -3,7 +3,7 @@
 #define __SPF_TANDEM_SESSION_H__
 
 #include <linux/adi_tandem_agc.h>
-#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
 #include <linux/adi_persistent_hop.h>
 #endif
 
@@ -61,7 +61,7 @@ int spf_tandem_session_collect(struct spf_tandem_session *session,
 	uint64_t first_sample_sequence, uint32_t samples_per_channel,
 	struct adi_tandem_agc_event *events, size_t event_capacity,
 	size_t *event_count);
-#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
 int spf_tandem_session_hop_start(struct spf_tandem_session *session,
 	uint64_t expected_original_lo_hz);
 int spf_tandem_session_hop_get_counter(struct spf_tandem_session *session,

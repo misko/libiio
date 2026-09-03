@@ -4,6 +4,7 @@
 
 #include "spf-hop-session.h"
 
+#include <pthread.h>
 #include <stdbool.h>
 
 struct iio_device;
@@ -14,6 +15,7 @@ struct spf_tandem_session;
  * failing open owns and cleans up any partially constructed device context. */
 int spf_hop_device_v1_open(const struct iio_device *rx,
 	const struct iio_device *phy, struct spf_tandem_session *tandem,
+	pthread_mutex_t *tandem_lock,
 	const struct spf_hop_request_v1 *request,
 	void **device_context, const struct spf_hop_device_ops_v1 **ops);
 void spf_hop_device_v1_destroy(void *device_context);

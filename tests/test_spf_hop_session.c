@@ -297,6 +297,53 @@ static void test_cancel_and_restore_once(void)
 	assert(device.restore_calls == 1);
 }
 
+static void test_userspace_low_counter_is_anchored_across_wrap(void)
+{
+	const uint64_t epoch = UINT64_C(0x200000000);
+	struct spf_hop_request_v1 request = make_request();
+	struct spf_hop_session_v1 session;
+	struct spf_hop_sidecar_v1 sidecar;
+	struct fake_device device = {0};
+
+	/* The userspace device sees only the public low-32 register.  IQ carries
+	 * the authoritative inserted 64-bit counter, including this older epoch.
+	 * Exercise one event immediately before wrap, later events after wrap, and
+	 * a low-only restoration receipt after the terminal refill. */
+	device.events[0] = make_event(&request, 0,
+		UINT64_C(0xfffffff0), UINT64_C(0xfffffff2));
+	device.events[1] = make_event(&request, 1,
+		UINT64_C(0x65), UINT64_C(0x67));
+	device.events[2] = make_event(&request, 2,
+		UINT64_C(0xda), UINT64_C(0xdc));
+	device.event_count = 3;
+	init_receipt(&device, UINT64_C(0x160));
+
+	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
+	assert(spf_hop_session_v1_start(&session) == 0);
+	assert(spf_hop_session_v1_on_block(&session, 0,
+		epoch + UINT64_C(0xffffffd0),
+		epoch + UINT64_C(0x100000020), &sidecar) == 0);
+	assert(sidecar.events[0].device.transition_before ==
+		epoch + UINT64_C(0xfffffff0));
+	assert(spf_hop_session_v1_on_block(&session, 1,
+		epoch + UINT64_C(0x100000020),
+		epoch + UINT64_C(0x100000090), &sidecar) == 0);
+	assert(sidecar.events[0].device.transition_before ==
+		epoch + UINT64_C(0x100000065));
+	assert(spf_hop_session_v1_on_block(&session, 2,
+		epoch + UINT64_C(0x100000090),
+		epoch + UINT64_C(0x100000100), &sidecar) == 0);
+	assert(sidecar.events[0].device.transition_before ==
+		epoch + UINT64_C(0x1000000da));
+	assert(spf_hop_session_v1_on_block(&session, 3,
+		epoch + UINT64_C(0x100000100),
+		epoch + UINT64_C(0x100000180), &sidecar) == 0);
+	assert(sidecar.state == SPF_HOP_STATE_COMPLETED);
+	assert(session.status.final_counter == epoch + UINT64_C(0x10000014a));
+	assert(session.status.restore_before == epoch + UINT64_C(0x100000160));
+	assert(session.status.restore_after == epoch + UINT64_C(0x100000162));
+}
+
 int main(void)
 {
 	test_complete_valid_visits();
@@ -305,5 +352,6 @@ int main(void)
 	test_bad_valid_dwell_fails_closed();
 	test_counter_gap_and_overflow_fail_closed();
 	test_cancel_and_restore_once();
+	test_userspace_low_counter_is_anchored_across_wrap();
 	return 0;
 }

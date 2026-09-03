@@ -145,6 +145,11 @@ endif()
 add_executable(iiod ${IIOD_CFILES})
 if (IIOD_HAS_BUFFER_PERSISTENT_HOP)
 	target_compile_definitions(iiod PRIVATE IIOD_HAS_BUFFER_PERSISTENT_HOP=1)
+	if (IIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER MATCHES
+			"spf-hop-device-local\\.c$")
+		target_compile_definitions(iiod PRIVATE
+			IIOD_HAS_KERNEL_PERSISTENT_HOP=1)
+	endif()
 endif()
 set_target_properties(iiod PROPERTIES
 	C_STANDARD 99

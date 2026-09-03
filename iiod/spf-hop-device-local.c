@@ -220,6 +220,7 @@ bool spf_hop_device_v1_capable(void)
 
 int spf_hop_device_v1_open(const struct iio_device *rx,
 	const struct iio_device *phy, struct spf_tandem_session *tandem,
+	pthread_mutex_t *tandem_lock,
 	const struct spf_hop_request_v1 *request, void **device_context,
 	const struct spf_hop_device_ops_v1 **ops)
 {
@@ -228,8 +229,10 @@ int spf_hop_device_v1_open(const struct iio_device *rx,
 	struct spf_local_hop_io *io;
 	int ret;
 
-	if (!rx || !phy || !tandem || !request || !device_context || !ops)
+	if (!rx || !phy || !tandem || !tandem_lock || !request ||
+		!device_context || !ops)
 		return -EINVAL;
+	(void)tandem_lock;
 	context = iio_device_get_context(rx);
 	context_name = context ? iio_context_get_name(context) : NULL;
 	if (!context_name || strcmp(context_name, "local"))
