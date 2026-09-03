@@ -36,6 +36,7 @@ from ctypes import (
 )
 from ctypes.util import find_library
 from enum import Enum
+from errno import ENOSYS as _ENOSYS
 from os import strerror as _strerror
 from platform import system as _system
 import abc
@@ -641,10 +642,50 @@ _buffer_set_metadata_batch_size.restype = c_int
 _buffer_set_metadata_batch_size.argtypes = (_BufferPtr, c_uint)
 _buffer_set_metadata_batch_size.errcheck = _check_negative
 
+try:
+    _buffer_set_metadata_read_prequeue_async = (
+        _lib.iio_buffer_set_metadata_read_prequeue_async
+    )
+except AttributeError:
+    _buffer_set_metadata_read_prequeue_async = None
+else:
+    _buffer_set_metadata_read_prequeue_async.restype = c_int
+    _buffer_set_metadata_read_prequeue_async.argtypes = (
+        _BufferPtr,
+        c_uint,
+        c_size_t,
+    )
+    _buffer_set_metadata_read_prequeue_async.errcheck = _check_negative
+
+try:
+    _buffer_set_metadata_read_prequeue_async_policy = (
+        _lib.iio_buffer_set_metadata_read_prequeue_async_policy
+    )
+except AttributeError:
+    _buffer_set_metadata_read_prequeue_async_policy = None
+else:
+    _buffer_set_metadata_read_prequeue_async_policy.restype = c_int
+    _buffer_set_metadata_read_prequeue_async_policy.argtypes = (
+        _BufferPtr,
+        c_uint,
+        c_size_t,
+        c_int,
+    )
+    _buffer_set_metadata_read_prequeue_async_policy.errcheck = _check_negative
+
 _buffer_get_metadata_status = _lib.iio_buffer_get_metadata_status
 _buffer_get_metadata_status.restype = c_ssize_t
 _buffer_get_metadata_status.argtypes = (_BufferPtr, c_void_p, c_size_t)
 _buffer_get_metadata_status.errcheck = _check_negative
+
+try:
+    _buffer_cancel_metadata_session = _lib.iio_buffer_cancel_metadata_session
+except AttributeError:
+    _buffer_cancel_metadata_session = None
+else:
+    _buffer_cancel_metadata_session.restype = c_int
+    _buffer_cancel_metadata_session.argtypes = (_BufferPtr,)
+    _buffer_cancel_metadata_session.errcheck = _check_negative
 
 _buffer_push_partial = _lib.iio_buffer_push_partial
 _buffer_push_partial.restype = c_ssize_t
@@ -1150,6 +1191,8 @@ class MetadataBuffer(Buffer):
         ddr_ring_bytes=0,
         ddr_ring_frames=0,
         ddr_ring_continuous=False,
+        direct_async_frames=0,
+        drop_backlog_on_overrun=True,
     ):
         self._buffer = None
         if metadata_capacity <= 0:
@@ -1158,6 +1201,16 @@ class MetadataBuffer(Buffer):
             raise TypeError("batch_frames must be an integer")
         if not 1 <= batch_frames <= 64:
             raise ValueError("batch_frames must be in [1, 64]")
+        if isinstance(direct_async_frames, bool) or not isinstance(
+            direct_async_frames, int
+        ):
+            raise TypeError("direct_async_frames must be an integer")
+        if not 0 <= direct_async_frames <= 4096:
+            raise ValueError("direct_async_frames must be in [0, 4096]")
+        if direct_async_frames and batch_frames != 1:
+            raise ValueError("direct async capture requires batch_frames=1")
+        if not isinstance(drop_backlog_on_overrun, bool):
+            raise TypeError("drop_backlog_on_overrun must be a bool")
         batch_cache_bytes = 0
         if batch_frames > 1:
             batch_cache_bytes = batch_frames * (
@@ -1188,14 +1241,24 @@ class MetadataBuffer(Buffer):
             raise ValueError("DDR ring values must not be negative")
         if ddr_burst_bytes and ddr_ring_bytes:
             raise ValueError("DDR burst and DDR ring are mutually exclusive")
+        if direct_async_frames and ddr_burst_bytes:
+            raise ValueError("direct async capture cannot use the sealed DDR burst")
         if ddr_ring_bytes and batch_frames != 1:
             raise ValueError("device DDR ring requires batch_frames=1")
         if ddr_ring_bytes:
+            if direct_async_frames and (ddr_ring_frames or ddr_ring_continuous):
+                raise ValueError(
+                    "direct async RAM extension owns the finite frame target"
+                )
             if ddr_ring_continuous and ddr_ring_frames:
                 raise ValueError(
                     "continuous DDR ring must not specify ddr_ring_frames"
                 )
-            if not ddr_ring_continuous and not ddr_ring_frames:
+            if (
+                not direct_async_frames
+                and not ddr_ring_continuous
+                and not ddr_ring_frames
+            ):
                 raise ValueError(
                     "finite DDR ring requires a positive ddr_ring_frames"
                 )
@@ -1211,6 +1274,35 @@ class MetadataBuffer(Buffer):
         ddr_burst_admitted_bytes = 0
         ddr_ring_admitted_bytes = 0
         ddr_ring_capacity_frames = 0
+        if direct_async_frames:
+            if _buffer_set_metadata_read_prequeue_async_policy is None:
+                raise OSError(
+                    _ENOSYS,
+                    "loaded libiio does not support direct async overrun policies",
+                )
+            context_attrs = getattr(getattr(device, "_ctx", None), "attrs", {})
+            if context_attrs.get("iio,buffer-direct-async") != "1":
+                raise OSError("IIO context does not advertise direct async capture")
+            if (
+                ddr_ring_bytes
+                and context_attrs.get("iio,buffer-direct-async-ring") != "1"
+            ):
+                raise OSError(
+                    "IIO context does not advertise direct async RAM extension"
+                )
+            policies = context_attrs.get(
+                "iio,buffer-direct-async-overrun-policies", ""
+            ).split(",")
+            requested_policy = (
+                "drop-backlog"
+                if drop_backlog_on_overrun
+                else "preserve-backlog"
+            )
+            if requested_policy not in policies:
+                raise OSError(
+                    f"IIO context does not advertise {requested_policy} "
+                    "direct async overrun handling"
+                )
         if ddr_burst_bytes:
             context_attrs = getattr(getattr(device, "_ctx", None), "attrs", {})
             if context_attrs.get("iio,buffer-ddr-burst") != "1":
@@ -1267,7 +1359,13 @@ class MetadataBuffer(Buffer):
                 1,
                 48,
                 1,
-                2 if ddr_ring_continuous else 1,
+                (
+                    4
+                    if direct_async_frames
+                    else 2
+                    if ddr_ring_continuous
+                    else 1
+                ),
                 ddr_ring_bytes,
                 ddr_ring_frames,
                 0,
@@ -1281,6 +1379,13 @@ class MetadataBuffer(Buffer):
                 device._device, samples_count, request_storage, len(request)
             )
             _buffer_set_metadata_batch_size(self._buffer, batch_frames)
+            if direct_async_frames:
+                _buffer_set_metadata_read_prequeue_async_policy(
+                    self._buffer,
+                    direct_async_frames,
+                    int(metadata_capacity),
+                    1 if drop_backlog_on_overrun else 0,
+                )
         except Exception:
             if self._buffer is not None:
                 _buffer_destroy(self._buffer)
@@ -1291,6 +1396,13 @@ class MetadataBuffer(Buffer):
         self._metadata_capacity = int(metadata_capacity)
         self._batch_frames = batch_frames
         self._batch_cache_bytes = batch_cache_bytes
+        self._direct_async_frames = direct_async_frames
+        self._drop_backlog_on_overrun = bool(
+            direct_async_frames and drop_backlog_on_overrun
+        )
+        self._direct_async_ring_extension = bool(
+            direct_async_frames and ddr_ring_bytes
+        )
         self._ddr_burst_requested_bytes = ddr_burst_bytes
         self._ddr_burst_admitted_bytes = ddr_burst_admitted_bytes
         self._ddr_burst_frames = ddr_burst_frames
@@ -1320,6 +1432,12 @@ class MetadataBuffer(Buffer):
         self._metadata = storage.raw[: metadata_bytes.value]
         return self._metadata
 
+    def cancel_metadata_session(self):
+        """Cancel/restore in band, retaining the buffer for terminal status."""
+        if _buffer_cancel_metadata_session is None:
+            raise OSError("installed libiio does not support in-band metadata cancel")
+        _buffer_cancel_metadata_session(self._buffer)
+
     @property
     def metadata(self):
         """Metadata from the most recent successful refill, or ``None``."""
@@ -1334,6 +1452,21 @@ class MetadataBuffer(Buffer):
     def batch_cache_bytes(self):
         """Configured retained-cache bound (zero when batching is disabled)."""
         return self._batch_cache_bytes
+
+    @property
+    def direct_async_frames(self):
+        """Finite DMA-to-network frame count, or zero when disabled."""
+        return self._direct_async_frames
+
+    @property
+    def drop_backlog_on_overrun(self):
+        """Whether direct async capture evicts queued stale frames on a gap."""
+        return self._drop_backlog_on_overrun
+
+    @property
+    def direct_async_ring_extension(self):
+        """Whether RAM slots extend the bounded direct DMA FIFO."""
+        return self._direct_async_ring_extension
 
     @property
     def ddr_burst_enabled(self):
@@ -1421,6 +1554,7 @@ class MetadataBuffer(Buffer):
             raise OSError("IIO server returned an invalid DDR ring state")
         counters = values[7:-2]
         return {
+            "version": values[1],
             "state": state_names[state],
             "terminal_reason": reason_names[reason],
             "error_code": error_code,

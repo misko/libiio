@@ -27,4 +27,8 @@ int thread_pool_add_thread(struct thread_pool *pool,
 		void (*func)(struct thread_pool *, void *),
 		void *data, const char *name);
 
+int thread_pool_add_thread_on_cpu(struct thread_pool *pool,
+		void (*func)(struct thread_pool *, void *),
+		void *data, const char *name, int cpu);
+
 #endif /* __THREAD_POOL_H__ */

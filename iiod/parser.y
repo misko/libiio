@@ -71,7 +71,9 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token READ
 %token READBUF
 %token READBUFM
+%token READBUFMA
 %token READBUFMSTAT
+%token CANCELBUFM
 %token WRITEBUF
 %token WRITE
 %token SETTRIG
@@ -131,9 +133,13 @@ Line:
 		"\tREADBUF <device> <bytes_count>\n"
 		"\t\tRead raw data from the specified device\n"
 		"\tREADBUFM <device> <bytes_count> <metadata_capacity>\n"
+		"\tREADBUFMA <device> <bytes_count> <metadata_capacity> <frames> "
+		"[overrun_policy]\n"
 		"\t\tRead raw data and its capture-associated metadata\n"
 		"\tREADBUFMSTAT <device> <status_capacity>\n"
 		"\t\tRead the open metadata buffer's provider status\n"
+		"\tCANCELBUFM <device>\n"
+		"\t\tCancel and restore the provider session without closing its buffer\n"
 		"\tWRITEBUF <device> <bytes_count>\n"
 		"\t\tWrite raw data to the specified device\n"
 		"\tGETTRIG <device>\n"
@@ -332,12 +338,59 @@ Line:
 		else
 			YYACCEPT;
 	}
+	| READBUFMA SPACE DEVICE SPACE WORD SPACE WORD SPACE WORD END {
+		char *len = $5;
+		char *metadata_capacity = $7;
+		char *frames = $9;
+		unsigned long nb = strtoul(len, NULL, 10);
+		unsigned long cap = strtoul(metadata_capacity, NULL, 10);
+		unsigned long count = strtoul(frames, NULL, 10);
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = rw_dev_with_metadata_async(pdata, $3, nb, cap, count,
+			IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG);
+		free(len);
+		free(metadata_capacity);
+		free(frames);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| READBUFMA SPACE DEVICE SPACE WORD SPACE WORD SPACE WORD SPACE WORD END {
+		char *len = $5;
+		char *metadata_capacity = $7;
+		char *frames = $9;
+		char *policy = $11;
+		unsigned long nb = strtoul(len, NULL, 10);
+		unsigned long cap = strtoul(metadata_capacity, NULL, 10);
+		unsigned long count = strtoul(frames, NULL, 10);
+		unsigned long mode = strtoul(policy, NULL, 10);
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = rw_dev_with_metadata_async(pdata, $3, nb, cap, count,
+			(enum iio_buffer_metadata_overrun_policy)mode);
+		free(len);
+		free(metadata_capacity);
+		free(frames);
+		free(policy);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
 	| READBUFMSTAT SPACE DEVICE SPACE WORD END {
 		char *status_capacity = $5;
 		unsigned long cap = strtoul(status_capacity, NULL, 10);
 		struct parser_pdata *pdata = yyget_extra(scanner);
 		ssize_t ret = read_buffer_metadata_status(pdata, $3, cap);
 		free(status_capacity);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| CANCELBUFM SPACE DEVICE END {
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		int ret = cancel_buffer_metadata(pdata, $3);
 		if (ret < 0)
 			YYABORT;
 		else

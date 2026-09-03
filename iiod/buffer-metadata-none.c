@@ -43,6 +43,13 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 	return 0;
 }
 
+void iiod_buffer_metadata_ring_prefix_complete(void *provider_context,
+	bool complete)
+{
+	(void)provider_context;
+	(void)complete;
+}
+
 void iiod_buffer_metadata_close(void *provider_context)
 {
 	(void)provider_context;
@@ -61,5 +68,42 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	(void)metadata_capacity;
 	(void)iq_offset;
 	(void)iq_bytes;
+	return -ENOSYS;
+}
+
+ssize_t iiod_buffer_metadata_status(void *provider_context,
+		void *status, size_t status_capacity)
+{
+	(void)provider_context;
+	(void)status;
+	(void)status_capacity;
+	return -ENODATA;
+}
+
+int iiod_buffer_metadata_cancel(void *provider_context)
+{
+	(void)provider_context;
+	return -ENODATA;
+}
+
+int iiod_buffer_metadata_describe_frame(void *provider_context,
+		const void *metadata, size_t metadata_bytes,
+		struct iiod_buffer_metadata_frame_info *info)
+{
+	(void)provider_context;
+	(void)metadata;
+	(void)metadata_bytes;
+	(void)info;
+	return -ENOSYS;
+}
+
+int iiod_buffer_metadata_rebase_frame(void *provider_context,
+		void *metadata, size_t metadata_bytes,
+		uint64_t previous_frame_end)
+{
+	(void)provider_context;
+	(void)metadata;
+	(void)metadata_bytes;
+	(void)previous_frame_end;
 	return -ENOSYS;
 }

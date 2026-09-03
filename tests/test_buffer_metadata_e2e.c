@@ -31,6 +31,11 @@ static const uint8_t failure_session_request[] = {
 	0x01, 0x00, 0x08, 0x01,
 };
 
+static const uint8_t stale_once_session_request[] = {
+	0x53, 0x50, 0x46, 0x54,
+	0x01, 0x00, 0x08, 0x02,
+};
+
 #define TEST_BURST_REQUEST_BYTES 32U
 #define TEST_RING_REQUEST_BYTES 48U
 
@@ -128,6 +133,8 @@ int main(int argc, char **argv)
 			"iio,buffer-ddr-ring-max-iq-bytes"), "200000000"));
 		assert(!strcmp(iio_context_get_attr_value(ctx,
 			"iio,buffer-metadata-status"), "1"));
+		assert(!strcmp(iio_context_get_attr_value(ctx,
+			"iio,buffer-metadata-timing-log"), "1"));
 	}
 	struct iio_device *dev = iio_context_find_device(ctx, "cf-ad9361-lpc");
 	assert(dev);
@@ -210,6 +217,25 @@ int main(int argc, char **argv)
 	assert(record->sequence == 3);
 	/* Response 4 was drained into host memory. Destroying now discards only
 	 * cached data, so CLOSE is not queued behind an unread wire response. */
+	iio_buffer_destroy(buffer);
+
+	/* drop-backlog retires a DMA block that has fallen outside metadata
+	 * coverage, then still returns the requested number of fresh frames. */
+	buffer = iio_device_create_buffer_with_metadata(dev, 1024,
+		stale_once_session_request, sizeof(stale_once_session_request));
+	assert(buffer);
+	assert(iio_buffer_set_metadata_read_prequeue_async_policy(buffer, 3,
+		sizeof(metadata),
+		IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG) == 0);
+	for (uint64_t sequence = 0; sequence < 3; ++sequence) {
+		metadata_bytes = 0;
+		iq_bytes = iio_buffer_refill_with_metadata(buffer,
+			metadata, sizeof(metadata), &metadata_bytes);
+		assert(iq_bytes == 1024 * 8);
+		assert(metadata_bytes == sizeof(struct test_metadata));
+		record = (const struct test_metadata *)metadata;
+		assert(record->sequence == sequence);
+	}
 	iio_buffer_destroy(buffer);
 
 	/* A burst request captures every admitted frame before the first refill,

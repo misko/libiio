@@ -22,6 +22,10 @@ int iiod_ddr_ring_core_init(struct iiod_ddr_ring_core *ring,
 	ring->slots = slots;
 	ring->slot_count = slot_count;
 	ring->target_frames = target_frames;
+	ring->prefill_frames = target_frames && target_frames < slot_count ?
+		(size_t)target_frames : slot_count;
+	ring->low_water_frames = target_frames && target_frames <= slot_count ?
+		0 : slot_count / 2U;
 	ring->state = SPF_DDR_RING_STATE_RESERVED;
 	return 0;
 }
@@ -31,6 +35,19 @@ int iiod_ddr_ring_core_start(struct iiod_ddr_ring_core *ring)
 	if (!ring || ring->state != SPF_DDR_RING_STATE_RESERVED)
 		return -EINVAL;
 	ring->state = SPF_DDR_RING_STATE_RUNNING;
+	return 0;
+}
+
+int iiod_ddr_ring_core_start_extension(struct iiod_ddr_ring_core *ring)
+{
+	int ret = iiod_ddr_ring_core_start(ring);
+
+	if (ret)
+		return ret;
+	/* DMA descriptors ahead of the RAM tier provide the initial prefill. */
+	ring->prefill_frames = 0;
+	ring->low_water_frames = 0;
+	ring->consumer_started = true;
 	return 0;
 }
 
@@ -106,11 +123,71 @@ int iiod_ddr_ring_core_consumer_reserve(struct iiod_ddr_ring_core *ring,
 			return ring->error_code ? ring->error_code : -EIO;
 		return -EAGAIN;
 	}
+	if (ring->state == SPF_DDR_RING_STATE_RUNNING) {
+		if (!ring->consumer_started) {
+			if (ring->occupied < ring->prefill_frames)
+				return -EAGAIN;
+			ring->consumer_started = true;
+		} else if (ring->occupied <= ring->low_water_frames) {
+			return -EAGAIN;
+		}
+	}
 	if (ring->slots[ring->consumer_position] != IIOD_DDR_RING_SLOT_COMMITTED)
 		return -EIO;
 	ring->slots[ring->consumer_position] = IIOD_DDR_RING_SLOT_CONSUMER;
 	ring->consumer_reserved = true;
 	*slot = ring->consumer_position;
+	return 0;
+}
+
+bool iiod_ddr_ring_core_consumer_ready(
+	const struct iiod_ddr_ring_core *ring)
+{
+	if (!ring || !state_allows_drain(ring->state) || !ring->occupied)
+		return false;
+	if (ring->state != SPF_DDR_RING_STATE_RUNNING)
+		return true;
+	if (!ring->consumer_started)
+		return ring->occupied >= ring->prefill_frames;
+	return ring->occupied > ring->low_water_frames;
+}
+
+bool iiod_ddr_ring_core_prefix_complete(
+	const struct iiod_ddr_ring_core *ring)
+{
+	return ring && ring->produced_frames >= ring->prefill_frames;
+}
+
+void iiod_ddr_ring_core_mark_unavailable(struct iiod_ddr_ring_core *ring,
+	uint64_t observed_first_sample_sequence)
+{
+	if (!ring || ring->first_unavailable_valid)
+		return;
+	ring->first_unavailable_sample_sequence = ring->expected_sample_valid ?
+		ring->expected_sample_sequence : observed_first_sample_sequence;
+	ring->first_unavailable_valid = true;
+	ring->continuity_broken = true;
+}
+
+int iiod_ddr_ring_core_observe_samples(struct iiod_ddr_ring_core *ring,
+	uint64_t first_sample_sequence, uint64_t samples_per_frame)
+{
+	uint64_t exclusive_boundary;
+
+	if (!ring || !samples_per_frame)
+		return -EINVAL;
+	if (first_sample_sequence > UINT64_MAX - samples_per_frame)
+		return -EOVERFLOW;
+	exclusive_boundary = first_sample_sequence + samples_per_frame;
+	if (ring->expected_sample_valid &&
+			first_sample_sequence != ring->expected_sample_sequence)
+		iiod_ddr_ring_core_mark_unavailable(ring, first_sample_sequence);
+	if (!ring->continuity_broken) {
+		ring->last_contiguous_sample_sequence = exclusive_boundary;
+		ring->last_contiguous_valid = true;
+	}
+	ring->expected_sample_sequence = exclusive_boundary;
+	ring->expected_sample_valid = true;
 	return 0;
 }
 
@@ -134,6 +211,46 @@ int iiod_ddr_ring_core_consumer_release(struct iiod_ddr_ring_core *ring)
 		ring->state = SPF_DDR_RING_STATE_COMPLETE;
 		ring->terminal_reason = SPF_DDR_RING_REASON_TARGET_COMPLETE;
 	}
+	return 0;
+}
+
+int iiod_ddr_ring_core_discard_pending(struct iiod_ddr_ring_core *ring,
+	uint64_t *discarded_frames)
+{
+	size_t keep, pending, position, i;
+
+	if (!ring || !discarded_frames)
+		return -EINVAL;
+	if (ring->state != SPF_DDR_RING_STATE_RUNNING || ring->producer_reserved)
+		return -EBUSY;
+	keep = ring->consumer_reserved ? 1U : 0U;
+	if (ring->occupied < keep)
+		return -EIO;
+	pending = ring->occupied - keep;
+	position = ring->consumer_position;
+	if (keep && ++position == ring->slot_count)
+		position = 0;
+	for (i = 0; i < pending; i++) {
+		if (ring->slots[position] != IIOD_DDR_RING_SLOT_COMMITTED)
+			return -EIO;
+		position++;
+		if (position == ring->slot_count)
+			position = 0;
+	}
+	position = ring->consumer_position;
+	if (keep && ++position == ring->slot_count)
+		position = 0;
+	for (i = 0; i < pending; i++) {
+		ring->slots[position] = IIOD_DDR_RING_SLOT_FREE;
+		position++;
+		if (position == ring->slot_count)
+			position = 0;
+	}
+	ring->occupied = keep;
+	ring->producer_position = ring->consumer_position;
+	if (keep && ++ring->producer_position == ring->slot_count)
+		ring->producer_position = 0;
+	*discarded_frames = pending;
 	return 0;
 }
 
@@ -166,6 +283,18 @@ int iiod_ddr_ring_core_cancel(struct iiod_ddr_ring_core *ring,
 	ring->state = SPF_DDR_RING_STATE_CANCELLED;
 	ring->terminal_reason = reason;
 	ring->error_code = -ECANCELED;
+	return 0;
+}
+
+int iiod_ddr_ring_core_complete_extension(struct iiod_ddr_ring_core *ring)
+{
+	if (!ring || ring->state != SPF_DDR_RING_STATE_RUNNING)
+		return -EINVAL;
+	if (ring->occupied || ring->producer_reserved || ring->consumer_reserved)
+		return -EBUSY;
+	ring->state = SPF_DDR_RING_STATE_COMPLETE;
+	ring->terminal_reason = SPF_DDR_RING_REASON_TARGET_COMPLETE;
+	ring->error_code = 0;
 	return 0;
 }
 

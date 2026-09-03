@@ -27,6 +27,14 @@ struct mock_device {
 	int acquire_count;
 	int status_count;
 	int release_count;
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
+	uint64_t hop_counter;
+	uint64_t hop_event_id;
+	int hop_start_count;
+	int hop_recall_count;
+	int hop_restore_count;
+	int hop_caps_unsupported;
+#endif
 };
 
 static void put_le16(uint8_t *destination, uint16_t value)
@@ -138,6 +146,60 @@ static int mock_ioctl(int fd, unsigned long request, void *argument,
 		mock->release_count++;
 		return 0;
 	}
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
+	if (request == ADI_PERSISTENT_HOP_IOC_GET_CAPS) {
+		struct adi_persistent_hop_caps_v1 *caps = argument;
+		memset(caps, 0, sizeof(*caps));
+		caps->version = ADI_PERSISTENT_HOP_ABI_VERSION;
+		caps->size = sizeof(*caps);
+		caps->features = ADI_PERSISTENT_HOP_REQUIRED_FEATURES;
+		caps->maximum_profiles = 8;
+		caps->fpga_identity = UINT32_C(0x54414732);
+		caps->fpga_abi = 2;
+		if (mock->hop_caps_unsupported)
+			caps->fpga_abi = 1;
+		return 0;
+	}
+	if (request == ADI_PERSISTENT_HOP_IOC_START) {
+		struct adi_persistent_hop_start_v1 *start = argument;
+		assert(start->version == ADI_PERSISTENT_HOP_ABI_VERSION);
+		assert(start->required_features ==
+			ADI_PERSISTENT_HOP_REQUIRED_FEATURES);
+		start->actual_original_lo_hz = start->expected_original_lo_hz;
+		start->active_profile = ADI_PERSISTENT_HOP_PROFILE_NONE;
+		mock->hop_start_count++;
+		return 0;
+	}
+	if (request == ADI_PERSISTENT_HOP_IOC_GET_COUNTER) {
+		struct adi_persistent_hop_counter_v1 *counter = argument;
+		memset(counter, 0, sizeof(*counter));
+		counter->version = ADI_PERSISTENT_HOP_ABI_VERSION;
+		counter->size = sizeof(*counter);
+		counter->sample_counter = mock->hop_counter;
+		return 0;
+	}
+	if (request == ADI_PERSISTENT_HOP_IOC_RECALL) {
+		struct adi_persistent_hop_transition_v1 *transition = argument;
+		transition->active_profile = transition->profile;
+		transition->actual_lo_hz = transition->expected_lo_hz;
+		transition->transition_before = mock->hop_counter;
+		transition->transition_after = mock->hop_counter + 4;
+		transition->device_event_id = ++mock->hop_event_id;
+		mock->hop_counter += 4;
+		mock->hop_recall_count++;
+		return 0;
+	}
+	if (request == ADI_PERSISTENT_HOP_IOC_RESTORE) {
+		struct adi_persistent_hop_restore_v1 *restore = argument;
+		restore->actual_lo_hz = restore->expected_original_lo_hz;
+		restore->transition_before = mock->hop_counter;
+		restore->transition_after = mock->hop_counter + 3;
+		restore->active_profile = ADI_PERSISTENT_HOP_PROFILE_NONE;
+		mock->hop_counter += 3;
+		mock->hop_restore_count++;
+		return 0;
+	}
+#endif
 	assert(!"unexpected ioctl");
 	return -1;
 }
@@ -187,6 +249,7 @@ static void test_request_decoder(void)
 {
 	uint8_t wire[104];
 	struct adi_tandem_agc_request_v1 decoded;
+	uint32_t interval = 0;
 	valid_request(wire);
 	assert(spf_tandem_request_decode(&decoded, wire, sizeof(wire)) == 0);
 	assert(decoded.magic == ADI_TANDEM_AGC_REQUEST_MAGIC);
@@ -199,12 +262,79 @@ static void test_request_decoder(void)
 		0);
 	decoded.mode = ADI_TANDEM_AGC_MODE_HOLD;
 	assert(spf_tandem_request_validate_event_window(&decoded, UINT32_MAX) == 0);
+	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
+		&interval) == 0);
+	assert(interval == 1000000);
+	assert(spf_tandem_request_observation_interval(&decoded, 2048,
+		&interval) == 0);
+	assert(interval == 2048);
+	decoded.mode = ADI_TANDEM_AGC_MODE_AUTO;
+	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
+		&interval) == 0);
+	assert(interval == 1000000);
+	assert(spf_tandem_request_observation_interval(&decoded, 16384,
+		&interval) == 0);
+	assert(interval == 16384);
+	decoded.mode = UINT32_MAX;
+	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
+		&interval) == -EINVAL);
+	assert(spf_tandem_request_observation_interval(NULL, 1000000,
+		&interval) == -EINVAL);
+	assert(spf_tandem_request_observation_interval(&decoded, 0,
+		&interval) == -EINVAL);
+	assert(spf_tandem_request_observation_interval(&decoded, 1000000,
+		NULL) == -EINVAL);
 	assert(spf_tandem_request_validate_event_window(&decoded, 0) == -EINVAL);
 	assert(spf_tandem_request_decode(&decoded, wire, sizeof(wire) - 1) ==
 		-EINVAL);
 	wire[103] = 1;
 	assert(spf_tandem_request_decode(&decoded, wire, sizeof(wire)) == -EINVAL);
 }
+
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
+static void test_owner_authenticated_hop_wrappers(void)
+{
+	struct adi_persistent_hop_transition_v1 transition;
+	struct adi_persistent_hop_restore_v1 restore;
+	struct spf_tandem_session session;
+	struct mock_device mock = {0};
+	struct spf_tandem_syscalls calls = mock_syscalls(&mock);
+	uint8_t wire[104];
+	uint64_t counter;
+
+	valid_request(wire);
+	mock.epoch = 9;
+	mock.hop_counter = 1000;
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	assert(spf_tandem_session_hop_start(&session, UINT64_C(11000000000)) == 0);
+	assert(spf_tandem_session_hop_get_counter(&session, &counter) == 0);
+	assert(counter == 1000);
+	assert(spf_tandem_session_hop_recall(&session, 3,
+		UINT64_C(11003000000), &transition) == 0);
+	assert(transition.transition_before == 1000);
+	assert(transition.transition_after == 1004);
+	assert(transition.device_event_id == 1);
+	assert(spf_tandem_session_hop_restore(&session,
+		UINT64_C(11000000000), &restore) == 0);
+	assert(restore.transition_before == 1004);
+	assert(restore.transition_after == 1007);
+	assert(mock.hop_start_count == 1 && mock.hop_recall_count == 1 &&
+		mock.hop_restore_count == 1);
+	spf_tandem_session_close(&session);
+
+	memset(&mock, 0, sizeof(mock));
+	mock.epoch = 10;
+	mock.hop_caps_unsupported = 1;
+	calls = mock_syscalls(&mock);
+	assert(spf_tandem_session_init(&session, wire, sizeof(wire), &calls) == 0);
+	assert(spf_tandem_session_acquire(&session) == 0);
+	assert(spf_tandem_session_hop_start(&session,
+		UINT64_C(11000000000)) == -EPROTONOSUPPORT);
+	assert(mock.hop_start_count == 0);
+	spf_tandem_session_close(&session);
+}
+#endif
 
 static void test_lifecycle_and_partition(void)
 {
@@ -376,6 +506,9 @@ int main(void)
 	test_sequence_and_status_faults_fail_closed();
 	test_status_snapshot_catches_up_to_event_fifo();
 	test_status_counter_wraps_without_losing_continuity();
+#ifdef IIOD_HAS_KERNEL_PERSISTENT_HOP
+	test_owner_authenticated_hop_wrappers();
+#endif
 	puts("SPF tandem session tests passed");
 	return 0;
 }

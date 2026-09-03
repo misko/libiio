@@ -11,7 +11,9 @@
 #include "thread-pool.h"
 #include "buffer-metadata.h"
 #include "ddr-ring-core.h"
+#include "spf-ddr-ring-request.h"
 #include "spf-ddr-ring-status.h"
+#include "spf-hop-protocol.h"
 #include "../debug.h"
 
 #include <errno.h>
@@ -50,6 +52,8 @@ struct ThdEntry {
 	uint32_t *mask;
 	bool active, is_writer, new_client, wait_for_open;
 	bool metadata_enabled;
+	bool async_direct;
+	unsigned int async_frames_remaining;
 };
 
 #define IIOD_MAX_BUFFER_METADATA_BYTES (64U * 1024U)
@@ -57,6 +61,7 @@ struct ThdEntry {
 #define IIOD_BURST_MEMORY_RESERVE_BYTES (UINT64_C(128) * 1024U * 1024U)
 #define IIOD_BURST_CMA_RESERVE_BYTES (UINT64_C(16) * 1024U * 1024U)
 #define IIOD_BURST_MAX_STARTUP_DISCARDS 8U
+#define IIOD_DIRECT_STALE_RETRY_MARGIN 8U
 #define IIOD_BURST_SEALED_IDLE_SECONDS 30
 
 enum iiod_burst_state {
@@ -106,17 +111,89 @@ struct iiod_ddr_ring {
 	size_t metadata_capacity;
 	uint64_t requested_iq_bytes;
 	uint64_t admitted_iq_bytes;
-	uint64_t last_contiguous_sample_sequence;
-	uint64_t first_unavailable_sample_sequence;
 	bool reservation_held;
 	bool producer_started;
 	bool producer_exited;
-	bool last_contiguous_valid;
-	bool first_unavailable_valid;
+	bool direct_extension;
 };
+
+struct iiod_direct_async_frame {
+	struct iio_buffer_block *block;
+	uint64_t frame_end;
+	size_t metadata_bytes;
+	size_t iq_offset;
+	size_t iq_bytes;
+	size_t ring_slot;
+	bool ring_backed;
+};
+
+struct iiod_direct_async {
+	struct iiod_direct_async_frame *frames;
+	uint8_t *metadata;
+	size_t metadata_capacity;
+	size_t capacity;
+	size_t dma_capacity;
+	size_t dma_headroom;
+	size_t dma_count;
+	size_t head;
+	size_t tail;
+	size_t count;
+	uint64_t target_frames;
+	uint64_t produced_frames;
+	uint64_t consumed_frames;
+	uint64_t dropped_frames;
+	uint64_t flush_events;
+	uint64_t stale_metadata_frames;
+	unsigned int stale_metadata_streak;
+	uint64_t last_consumed_frame_end;
+	int error;
+	enum iio_buffer_metadata_overrun_policy overrun_policy;
+	bool requested;
+	bool producer_started;
+	bool producer_exited;
+	bool cancelled;
+	bool consumer_active;
+	bool last_consumed_frame_valid;
+};
+
+enum iiod_timing_stage {
+	IIOD_TIMING_SAMPLER_ADMIT = 0,
+	IIOD_TIMING_DMA_REFILL,
+	IIOD_TIMING_SAMPLER_FINISH,
+	IIOD_TIMING_METADATA_BUILD,
+	IIOD_TIMING_DDR_COPY,
+	IIOD_TIMING_TRANSPORT_FRAME,
+	IIOD_TIMING_TRANSPORT_IQ,
+	IIOD_TIMING_RING_PRODUCER_WAIT,
+	IIOD_TIMING_RING_CONSUMER_WAIT,
+	IIOD_TIMING_STAGE_COUNT,
+};
+
+struct iiod_timing_accumulator {
+	uint64_t count;
+	uint64_t total_ns;
+	uint64_t max_ns;
+};
+
+struct iiod_stage_timing {
+	pthread_mutex_t lock;
+	uint64_t first_ns;
+	uint64_t last_ns;
+	uint64_t transported_iq_bytes;
+	uint64_t next_snapshot_frame;
+	struct iiod_timing_accumulator stages[IIOD_TIMING_STAGE_COUNT];
+};
+
+#define IIOD_TIMING_SNAPSHOT_FRAMES UINT64_C(100)
 
 static pthread_mutex_t burst_reservation_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool burst_reserved;
+static int rw_cpu_affinity = -1;
+
+void iiod_set_rw_cpu_affinity(int cpu)
+{
+	rw_cpu_affinity = cpu;
+}
 
 /*
  * The local context is shared by every IIOD connection.  Each newly created
@@ -562,6 +639,8 @@ static int ring_prepare(struct iiod_ddr_ring *ring,
 	ring->metadata_capacity = plan->metadata_capacity;
 	ring->requested_iq_bytes = plan->ring_capacity_iq_bytes;
 	ring->admitted_iq_bytes = iq_bytes;
+	ring->direct_extension =
+		plan->ring_flags == SPF_DDR_RING_FLAG_DIRECT_EXTENSION;
 	ret = iiod_ddr_ring_core_init(&ring->core, ring->slots, frame_count,
 		plan->ring_capture_frames);
 	if (ret)
@@ -583,6 +662,79 @@ static void *ring_iq_slot(struct iiod_ddr_ring *ring, size_t frame)
 	return ring->iq + frame * ring->frame_iq_bytes;
 }
 
+static void direct_async_release_storage(struct iiod_direct_async *direct)
+{
+	size_t i;
+
+	if (!direct)
+		return;
+	for (i = 0; i < direct->capacity; i++) {
+		if (direct->frames && direct->frames[i].block) {
+			int ret = iio_buffer_block_release(direct->frames[i].block);
+
+			if (ret)
+				IIO_ERROR("Unable to release direct DMA block: %d\n",
+					ret);
+			direct->frames[i].block = NULL;
+		}
+	}
+	free(direct->metadata);
+	free(direct->frames);
+	memset(direct, 0, sizeof(*direct));
+}
+
+static int direct_async_prepare(struct iiod_direct_async *direct,
+		unsigned int dma_capacity, size_t ram_capacity,
+		size_t metadata_capacity, unsigned int target_frames,
+		enum iio_buffer_metadata_overrun_policy overrun_policy)
+{
+	size_t capacity, metadata_bytes, useful_ram;
+
+	if (!direct || dma_capacity < 2U ||
+		(ram_capacity && dma_capacity < 3U) ||
+		!metadata_capacity || !target_frames ||
+		metadata_capacity > IIOD_MAX_BUFFER_METADATA_BYTES ||
+		(overrun_policy != IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG &&
+		 overrun_policy != IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG))
+		return -EINVAL;
+	if (direct->requested)
+		return -EBUSY;
+	useful_ram = target_frames > dma_capacity ?
+		(size_t)target_frames - dma_capacity : 0U;
+	if (useful_ram > ram_capacity)
+		useful_ram = ram_capacity;
+	if (!size_add(dma_capacity, useful_ram, &capacity))
+		return -EOVERFLOW;
+	/* Keep three blocks in the kernel when possible.  A 4 MiB RAM copy can
+	 * exceed one full-rate frame period on Zynq, and consecutive spills can
+	 * accumulate beyond two periods.  Small configurations scale the margin
+	 * down while retaining a head lease and one spillable lease. */
+	direct->dma_headroom = useful_ram ?
+		(dma_capacity > 4U ? 3U : dma_capacity - 2U) : 0U;
+	capacity -= direct->dma_headroom;
+	if (!size_mul(capacity, metadata_capacity, &metadata_bytes))
+		return -EOVERFLOW;
+	direct->frames = calloc(capacity, sizeof(*direct->frames));
+	direct->metadata = malloc(metadata_bytes);
+	if (!direct->frames || !direct->metadata) {
+		direct_async_release_storage(direct);
+		return -ENOMEM;
+	}
+	direct->metadata_capacity = metadata_capacity;
+	direct->capacity = capacity;
+	direct->dma_capacity = dma_capacity;
+	direct->target_frames = target_frames;
+	direct->overrun_policy = overrun_policy;
+	direct->requested = true;
+	return 0;
+}
+
+static void *direct_async_metadata_slot(struct iiod_direct_async *direct,
+		size_t slot)
+{
+	return direct->metadata + slot * direct->metadata_capacity;
+}
+
 /* Corresponds to an opened device */
 struct DevEntry {
 	unsigned int ref_count;
@@ -591,17 +743,21 @@ struct DevEntry {
 	struct iio_buffer *buf;
 	unsigned int sample_size, nb_clients;
 	unsigned int samples_count;
+	unsigned int requested_kernel_buffers;
+	unsigned int allocated_kernel_buffers;
 	size_t metadata_extra_samples;
 	void *metadata_provider_context;
 	struct iiod_buffer_burst_plan burst_plan;
 	struct iiod_burst_cache burst;
 	struct iiod_ddr_ring ring;
+	struct iiod_direct_async direct;
 	bool update_mask;
 	bool cyclic;
 	bool closed;
 	bool cancelled;
 	bool metadata_enabled;
 	bool metadata_timeout_floor_active;
+	bool direct_used;
 
 	/* Linked list of ThdEntry structures corresponding
 	 * to all the threads who opened the device */
@@ -611,10 +767,342 @@ struct DevEntry {
 	pthread_cond_t rw_ready_cond;
 	pthread_mutex_t ring_lock;
 	pthread_cond_t ring_ready_cond;
+	struct iiod_stage_timing timing;
 
 	uint32_t *mask;
 	size_t nb_words;
 };
+
+/* Drop only frames that have not entered transport. ring_lock must be held.
+ * The active head, including an active RAM-ring reservation, stays in place. */
+static int direct_async_drop_pending(struct DevEntry *entry)
+{
+	struct iiod_direct_async *direct = &entry->direct;
+	struct iiod_ddr_ring *ring = &entry->ring;
+	uint64_t dropped = 0, ring_dropped = 0;
+	size_t pending, position, keep, expected_ring_slot = 0, i;
+	bool active_ring;
+	int ret;
+
+	keep = direct->consumer_active ? 1U : 0U;
+	if (direct->count < keep)
+		return -EIO;
+	active_ring = keep && direct->frames[direct->head].ring_backed;
+	if (ring->direct_extension &&
+			ring->core.consumer_reserved != active_ring)
+		return -EIO;
+	if (ring->direct_extension) {
+		expected_ring_slot = ring->core.consumer_position;
+		if (active_ring && ++expected_ring_slot == ring->core.slot_count)
+			expected_ring_slot = 0;
+	}
+	pending = direct->count - keep;
+	position = (direct->head + keep) % direct->capacity;
+	for (i = 0; i < pending; i++) {
+		struct iiod_direct_async_frame *frame =
+			&direct->frames[position];
+
+		if (frame->ring_backed) {
+			if (!ring->direct_extension ||
+					frame->ring_slot != expected_ring_slot)
+				return -EIO;
+			ring_dropped++;
+			if (++expected_ring_slot == ring->core.slot_count)
+				expected_ring_slot = 0;
+		} else if (!frame->block) {
+			return -EIO;
+		}
+		position = (position + 1U) % direct->capacity;
+	}
+	if (ring_dropped) {
+		uint64_t core_dropped = 0;
+
+		ret = iiod_ddr_ring_core_discard_pending(&ring->core,
+			&core_dropped);
+		if (ret)
+			return ret;
+		if (core_dropped != ring_dropped)
+			return -EIO;
+	}
+	position = (direct->head + keep) % direct->capacity;
+	for (i = 0; i < pending; i++) {
+		struct iiod_direct_async_frame *frame =
+			&direct->frames[position];
+
+		if (!frame->ring_backed) {
+			if (!frame->block)
+				return -EIO;
+			ret = iio_buffer_block_release(frame->block);
+			if (ret)
+				return ret;
+			direct->dma_count--;
+		}
+		memset(frame, 0, sizeof(*frame));
+		position = (position + 1U) % direct->capacity;
+		direct->dropped_frames++;
+		dropped++;
+	}
+	direct->count = keep;
+	direct->tail = (direct->head + keep) % direct->capacity;
+	if (!keep)
+		direct->head = direct->tail;
+	if (dropped) {
+		direct->flush_events++;
+		IIO_WARNING("Direct async overrun: dropped %llu queued frames "
+			"(event=%llu total=%llu)\n",
+			(unsigned long long)dropped,
+			(unsigned long long)direct->flush_events,
+			(unsigned long long)direct->dropped_frames);
+	}
+	return 0;
+}
+
+static inline const char *dev_label_or_name_or_id(const struct iio_device *dev);
+
+static const char *const iiod_timing_stage_names[IIOD_TIMING_STAGE_COUNT] = {
+	[IIOD_TIMING_SAMPLER_ADMIT] = "sampler_admit",
+	[IIOD_TIMING_DMA_REFILL] = "dma_refill",
+	[IIOD_TIMING_SAMPLER_FINISH] = "sampler_finish",
+	[IIOD_TIMING_METADATA_BUILD] = "metadata_build",
+	[IIOD_TIMING_DDR_COPY] = "ddr_copy",
+	[IIOD_TIMING_TRANSPORT_FRAME] = "transport_frame",
+	[IIOD_TIMING_TRANSPORT_IQ] = "transport_iq",
+	[IIOD_TIMING_RING_PRODUCER_WAIT] = "ring_producer_wait",
+	[IIOD_TIMING_RING_CONSUMER_WAIT] = "ring_consumer_wait",
+};
+
+static uint64_t iiod_timing_now(void)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC_RAW, &now))
+		return 0;
+	return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+		(uint64_t)now.tv_nsec;
+}
+
+static void iiod_timing_record(struct DevEntry *entry,
+	enum iiod_timing_stage stage, uint64_t started_ns)
+{
+	struct iiod_timing_accumulator *accumulator;
+	uint64_t finished_ns;
+	uint64_t elapsed_ns;
+
+	if (!started_ns || stage >= IIOD_TIMING_STAGE_COUNT)
+		return;
+	finished_ns = iiod_timing_now();
+	if (!finished_ns || finished_ns < started_ns)
+		return;
+	elapsed_ns = finished_ns - started_ns;
+
+	pthread_mutex_lock(&entry->timing.lock);
+	if (!entry->timing.first_ns || started_ns < entry->timing.first_ns)
+		entry->timing.first_ns = started_ns;
+	if (finished_ns > entry->timing.last_ns)
+		entry->timing.last_ns = finished_ns;
+	accumulator = &entry->timing.stages[stage];
+	accumulator->count++;
+	accumulator->total_ns += elapsed_ns;
+	if (elapsed_ns > accumulator->max_ns)
+		accumulator->max_ns = elapsed_ns;
+	pthread_mutex_unlock(&entry->timing.lock);
+}
+
+static void iiod_timing_log(struct DevEntry *entry, bool snapshot)
+{
+	const char *device = dev_label_or_name_or_id(entry->dev);
+	uint64_t transported_frames = 0;
+	uint64_t frame_iq_bytes;
+	uint64_t wall_ns = 0;
+	unsigned int i;
+
+	pthread_mutex_lock(&entry->timing.lock);
+	frame_iq_bytes = (uint64_t)entry->sample_size * entry->samples_count;
+	if (frame_iq_bytes)
+		transported_frames = entry->timing.transported_iq_bytes /
+			frame_iq_bytes;
+	if (entry->timing.last_ns >= entry->timing.first_ns)
+		wall_ns = entry->timing.last_ns - entry->timing.first_ns;
+	for (i = 0; i < IIOD_TIMING_STAGE_COUNT; i++) {
+		const struct iiod_timing_accumulator *stage =
+			&entry->timing.stages[i];
+
+		if (!stage->count)
+			continue;
+		fprintf(stderr,
+			"SPF_IIOD_TIMING_V1 snapshot=%u dev=%s metadata=%u burst=%u ring=%u direct=%u "
+			"frame_iq_bytes=%zu transported_iq_bytes=%" PRIu64
+			" transported_frames=%" PRIu64 " wall_ns=%" PRIu64
+			" stage=%s count=%" PRIu64
+			" total_ns=%" PRIu64 " max_ns=%" PRIu64 "\n",
+			snapshot, device ? device : "unknown", entry->metadata_enabled,
+			entry->burst_plan.requested_iq_bytes != 0,
+			entry->burst_plan.ring_capacity_iq_bytes != 0,
+			entry->direct_used,
+			(size_t)frame_iq_bytes, entry->timing.transported_iq_bytes,
+			transported_frames, wall_ns,
+			iiod_timing_stage_names[i], stage->count, stage->total_ns,
+			stage->max_ns);
+	}
+	fflush(stderr);
+	pthread_mutex_unlock(&entry->timing.lock);
+}
+
+static void iiod_timing_transport_complete(struct DevEntry *entry,
+	ssize_t iq_bytes)
+{
+	uint64_t transported_frames = 0;
+	uint64_t frame_iq_bytes;
+	bool due = false;
+
+	if (iq_bytes <= 0)
+		return;
+	pthread_mutex_lock(&entry->timing.lock);
+	frame_iq_bytes = (uint64_t)entry->sample_size * entry->samples_count;
+	if (UINT64_MAX - entry->timing.transported_iq_bytes <
+			(uint64_t)iq_bytes)
+		entry->timing.transported_iq_bytes = UINT64_MAX;
+	else
+		entry->timing.transported_iq_bytes += (uint64_t)iq_bytes;
+	if (frame_iq_bytes)
+		transported_frames = entry->timing.transported_iq_bytes /
+			frame_iq_bytes;
+	if (entry->timing.next_snapshot_frame &&
+			transported_frames >= entry->timing.next_snapshot_frame) {
+		do {
+			if (UINT64_MAX - entry->timing.next_snapshot_frame <
+					IIOD_TIMING_SNAPSHOT_FRAMES) {
+				entry->timing.next_snapshot_frame = 0;
+				break;
+			}
+			entry->timing.next_snapshot_frame +=
+				IIOD_TIMING_SNAPSHOT_FRAMES;
+		} while (entry->timing.next_snapshot_frame &&
+			transported_frames >= entry->timing.next_snapshot_frame);
+		due = true;
+	}
+	pthread_mutex_unlock(&entry->timing.lock);
+	if (due)
+		iiod_timing_log(entry, true);
+}
+
+static int iiod_timed_metadata_before_refill(struct DevEntry *entry)
+{
+	uint64_t started_ns = iiod_timing_now();
+	int ret = iiod_buffer_metadata_before_refill(
+		entry->metadata_provider_context);
+
+	iiod_timing_record(entry, IIOD_TIMING_SAMPLER_ADMIT, started_ns);
+	return ret;
+}
+
+static ssize_t iiod_timed_buffer_refill(struct DevEntry *entry)
+{
+	uint64_t started_ns = iiod_timing_now();
+	ssize_t ret = iio_buffer_refill(entry->buf);
+
+	iiod_timing_record(entry, IIOD_TIMING_DMA_REFILL, started_ns);
+	return ret;
+}
+
+static struct iio_buffer_block *iiod_timed_buffer_block_acquire(
+		struct DevEntry *entry)
+{
+	uint64_t started_ns = iiod_timing_now();
+	struct iio_buffer_block *block = iio_buffer_block_acquire(entry->buf);
+
+	iiod_timing_record(entry, IIOD_TIMING_DMA_REFILL, started_ns);
+	return block;
+}
+
+static int iiod_timed_metadata_after_refill(struct DevEntry *entry)
+{
+	uint64_t started_ns = iiod_timing_now();
+	int ret = iiod_buffer_metadata_after_refill(
+		entry->metadata_provider_context);
+
+	iiod_timing_record(entry, IIOD_TIMING_SAMPLER_FINISH, started_ns);
+	return ret;
+}
+
+static ssize_t iiod_timed_metadata_get(struct DevEntry *entry, size_t raw_bytes,
+	void *metadata, size_t metadata_capacity, size_t *iq_offset,
+	size_t *iq_bytes)
+{
+	uint64_t started_ns = iiod_timing_now();
+	ssize_t ret = iiod_buffer_metadata_get(entry->metadata_provider_context,
+		entry->dev, entry->buf, raw_bytes, metadata, metadata_capacity,
+		iq_offset, iq_bytes);
+
+	iiod_timing_record(entry, IIOD_TIMING_METADATA_BUILD, started_ns);
+	return ret;
+}
+
+static void iiod_timed_ddr_copy(struct DevEntry *entry, void *destination,
+	const void *source, size_t bytes)
+{
+	uint64_t started_ns = iiod_timing_now();
+
+	memcpy(destination, source, bytes);
+	iiod_timing_record(entry, IIOD_TIMING_DDR_COPY, started_ns);
+}
+
+/* entry->ring_lock must be held. */
+static int direct_async_spill_newest_dma(struct DevEntry *entry)
+{
+	struct iiod_direct_async *direct = &entry->direct;
+	struct iiod_ddr_ring *ring = &entry->ring;
+	struct iiod_direct_async_frame *frame = NULL;
+	struct iio_buffer_block *block;
+	size_t queue_slot, ring_slot, offset;
+	int ret;
+
+	/* Preserve the prepared DMA headroom while the RAM copy is in progress.
+	 * Waiting until every block is leased creates an unavoidable capture hole:
+	 * the released block cannot be rearmed until DMA has no destination. */
+	if (!ring->direct_extension || !direct->dma_headroom ||
+			direct->dma_count + direct->dma_headroom < direct->dma_capacity)
+		return 0;
+	/* Never spill the head: the network worker may already be using it. */
+	for (offset = 1; offset <= direct->count; offset++) {
+		queue_slot = (direct->tail + direct->capacity - offset) %
+			direct->capacity;
+		if (queue_slot == direct->head)
+			continue;
+		if (direct->frames[queue_slot].block &&
+				!direct->frames[queue_slot].ring_backed) {
+			frame = &direct->frames[queue_slot];
+			break;
+		}
+	}
+	if (!frame)
+		return direct->dma_count < direct->dma_capacity ? 0 : -EIO;
+	ret = iiod_ddr_ring_core_producer_reserve(&ring->core, &ring_slot);
+	if (ret)
+		return ret;
+	block = frame->block;
+	if (!block || !frame->iq_bytes || frame->iq_bytes != ring->frame_iq_bytes) {
+		(void)iiod_ddr_ring_core_producer_abort(&ring->core);
+		return -EIO;
+	}
+	iiod_timed_ddr_copy(entry, ring_iq_slot(ring, ring_slot),
+		(uint8_t *)iio_buffer_block_start(block) + frame->iq_offset,
+		frame->iq_bytes);
+	ret = iio_buffer_block_release(block);
+	if (ret) {
+		(void)iiod_ddr_ring_core_producer_abort(&ring->core);
+		return ret;
+	}
+	ret = iiod_ddr_ring_core_producer_commit(&ring->core);
+	if (ret)
+		return ret;
+	frame->block = NULL;
+	frame->iq_offset = 0;
+	frame->ring_slot = ring_slot;
+	frame->ring_backed = true;
+	direct->dma_count--;
+	return 0;
+}
 
 struct sample_cb_info {
 	struct parser_pdata *pdata;
@@ -961,9 +1449,8 @@ static ssize_t send_data(struct DevEntry *dev, struct ThdEntry *thd, size_t len)
 		metadata = malloc(thd->metadata_capacity);
 		if (!metadata)
 			return -ENOMEM;
-		metadata_len = iiod_buffer_metadata_get(
-				dev->metadata_provider_context, dev->dev, dev->buf, len,
-				metadata, thd->metadata_capacity, &iq_offset, &iq_bytes);
+		metadata_len = iiod_timed_metadata_get(dev, len, metadata,
+			thd->metadata_capacity, &iq_offset, &iq_bytes);
 		if (metadata_len <= 0 ||
 				metadata_len > (ssize_t)thd->metadata_capacity ||
 				iq_offset > len || iq_bytes > len - iq_offset ||
@@ -1015,9 +1502,13 @@ static ssize_t send_data(struct DevEntry *dev, struct ThdEntry *thd, size_t len)
 
 	if (!demux) {
 		/* Short path */
+		uint64_t started_ns = iiod_timing_now();
+
 		start = (void *)((uintptr_t)iio_buffer_start(dev->buf) + iq_offset);
 		ret = write_all(pdata, start, len);
+		iiod_timing_record(dev, IIOD_TIMING_TRANSPORT_IQ, started_ns);
 	} else {
+		uint64_t started_ns = iiod_timing_now();
 		struct sample_cb_info info = {
 			.pdata = pdata,
 			.cpt = 0,
@@ -1026,6 +1517,7 @@ static ssize_t send_data(struct DevEntry *dev, struct ThdEntry *thd, size_t len)
 		};
 
 		ret = iio_buffer_foreach_sample(dev->buf, send_sample, &info);
+		iiod_timing_record(dev, IIOD_TIMING_TRANSPORT_IQ, started_ns);
 	}
 
 out_free_metadata:
@@ -1052,20 +1544,16 @@ static int capture_burst(struct DevEntry *entry)
 		}
 		pthread_mutex_unlock(&entry->thdlist_lock);
 
-		ret = iiod_buffer_metadata_before_refill(
-			entry->metadata_provider_context);
+		ret = iiod_timed_metadata_before_refill(entry);
 		if (ret)
 			return ret;
-		raw_bytes = iio_buffer_refill(entry->buf);
-		ret = iiod_buffer_metadata_after_refill(
-			entry->metadata_provider_context);
+		raw_bytes = iiod_timed_buffer_refill(entry);
+		ret = iiod_timed_metadata_after_refill(entry);
 		if (raw_bytes < 0)
 			return (int)raw_bytes;
 		if (ret)
 			return ret;
-		metadata_len = iiod_buffer_metadata_get(
-			entry->metadata_provider_context, entry->dev, entry->buf,
-			(size_t)raw_bytes,
+		metadata_len = iiod_timed_metadata_get(entry, (size_t)raw_bytes,
 			burst_metadata_slot(cache, cache->captured_frames),
 			cache->metadata_capacity, &iq_offset, &iq_bytes);
 		if (metadata_len == -EAGAIN) {
@@ -1080,7 +1568,8 @@ static int capture_burst(struct DevEntry *entry)
 			iq_offset > (size_t)raw_bytes ||
 			iq_bytes > (size_t)raw_bytes - iq_offset)
 			return -EIO;
-		memcpy(burst_iq_slot(cache, cache->captured_frames),
+		iiod_timed_ddr_copy(entry,
+			burst_iq_slot(cache, cache->captured_frames),
 			(uint8_t *)iio_buffer_start(entry->buf) + iq_offset, iq_bytes);
 		cache->frames[cache->captured_frames].metadata_bytes =
 			(size_t)metadata_len;
@@ -1162,7 +1651,12 @@ static ssize_t send_burst_data(struct DevEntry *entry, struct ThdEntry *thd)
 	ret = write_all(pdata, metadata, frame->metadata_bytes);
 	if (ret < 0)
 		return ret;
-	ret = write_all(pdata, iq, cache->frame_iq_bytes);
+	{
+		uint64_t started_ns = iiod_timing_now();
+
+		ret = write_all(pdata, iq, cache->frame_iq_bytes);
+		iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_IQ, started_ns);
+	}
 	if (ret < 0)
 		return ret;
 
@@ -1228,7 +1722,12 @@ static ssize_t send_ring_data(struct DevEntry *entry, struct ThdEntry *thd)
 	ret = write_all(pdata, metadata, frame->metadata_bytes);
 	if (ret < 0)
 		goto transport_failure;
-	ret = write_all(pdata, iq, ring->frame_iq_bytes);
+	{
+		uint64_t started_ns = iiod_timing_now();
+
+		ret = write_all(pdata, iq, ring->frame_iq_bytes);
+		iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_IQ, started_ns);
+	}
 	if (ret < 0)
 		goto transport_failure;
 
@@ -1245,6 +1744,144 @@ transport_failure:
 	pthread_cond_broadcast(&entry->ring_ready_cond);
 	pthread_mutex_unlock(&entry->ring_lock);
 	return ret;
+}
+
+static ssize_t send_direct_async_data(struct DevEntry *entry,
+		struct ThdEntry *thd)
+{
+	struct iiod_direct_async *direct = &entry->direct;
+	struct iiod_ddr_ring *ring = &entry->ring;
+	struct parser_pdata *pdata = thd->pdata;
+	struct iiod_direct_async_frame *frame;
+	struct iio_buffer_block *block = NULL;
+	void *metadata;
+	void *iq;
+	uint64_t frame_end;
+	size_t iq_bytes, ring_slot = 0, slot;
+	bool ring_backed;
+	ssize_t ret;
+	int complete_ret = 0, release_ret = 0;
+
+	pthread_mutex_lock(&entry->ring_lock);
+	if (!direct->count) {
+		ret = direct->error ? direct->error : -ENODATA;
+		pthread_mutex_unlock(&entry->ring_lock);
+		return ret;
+	}
+	slot = direct->head;
+	frame = &direct->frames[slot];
+	ring_backed = frame->ring_backed;
+	if ((ring_backed == (frame->block != NULL)) ||
+		thd->nb != frame->iq_bytes ||
+		thd->metadata_capacity < frame->metadata_bytes) {
+		direct->error = -ENOSPC;
+		direct->cancelled = true;
+		if (ring->direct_extension &&
+				!iiod_ddr_ring_core_is_terminal(&ring->core))
+			(void)iiod_ddr_ring_core_fail(&ring->core,
+				SPF_DDR_RING_REASON_INTERNAL_ERROR, -ENOSPC);
+		pthread_cond_broadcast(&entry->ring_ready_cond);
+		pthread_mutex_unlock(&entry->ring_lock);
+		return -ENOSPC;
+	}
+	iq_bytes = frame->iq_bytes;
+	frame_end = frame->frame_end;
+	metadata = direct_async_metadata_slot(direct, slot);
+	if (ring_backed) {
+		ret = iiod_ddr_ring_core_consumer_reserve(&ring->core, &ring_slot);
+		if (ret || ring_slot != frame->ring_slot) {
+			ret = ret ? ret : -EIO;
+			direct->error = (int)ret;
+			direct->cancelled = true;
+			if (!iiod_ddr_ring_core_is_terminal(&ring->core))
+				(void)iiod_ddr_ring_core_fail(&ring->core,
+					SPF_DDR_RING_REASON_INTERNAL_ERROR, (int)ret);
+			pthread_cond_broadcast(&entry->ring_ready_cond);
+			pthread_mutex_unlock(&entry->ring_lock);
+			return ret;
+		}
+		iq = ring_iq_slot(ring, ring_slot);
+	} else {
+		block = frame->block;
+		iq = (uint8_t *)iio_buffer_block_start(block) + frame->iq_offset;
+	}
+	direct->consumer_active = true;
+	pthread_mutex_unlock(&entry->ring_lock);
+
+	print_value(pdata, frame->iq_bytes);
+	if (thd->new_client) {
+		unsigned int i;
+		char mask[129], *ptr = mask;
+		ssize_t remaining = sizeof(mask);
+
+		for (i = entry->nb_words; i > 0 && ptr < mask + sizeof(mask);
+				i--, ptr += 8) {
+			snprintf(ptr, (size_t)remaining, "%08x", entry->mask[i - 1]);
+			remaining -= 8;
+		}
+		if (remaining <= 0) {
+			ret = -ENOSPC;
+			goto complete;
+		}
+		*ptr = '\n';
+		ret = write_all(pdata, mask, (size_t)(ptr + 1 - mask));
+		if (ret < 0)
+			goto complete;
+		thd->new_client = false;
+	}
+	print_value(pdata, frame->metadata_bytes);
+	ret = write_all(pdata, metadata, frame->metadata_bytes);
+	if (ret < 0)
+		goto complete;
+	{
+		uint64_t started_ns = iiod_timing_now();
+
+		ret = write_all(pdata, iq, frame->iq_bytes);
+		iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_IQ, started_ns);
+	}
+
+complete:
+	if (!ring_backed)
+		release_ret = iio_buffer_block_release(block);
+	pthread_mutex_lock(&entry->ring_lock);
+	direct->consumer_active = false;
+	if (ring_backed)
+		release_ret = iiod_ddr_ring_core_consumer_release(&ring->core);
+	if (ret >= 0 && release_ret < 0)
+		ret = release_ret;
+	/* A failed DMA release keeps the lease reachable for teardown retry. */
+	if (!release_ret) {
+		memset(frame, 0, sizeof(*frame));
+		if (!ring_backed)
+			direct->dma_count--;
+	}
+	direct->head = (direct->head + 1U) % direct->capacity;
+	direct->count--;
+	direct->consumed_frames++;
+	if (ret >= 0 && direct->overrun_policy ==
+			IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG) {
+		direct->last_consumed_frame_end = frame_end;
+		direct->last_consumed_frame_valid = true;
+	}
+	if (ret < 0) {
+		direct->error = (int)ret;
+		direct->cancelled = true;
+		if (ring->direct_extension &&
+				!iiod_ddr_ring_core_is_terminal(&ring->core))
+			(void)iiod_ddr_ring_core_fail(&ring->core,
+				SPF_DDR_RING_REASON_TRANSPORT_ERROR, (int)ret);
+	} else if (ring->direct_extension &&
+			direct->consumed_frames == direct->target_frames) {
+		complete_ret = iiod_ddr_ring_core_complete_extension(&ring->core);
+		if (complete_ret) {
+			direct->error = complete_ret;
+			direct->cancelled = true;
+			ret = complete_ret;
+		}
+	}
+	pthread_cond_broadcast(&entry->ring_ready_cond);
+	pthread_mutex_unlock(&entry->ring_lock);
+	return ret < 0 ? ret : (ssize_t)iq_bytes;
 }
 
 static ssize_t receive_data(struct DevEntry *dev, struct ThdEntry *thd)
@@ -1291,10 +1928,12 @@ static void dev_entry_put(struct DevEntry *entry)
 	pthread_mutex_unlock(&entry->thdlist_lock);
 
 	if (free_entry) {
+		iiod_timing_log(entry, false);
 		pthread_mutex_destroy(&entry->thdlist_lock);
 		pthread_cond_destroy(&entry->rw_ready_cond);
 		pthread_mutex_destroy(&entry->ring_lock);
 		pthread_cond_destroy(&entry->ring_ready_cond);
+		pthread_mutex_destroy(&entry->timing.lock);
 
 		free(entry->mask);
 		free(entry);
@@ -1312,6 +1951,257 @@ static uint32_t ring_failure_reason(int error)
 	return SPF_DDR_RING_REASON_DMA_ERROR;
 }
 
+static void direct_async_producer_thd(struct thread_pool *pool, void *data)
+{
+	struct DevEntry *entry = data;
+	struct iiod_direct_async *direct = &entry->direct;
+	unsigned int startup_discards = 0;
+	int error = 0;
+
+	while (!thread_pool_is_stopped(pool)) {
+		struct iiod_direct_async_frame *frame;
+		struct iiod_buffer_metadata_frame_info frame_info = {0};
+		struct iio_buffer_block *block = NULL;
+		ssize_t metadata_len = 0;
+		size_t iq_offset = 0;
+		size_t iq_bytes = 0;
+		size_t raw_bytes;
+		size_t slot;
+		int ret;
+
+		pthread_mutex_lock(&entry->ring_lock);
+		while (!direct->cancelled && direct->count == direct->capacity)
+			pthread_cond_wait(&entry->ring_ready_cond, &entry->ring_lock);
+		if (direct->cancelled || direct->consumed_frames >=
+				direct->target_frames || direct->count >=
+				direct->target_frames - direct->consumed_frames) {
+			pthread_mutex_unlock(&entry->ring_lock);
+			break;
+		}
+		ret = direct_async_spill_newest_dma(entry);
+		if (ret) {
+			error = ret;
+			pthread_mutex_unlock(&entry->ring_lock);
+			break;
+		}
+		slot = direct->tail;
+		pthread_mutex_unlock(&entry->ring_lock);
+
+		ret = iiod_timed_metadata_before_refill(entry);
+		if (ret == 0) {
+			block = iiod_timed_buffer_block_acquire(entry);
+			ret = block ? iiod_timed_metadata_after_refill(entry) : -errno;
+		}
+		if (ret) {
+			error = ret;
+			goto release_block;
+		}
+		raw_bytes = iio_buffer_block_bytes_used(block);
+		metadata_len = iiod_timed_metadata_get(entry, raw_bytes,
+			direct_async_metadata_slot(direct, slot),
+			direct->metadata_capacity, &iq_offset, &iq_bytes);
+		if (metadata_len == -EAGAIN) {
+			if (++startup_discards > IIOD_BURST_MAX_STARTUP_DISCARDS)
+				error = -ETIMEDOUT;
+			goto release_block;
+		}
+		if (metadata_len == -ESTALE && direct->overrun_policy ==
+				IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG) {
+			uint64_t dropped_before;
+
+			pthread_mutex_lock(&entry->ring_lock);
+			if (direct->cancelled) {
+				pthread_mutex_unlock(&entry->ring_lock);
+				goto release_block;
+			}
+			dropped_before = direct->dropped_frames;
+			ret = direct_async_drop_pending(entry);
+			if (!ret) {
+				direct->dropped_frames++;
+				direct->stale_metadata_frames++;
+				direct->stale_metadata_streak++;
+				IIO_WARNING("Direct async stale metadata: retired one "
+					"uncovered DMA frame and %llu queued frames "
+					"(streak=%u total=%llu)\n",
+					(unsigned long long)(direct->dropped_frames -
+						dropped_before - 1U),
+					direct->stale_metadata_streak,
+					(unsigned long long)direct->stale_metadata_frames);
+				if (direct->stale_metadata_streak >
+						direct->dma_capacity +
+						IIOD_DIRECT_STALE_RETRY_MARGIN)
+					error = -ESTALE;
+			} else {
+				error = ret;
+			}
+			pthread_mutex_unlock(&entry->ring_lock);
+			goto release_block;
+		}
+		if (metadata_len < 0) {
+			error = (int)metadata_len;
+			goto release_block;
+		}
+		if (!metadata_len || metadata_len >
+				(ssize_t)direct->metadata_capacity ||
+			!iq_bytes || iq_offset > raw_bytes ||
+			iq_bytes > raw_bytes - iq_offset) {
+			error = -EIO;
+			goto release_block;
+		}
+		direct->stale_metadata_streak = 0;
+		if (direct->overrun_policy ==
+				IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG) {
+			ret = iiod_buffer_metadata_describe_frame(
+				entry->metadata_provider_context,
+				direct_async_metadata_slot(direct, slot),
+				(size_t)metadata_len, &frame_info);
+			if (ret) {
+				error = ret;
+				goto release_block;
+			}
+		}
+
+		pthread_mutex_lock(&entry->ring_lock);
+		if (direct->cancelled) {
+			pthread_mutex_unlock(&entry->ring_lock);
+			goto release_block;
+		}
+		if (direct->overrun_policy ==
+				IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG &&
+				frame_info.missing_samples_before) {
+			ret = direct_async_drop_pending(entry);
+			if (ret) {
+				error = ret;
+				pthread_mutex_unlock(&entry->ring_lock);
+				goto release_block;
+			}
+			if (slot != direct->tail) {
+				memcpy(direct_async_metadata_slot(direct, direct->tail),
+					direct_async_metadata_slot(direct, slot),
+					(size_t)metadata_len);
+				slot = direct->tail;
+			}
+			if (direct->consumer_active) {
+				struct iiod_direct_async_frame *active =
+					&direct->frames[direct->head];
+
+				ret = iiod_buffer_metadata_rebase_frame(
+					entry->metadata_provider_context,
+					direct_async_metadata_slot(direct, slot),
+					(size_t)metadata_len,
+					active->frame_end);
+				if (ret) {
+					error = ret;
+					pthread_mutex_unlock(&entry->ring_lock);
+					goto release_block;
+				}
+			} else if (direct->last_consumed_frame_valid) {
+				ret = iiod_buffer_metadata_rebase_frame(
+					entry->metadata_provider_context,
+					direct_async_metadata_slot(direct, slot),
+					(size_t)metadata_len,
+					direct->last_consumed_frame_end);
+				if (ret) {
+					error = ret;
+					pthread_mutex_unlock(&entry->ring_lock);
+					goto release_block;
+				}
+			}
+		}
+		frame = &direct->frames[slot];
+		frame->block = block;
+		frame->frame_end = frame_info.frame_end;
+		frame->metadata_bytes = (size_t)metadata_len;
+		frame->iq_offset = iq_offset;
+		frame->iq_bytes = iq_bytes;
+		frame->ring_slot = 0;
+		frame->ring_backed = false;
+		block = NULL;
+		direct->dma_count++;
+		direct->tail = (direct->tail + 1U) % direct->capacity;
+		direct->count++;
+		direct->produced_frames++;
+		pthread_cond_broadcast(&entry->ring_ready_cond);
+		pthread_mutex_unlock(&entry->ring_lock);
+		continue;
+
+release_block:
+		if (block) {
+			int release_ret = iio_buffer_block_release(block);
+
+			if (release_ret) {
+				/* Keep a failed lease reachable for the teardown retry. */
+				direct->frames[slot].block = block;
+				block = NULL;
+				error = release_ret;
+			}
+		}
+		if ((metadata_len == -EAGAIN || metadata_len == -ESTALE) &&
+				!error)
+			continue;
+		break;
+	}
+
+	pthread_mutex_lock(&entry->ring_lock);
+	if (error && !direct->cancelled) {
+		direct->error = error;
+		if (entry->ring.direct_extension &&
+				!iiod_ddr_ring_core_is_terminal(&entry->ring.core))
+			(void)iiod_ddr_ring_core_fail(&entry->ring.core,
+				ring_failure_reason(error), error < 0 ? error : -EIO);
+	}
+	direct->producer_exited = true;
+	pthread_cond_broadcast(&entry->ring_ready_cond);
+	pthread_mutex_unlock(&entry->ring_lock);
+	pthread_mutex_lock(&entry->thdlist_lock);
+	pthread_cond_broadcast(&entry->rw_ready_cond);
+	pthread_mutex_unlock(&entry->thdlist_lock);
+	dev_entry_put(entry);
+}
+
+static int direct_async_start_producer(struct DevEntry *entry)
+{
+	int ret;
+
+	pthread_mutex_lock(&entry->ring_lock);
+	if (!entry->direct.requested || entry->direct.producer_started) {
+		pthread_mutex_unlock(&entry->ring_lock);
+		return -EINVAL;
+	}
+	if (entry->ring.direct_extension) {
+		ret = iiod_ddr_ring_core_start_extension(&entry->ring.core);
+		if (ret) {
+			pthread_mutex_unlock(&entry->ring_lock);
+			return ret;
+		}
+	}
+	entry->direct.producer_started = true;
+	entry->direct.producer_exited = false;
+	entry->direct_used = true;
+	pthread_mutex_unlock(&entry->ring_lock);
+	if (entry->ring.direct_extension)
+		iiod_buffer_metadata_ring_prefix_complete(
+			entry->metadata_provider_context, true);
+
+	entry->ref_count++;
+	ret = thread_pool_add_thread(main_thread_pool,
+		direct_async_producer_thd, entry, "direct_dma");
+	if (ret) {
+		entry->ref_count--;
+		pthread_mutex_lock(&entry->ring_lock);
+		entry->direct.error = ret < 0 ? ret : -EIO;
+		entry->direct.producer_started = false;
+		entry->direct.producer_exited = true;
+		if (entry->ring.direct_extension &&
+				!iiod_ddr_ring_core_is_terminal(&entry->ring.core))
+			(void)iiod_ddr_ring_core_fail(&entry->ring.core,
+				SPF_DDR_RING_REASON_INTERNAL_ERROR,
+				ret < 0 ? ret : -EIO);
+		pthread_mutex_unlock(&entry->ring_lock);
+	}
+	return ret;
+}
+
 static void ring_producer_thd(struct thread_pool *pool, void *data)
 {
 	struct DevEntry *entry = data;
@@ -1322,32 +2212,36 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 	while (!thread_pool_is_stopped(pool)) {
 		ssize_t metadata_len;
 		uint64_t first_sample_sequence = 0;
-		uint64_t exclusive_boundary = 0;
 		void *raw_start;
 		size_t iq_offset = 0;
 		size_t iq_bytes = 0;
 		ssize_t raw_bytes;
 		size_t slot;
 		int ret;
+		bool prefix_complete;
+		uint64_t wait_started_ns = iiod_timing_now();
 
 		pthread_mutex_lock(&entry->ring_lock);
 		while ((ret = iiod_ddr_ring_core_producer_reserve(
 				&ring->core, &slot)) == -EAGAIN)
 			pthread_cond_wait(&entry->ring_ready_cond, &entry->ring_lock);
+		prefix_complete = iiod_ddr_ring_core_prefix_complete(&ring->core);
 		pthread_mutex_unlock(&entry->ring_lock);
+		iiod_timing_record(entry, IIOD_TIMING_RING_PRODUCER_WAIT,
+			wait_started_ns);
 		if (ret == -ESHUTDOWN || ret == -ENODATA)
 			break;
 		if (ret) {
 			error = ret;
 			break;
 		}
+		iiod_buffer_metadata_ring_prefix_complete(
+			entry->metadata_provider_context, prefix_complete);
 
-		ret = iiod_buffer_metadata_before_refill(
-			entry->metadata_provider_context);
+		ret = iiod_timed_metadata_before_refill(entry);
 		if (ret == 0) {
-			raw_bytes = iio_buffer_refill(entry->buf);
-			ret = iiod_buffer_metadata_after_refill(
-				entry->metadata_provider_context);
+			raw_bytes = iiod_timed_buffer_refill(entry);
+			ret = iiod_timed_metadata_after_refill(entry);
 			if (raw_bytes < 0)
 				ret = (int)raw_bytes;
 		} else {
@@ -1366,9 +2260,8 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 				(size_t)raw_bytes >= sizeof(first_sample_sequence))
 			memcpy(&first_sample_sequence, raw_start,
 				sizeof(first_sample_sequence));
-		metadata_len = iiod_buffer_metadata_get(
-			entry->metadata_provider_context, entry->dev, entry->buf,
-			(size_t)raw_bytes, ring_metadata_slot(ring, slot),
+		metadata_len = iiod_timed_metadata_get(entry, (size_t)raw_bytes,
+			ring_metadata_slot(ring, slot),
 			ring->metadata_capacity, &iq_offset, &iq_bytes);
 		if (metadata_len == -EAGAIN) {
 			pthread_mutex_lock(&entry->ring_lock);
@@ -1384,9 +2277,8 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 			error = (int)metadata_len;
 			if (entry->metadata_extra_samples) {
 				pthread_mutex_lock(&entry->ring_lock);
-				ring->first_unavailable_sample_sequence =
-					first_sample_sequence;
-				ring->first_unavailable_valid = true;
+				iiod_ddr_ring_core_mark_unavailable(&ring->core,
+					first_sample_sequence);
 				pthread_mutex_unlock(&entry->ring_lock);
 			}
 			goto abort_slot;
@@ -1398,18 +2290,15 @@ static void ring_producer_thd(struct thread_pool *pool, void *data)
 			error = -EIO;
 			goto abort_slot;
 		}
-		memcpy(ring_iq_slot(ring, slot), (uint8_t *)raw_start + iq_offset,
-			iq_bytes);
+		iiod_timed_ddr_copy(entry, ring_iq_slot(ring, slot),
+			(uint8_t *)raw_start + iq_offset, iq_bytes);
 		ring->frames[slot].metadata_bytes = (size_t)metadata_len;
 
 		pthread_mutex_lock(&entry->ring_lock);
 		ret = iiod_ddr_ring_core_producer_commit(&ring->core);
-		if (!ret && entry->metadata_extra_samples &&
-				!spf_ddr_ring_exclusive_boundary(first_sample_sequence,
-					entry->samples_count, &exclusive_boundary)) {
-			ring->last_contiguous_sample_sequence = exclusive_boundary;
-			ring->last_contiguous_valid = true;
-		}
+		if (!ret && entry->metadata_extra_samples)
+			ret = iiod_ddr_ring_core_observe_samples(&ring->core,
+				first_sample_sequence, entry->samples_count);
 		pthread_cond_broadcast(&entry->ring_ready_cond);
 		pthread_mutex_unlock(&entry->ring_lock);
 		if (ret) {
@@ -1513,10 +2402,14 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		pthread_mutex_lock(&entry->thdlist_lock);
 
 		if (SLIST_EMPTY(&entry->thdlist_head) &&
-				entry->ring.producer_started) {
+				(entry->ring.producer_started ||
+				 entry->direct.producer_started)) {
 			pthread_mutex_unlock(&entry->thdlist_lock);
 			pthread_mutex_lock(&entry->ring_lock);
-			while (!entry->ring.producer_exited)
+			while ((entry->ring.producer_started &&
+					!entry->ring.producer_exited) ||
+				(entry->direct.producer_started &&
+					!entry->direct.producer_exited))
 				pthread_cond_wait(&entry->ring_ready_cond,
 					&entry->ring_lock);
 			pthread_mutex_unlock(&entry->ring_lock);
@@ -1587,6 +2480,9 @@ static void rw_thd(struct thread_pool *pool, void *d)
 					break;
 			}
 
+			entry->requested_kernel_buffers =
+				iio_device_get_kernel_buffers_count(dev);
+			entry->allocated_kernel_buffers = 0;
 			entry->buf = iio_device_create_buffer(dev,
 					samples_count + entry->metadata_extra_samples,
 					entry->cyclic);
@@ -1596,9 +2492,22 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				break;
 			}
 			if (entry->metadata_enabled) {
+				ret = iio_buffer_get_allocated_kernel_buffers_count(
+					entry->buf, &entry->allocated_kernel_buffers);
+				if (ret < 0) {
+					IIO_ERROR("Unable to attest allocated kernel buffers: "
+						"%zd\n", ret);
+					iio_buffer_destroy(entry->buf);
+					entry->buf = NULL;
+					break;
+				}
+				IIO_DEBUG("Kernel DMA admission: requested=%u "
+					"allocated=%u\n",
+					entry->requested_kernel_buffers,
+					entry->allocated_kernel_buffers);
 				ret = iiod_buffer_metadata_buffer_opened(
 					entry->metadata_provider_context,
-					iio_device_get_kernel_buffers_count(dev));
+					entry->allocated_kernel_buffers);
 				if (ret < 0) {
 					iio_buffer_destroy(entry->buf);
 					entry->buf = NULL;
@@ -1609,7 +2518,8 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				entry->burst.state = IIOD_BURST_CAPTURING;
 			entry->cancelled = false;
 			entry->samples_count = samples_count;
-			if (entry->ring.core.state == SPF_DDR_RING_STATE_RESERVED) {
+			if (entry->ring.core.state == SPF_DDR_RING_STATE_RESERVED &&
+					!entry->ring.direct_extension) {
 				ret = ring_start_producer(entry);
 				if (ret)
 					break;
@@ -1685,11 +2595,10 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		if (has_readers) {
 			ssize_t nb_bytes;
 
-			if (entry->ring.producer_started) {
+			if (entry->direct.producer_started) {
 				pthread_mutex_lock(&entry->ring_lock);
-				while (entry->ring.core.state ==
-						SPF_DDR_RING_STATE_RUNNING &&
-						!entry->ring.core.occupied)
+				while (!entry->direct.count && !entry->direct.error &&
+						!entry->direct.producer_exited)
 					pthread_cond_wait(&entry->ring_ready_cond,
 						&entry->ring_lock);
 				pthread_mutex_unlock(&entry->ring_lock);
@@ -1698,9 +2607,58 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				for (thd = SLIST_FIRST(&entry->thdlist_head);
 						thd; thd = next_thd) {
 					next_thd = SLIST_NEXT(thd, dev_list_entry);
+					if (!thd->active || thd->is_writer ||
+							!thd->async_direct)
+						continue;
+					uint64_t frame_started_ns = iiod_timing_now();
+					ret = send_direct_async_data(entry, thd);
+					iiod_timing_record(entry,
+						IIOD_TIMING_TRANSPORT_FRAME, frame_started_ns);
+					iiod_timing_transport_complete(entry, ret);
+					if (ret > 0) {
+						thd->nb -= (unsigned int)ret;
+						if (thd->async_frames_remaining)
+							thd->async_frames_remaining--;
+						if (thd->async_frames_remaining) {
+							thd->nb = (unsigned int)ret;
+							thd->new_client = true;
+						}
+					}
+					if (ret < 0 || !thd->async_frames_remaining)
+						signal_thread(thd, ret < 0 ? ret :
+							(ssize_t)thd->nb);
+				}
+				pthread_mutex_unlock(&entry->thdlist_lock);
+				continue;
+			}
+
+			if (entry->ring.producer_started) {
+				uint64_t wait_started_ns = iiod_timing_now();
+
+				pthread_mutex_lock(&entry->ring_lock);
+				while (entry->ring.core.state ==
+						SPF_DDR_RING_STATE_RUNNING &&
+						!iiod_ddr_ring_core_consumer_ready(
+							&entry->ring.core))
+					pthread_cond_wait(&entry->ring_ready_cond,
+						&entry->ring_lock);
+				pthread_mutex_unlock(&entry->ring_lock);
+				iiod_timing_record(entry, IIOD_TIMING_RING_CONSUMER_WAIT,
+					wait_started_ns);
+
+				pthread_mutex_lock(&entry->thdlist_lock);
+				for (thd = SLIST_FIRST(&entry->thdlist_head);
+						thd; thd = next_thd) {
+					next_thd = SLIST_NEXT(thd, dev_list_entry);
 					if (!thd->active || thd->is_writer)
 						continue;
+					uint64_t frame_started_ns = iiod_timing_now();
 					ret = send_ring_data(entry, thd);
+					iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_FRAME,
+						frame_started_ns);
+					iiod_timing_transport_complete(entry, ret);
+					if (ret == -EAGAIN)
+						continue;
 					if (ret > 0)
 						thd->nb -= (unsigned int)ret;
 					if (ret < 0 || thd->nb < sample_size)
@@ -1718,7 +2676,11 @@ static void rw_thd(struct thread_pool *pool, void *d)
 					next_thd = SLIST_NEXT(thd, dev_list_entry);
 					if (!thd->active || thd->is_writer)
 						continue;
+					uint64_t frame_started_ns = iiod_timing_now();
 					ret = send_burst_data(entry, thd);
+					iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_FRAME,
+						frame_started_ns);
+					iiod_timing_transport_complete(entry, ret);
 					if (ret > 0)
 						thd->nb -= (unsigned int)ret;
 					else if (ret < 0 &&
@@ -1733,17 +2695,16 @@ static void rw_thd(struct thread_pool *pool, void *d)
 			}
 
 			if (entry->metadata_enabled) {
-				ret = iiod_buffer_metadata_before_refill(
-					entry->metadata_provider_context);
+				ret = iiod_timed_metadata_before_refill(entry);
 				if (ret == 0) {
-					ssize_t refill_ret = iio_buffer_refill(entry->buf);
-					int metadata_ret = iiod_buffer_metadata_after_refill(
-						entry->metadata_provider_context);
+					ssize_t refill_ret = iiod_timed_buffer_refill(entry);
+					int metadata_ret =
+						iiod_timed_metadata_after_refill(entry);
 					ret = refill_ret < 0 ? refill_ret :
 						(metadata_ret < 0 ? metadata_ret : refill_ret);
 				}
 			} else {
-				ret = iio_buffer_refill(entry->buf);
+				ret = iiod_timed_buffer_refill(entry);
 			}
 
 			pthread_mutex_lock(&entry->thdlist_lock);
@@ -1793,7 +2754,11 @@ static void rw_thd(struct thread_pool *pool, void *d)
 				if (!thd->active || thd->is_writer)
 					continue;
 
+				uint64_t frame_started_ns = iiod_timing_now();
 				ret = send_data(entry, thd, nb_bytes);
+				iiod_timing_record(entry, IIOD_TIMING_TRANSPORT_FRAME,
+					frame_started_ns);
+				iiod_timing_transport_complete(entry, ret);
 				if (ret > 0)
 					thd->nb -= ret;
 
@@ -1882,6 +2847,25 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		pthread_mutex_unlock(&entry->ring_lock);
 		pthread_mutex_lock(&entry->thdlist_lock);
 	}
+	if (entry->direct.producer_started) {
+		pthread_mutex_lock(&entry->ring_lock);
+		entry->direct.cancelled = true;
+		if (entry->ring.direct_extension &&
+				!iiod_ddr_ring_core_is_terminal(&entry->ring.core))
+			(void)iiod_ddr_ring_core_cancel(&entry->ring.core,
+				SPF_DDR_RING_REASON_CLIENT_DISCONNECTED);
+		pthread_cond_broadcast(&entry->ring_ready_cond);
+		pthread_mutex_unlock(&entry->ring_lock);
+		if (entry->buf)
+			iio_buffer_cancel(entry->buf);
+		pthread_mutex_unlock(&entry->thdlist_lock);
+		pthread_mutex_lock(&entry->ring_lock);
+		while (!entry->direct.producer_exited)
+			pthread_cond_wait(&entry->ring_ready_cond,
+				&entry->ring_lock);
+		pthread_mutex_unlock(&entry->ring_lock);
+		pthread_mutex_lock(&entry->thdlist_lock);
+	}
 
 	/* Signal all remaining threads */
 	for (thd = SLIST_FIRST(&entry->thdlist_head); thd; thd = next_thd) {
@@ -1890,6 +2874,8 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		thd->wait_for_open = false;
 		signal_thread(thd, ret);
 	}
+	/* Direct frames lease entry->buf storage and must be returned first. */
+	direct_async_release_storage(&entry->direct);
 	if (entry->buf) {
 		iio_buffer_destroy(entry->buf);
 		entry->buf = NULL;
@@ -1936,10 +2922,12 @@ static struct ThdEntry *parser_lookup_thd_entry(struct parser_pdata *pdata,
 
 static ssize_t rw_buffer(struct parser_pdata *pdata,
 		struct iio_device *dev, unsigned int nb, bool is_write,
-		unsigned int metadata_capacity)
+		unsigned int metadata_capacity, unsigned int async_frames,
+		enum iio_buffer_metadata_overrun_policy overrun_policy)
 {
 	struct DevEntry *entry;
 	struct ThdEntry *thd;
+	bool ring_extension;
 	ssize_t ret;
 
 	if (!dev)
@@ -1950,10 +2938,18 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 		return -EBADF;
 
 	entry = thd->entry;
+	ring_extension = entry->ring.direct_extension;
 	if (metadata_capacity && (is_write ||
 			metadata_capacity > IIOD_MAX_BUFFER_METADATA_BYTES ||
 			thd->sample_size != entry->sample_size ||
 			nb != entry->sample_size * entry->samples_count))
+		return -EINVAL;
+	if (async_frames && (!metadata_capacity || is_write ||
+		async_frames > IIO_BUFFER_METADATA_DIRECT_MAX ||
+		entry->burst_plan.requested_iq_bytes ||
+		(entry->burst_plan.ring_capacity_iq_bytes && !ring_extension)))
+		return -EINVAL;
+	if (!async_frames && metadata_capacity && ring_extension)
 		return -EINVAL;
 
 	if (nb < entry->sample_size)
@@ -1969,6 +2965,32 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 		pthread_mutex_unlock(&entry->thdlist_lock);
 		return -EBUSY;
 	}
+	if (async_frames) {
+		if (!entry->allocated_kernel_buffers ||
+				entry->allocated_kernel_buffers !=
+				entry->requested_kernel_buffers) {
+			IIO_ERROR("Direct async exact DMA admission failed: "
+				"requested=%u allocated=%u\n",
+				entry->requested_kernel_buffers,
+				entry->allocated_kernel_buffers);
+			pthread_mutex_unlock(&entry->thdlist_lock);
+			return -ENOSPC;
+		}
+		ret = direct_async_prepare(&entry->direct,
+			entry->allocated_kernel_buffers,
+			ring_extension ? entry->ring.core.slot_count : 0U,
+			metadata_capacity, async_frames, overrun_policy);
+		if (ret) {
+			pthread_mutex_unlock(&entry->thdlist_lock);
+			return ret;
+		}
+		ret = direct_async_start_producer(entry);
+		if (ret) {
+			direct_async_release_storage(&entry->direct);
+			pthread_mutex_unlock(&entry->thdlist_lock);
+			return ret;
+		}
+	}
 
 	thd->new_client = true;
 	thd->nb = nb;
@@ -1976,6 +2998,8 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 	thd->is_writer = is_write;
 	thd->metadata_enabled = metadata_capacity != 0;
 	thd->metadata_capacity = metadata_capacity;
+	thd->async_direct = async_frames != 0U;
+	thd->async_frames_remaining = async_frames;
 	thd->active = true;
 
 	pthread_cond_signal(&entry->rw_ready_cond);
@@ -2042,6 +3066,17 @@ static void remove_thd_entry(struct ThdEntry *t)
 				pthread_mutex_lock(&entry->ring_lock);
 				(void)iiod_ddr_ring_core_cancel(&entry->ring.core,
 					SPF_DDR_RING_REASON_CLIENT_DISCONNECTED);
+				pthread_cond_broadcast(&entry->ring_ready_cond);
+				pthread_mutex_unlock(&entry->ring_lock);
+			}
+			if (entry->direct.producer_started) {
+				pthread_mutex_lock(&entry->ring_lock);
+				entry->direct.cancelled = true;
+				if (entry->ring.direct_extension &&
+						!iiod_ddr_ring_core_is_terminal(
+							&entry->ring.core))
+					(void)iiod_ddr_ring_core_cancel(&entry->ring.core,
+						SPF_DDR_RING_REASON_CLIENT_DISCONNECTED);
 				pthread_cond_broadcast(&entry->ring_ready_cond);
 				pthread_mutex_unlock(&entry->ring_lock);
 			}
@@ -2267,10 +3302,18 @@ retry:
 	pthread_cond_init(&entry->rw_ready_cond, NULL);
 	pthread_mutex_init(&entry->ring_lock, NULL);
 	pthread_cond_init(&entry->ring_ready_cond, NULL);
+	pthread_mutex_init(&entry->timing.lock, NULL);
+	entry->timing.next_snapshot_frame = IIOD_TIMING_SNAPSHOT_FRAMES;
 
-	ret = thread_pool_add_thread(main_thread_pool, rw_thd, entry, "rw_thd");
+	if (rw_cpu_affinity >= 0)
+		ret = thread_pool_add_thread_on_cpu(main_thread_pool, rw_thd, entry,
+			"rw_thd", rw_cpu_affinity);
+	else
+		ret = thread_pool_add_thread(main_thread_pool, rw_thd, entry,
+			"rw_thd");
 	if (ret) {
 		pthread_mutex_unlock(&devlist_lock);
+		pthread_mutex_destroy(&entry->timing.lock);
 		pthread_cond_destroy(&entry->ring_ready_cond);
 		pthread_mutex_destroy(&entry->ring_lock);
 		pthread_cond_destroy(&entry->rw_ready_cond);
@@ -2412,7 +3455,8 @@ int close_dev(struct parser_pdata *pdata, struct iio_device *dev)
 ssize_t rw_dev(struct parser_pdata *pdata, struct iio_device *dev,
 		unsigned int nb, bool is_write)
 {
-	ssize_t ret = rw_buffer(pdata, dev, nb, is_write, 0);
+	ssize_t ret = rw_buffer(pdata, dev, nb, is_write, 0, 0,
+		IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG);
 	if (ret <= 0 || is_write)
 		print_value(pdata, ret);
 	return ret;
@@ -2426,7 +3470,32 @@ ssize_t rw_dev_with_metadata(struct parser_pdata *pdata,
 		ret = -EOVERFLOW;
 	else
 		ret = rw_buffer(pdata, dev, (unsigned int)nb, false,
-				(unsigned int)metadata_capacity);
+				(unsigned int)metadata_capacity, 0,
+				IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG);
+	if (ret <= 0)
+		print_value(pdata, ret);
+	return ret;
+}
+
+ssize_t rw_dev_with_metadata_async(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t nb, size_t metadata_capacity,
+		size_t frames,
+		enum iio_buffer_metadata_overrun_policy overrun_policy)
+{
+	ssize_t ret;
+
+	if (!frames ||
+			(overrun_policy !=
+			 IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG &&
+			 overrun_policy != IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG))
+		ret = -EINVAL;
+	else if (nb > UINT_MAX || metadata_capacity > UINT_MAX ||
+			frames > UINT_MAX)
+		ret = -EOVERFLOW;
+	else
+		ret = rw_buffer(pdata, dev, (unsigned int)nb, false,
+			(unsigned int)metadata_capacity, (unsigned int)frames,
+			overrun_policy);
 	if (ret <= 0)
 		print_value(pdata, ret);
 	return ret;
@@ -2435,7 +3504,7 @@ ssize_t rw_dev_with_metadata(struct parser_pdata *pdata,
 ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t status_capacity)
 {
-	uint8_t wire_status[SPF_DDR_RING_STATUS_BYTES];
+	uint8_t wire_status[SPF_HOP_STATUS_BYTES];
 	struct spf_ddr_ring_status status = {0};
 	struct ThdEntry *thd;
 	struct DevEntry *entry;
@@ -2443,55 +3512,100 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 
 	if (!dev)
 		ret = -ENODEV;
-	else if (status_capacity < sizeof(wire_status))
-		ret = -ENOSPC;
 	else if (!(thd = parser_lookup_thd_entry(pdata, dev)))
 		ret = -EBADF;
 	else {
 		entry = thd->entry;
-		pthread_mutex_lock(&entry->ring_lock);
-		if (!entry->ring.producer_started) {
-			ret = -ENODATA;
-		} else {
-			status.state = entry->ring.core.state;
-			status.terminal_reason = entry->ring.core.terminal_reason;
-			status.error_code = entry->ring.core.error_code;
-			status.requested_capacity_iq_bytes =
-				entry->ring.requested_iq_bytes;
-			status.admitted_capacity_iq_bytes =
-				entry->ring.admitted_iq_bytes;
-			status.target_frames = entry->ring.core.target_frames;
-			status.produced_frames = entry->ring.core.produced_frames;
-			status.consumed_frames = entry->ring.core.consumed_frames;
-			status.high_water_frames = entry->ring.core.high_water_frames;
-			status.wrap_count = entry->ring.core.wrap_count;
-			status.producer_position = entry->ring.core.producer_position;
-			status.consumer_position = entry->ring.core.consumer_position;
-			if (entry->ring.last_contiguous_valid) {
-				status.valid_fields |=
-					SPF_DDR_RING_STATUS_VALID_LAST_CONTIGUOUS;
-				status.last_contiguous_sample_sequence =
-					entry->ring.last_contiguous_sample_sequence;
+		ret = iiod_buffer_metadata_status(entry->metadata_provider_context,
+			wire_status, status_capacity < sizeof(wire_status) ?
+				status_capacity : sizeof(wire_status));
+		if (ret == -ENODATA) {
+			if (status_capacity < SPF_DDR_RING_STATUS_BYTES) {
+				ret = -ENOSPC;
+			} else {
+				pthread_mutex_lock(&entry->ring_lock);
+				if (!entry->ring.producer_started &&
+						!entry->ring.direct_extension) {
+					ret = -ENODATA;
+				} else {
+					status.state = entry->ring.core.state;
+					status.terminal_reason =
+						entry->ring.core.terminal_reason;
+					status.error_code = entry->ring.core.error_code;
+					status.requested_capacity_iq_bytes =
+						entry->ring.requested_iq_bytes;
+					status.admitted_capacity_iq_bytes =
+						entry->ring.admitted_iq_bytes;
+					status.target_frames = entry->ring.core.target_frames;
+					status.produced_frames =
+						entry->ring.core.produced_frames;
+					status.consumed_frames =
+						entry->ring.core.consumed_frames;
+					status.high_water_frames =
+						entry->ring.core.high_water_frames;
+					status.wrap_count = entry->ring.core.wrap_count;
+					status.producer_position =
+						entry->ring.core.producer_position;
+					status.consumer_position =
+						entry->ring.core.consumer_position;
+					if (entry->ring.core.last_contiguous_valid) {
+						status.valid_fields |=
+							SPF_DDR_RING_STATUS_VALID_LAST_CONTIGUOUS;
+						status.last_contiguous_sample_sequence =
+							entry->ring.core.last_contiguous_sample_sequence;
+					}
+					if (entry->ring.core.first_unavailable_valid) {
+						status.valid_fields |=
+							SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE;
+						status.first_unavailable_sample_sequence =
+							entry->ring.core.first_unavailable_sample_sequence;
+					}
+					ret = spf_ddr_ring_status_encode(wire_status,
+						SPF_DDR_RING_STATUS_BYTES, &status);
+					if (!ret)
+						ret = SPF_DDR_RING_STATUS_BYTES;
+				}
+				pthread_mutex_unlock(&entry->ring_lock);
 			}
-			if (entry->ring.first_unavailable_valid) {
-				status.valid_fields |=
-					SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE;
-				status.first_unavailable_sample_sequence =
-					entry->ring.first_unavailable_sample_sequence;
-			}
-			ret = spf_ddr_ring_status_encode(wire_status,
-				sizeof(wire_status), &status);
 		}
-		pthread_mutex_unlock(&entry->ring_lock);
-		if (!ret) {
-			print_value(pdata, sizeof(wire_status));
-			ret = write_all(pdata, wire_status, sizeof(wire_status));
+		if (ret > 0) {
+			ssize_t status_bytes = ret;
+
+			print_value(pdata, status_bytes);
+			ret = write_all(pdata, wire_status, (size_t)status_bytes);
 			if (ret > 0)
-				ret = sizeof(wire_status);
+				ret = status_bytes;
 		}
 	}
 	if (ret < 0)
 		print_value(pdata, ret);
+	return ret;
+}
+
+int cancel_buffer_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev)
+{
+	struct ThdEntry *thd;
+	struct DevEntry *entry;
+	int ret;
+
+	if (!dev) {
+		ret = -ENODEV;
+	} else if (!(thd = parser_lookup_thd_entry(pdata, dev))) {
+		ret = -EBADF;
+	} else {
+		entry = thd->entry;
+		/* A producer that owns teardown also takes thdlist_lock before removing
+		 * the provider context. Keep it pinned through the synchronous restore. */
+		pthread_mutex_lock(&entry->thdlist_lock);
+		if (!entry->metadata_enabled || !entry->metadata_provider_context)
+			ret = -ENODATA;
+		else
+			ret = iiod_buffer_metadata_cancel(
+				entry->metadata_provider_context);
+		pthread_mutex_unlock(&entry->thdlist_lock);
+	}
+	print_value(pdata, ret);
 	return ret;
 }
 

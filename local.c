@@ -8,6 +8,7 @@
 
 #include "debug.h"
 #include "iio-private.h"
+#include "iio-lock.h"
 #include "sort.h"
 #include "deps/libini/ini.h"
 
@@ -84,6 +85,8 @@ struct iio_device_pdata {
 
 	struct block *blocks;
 	void **addrs;
+	uint8_t *lease_states;
+	struct iio_mutex *lease_lock;
 	int last_dequeued;
 	bool is_high_speed, cyclic, cyclic_buffer_enqueued;
 
@@ -137,8 +140,11 @@ static void local_free_pdata(struct iio_device *device)
 		local_free_channel_pdata(device->channels[i]);
 
 	if (device->pdata) {
+		if (device->pdata->lease_lock)
+			iio_mutex_destroy(device->pdata->lease_lock);
 		free(device->pdata->blocks);
 		free(device->pdata->addrs);
+		free(device->pdata->lease_states);
 		free(device->pdata);
 	}
 }
@@ -499,6 +505,87 @@ static ssize_t local_get_buffer(const struct iio_device *dev,
 	return (ssize_t) block.bytes_used;
 }
 
+static int local_acquire_buffer_block(const struct iio_device *dev,
+		void **addr, size_t *bytes_used, uintptr_t *token)
+{
+	struct iio_device_pdata *pdata = dev->pdata;
+	struct timespec start;
+	struct block block;
+	int ret;
+
+	if (!WITH_LOCAL_MMAP_API || !pdata->is_high_speed)
+		return -ENOSYS;
+	if (pdata->fd == -1)
+		return -EBADF;
+	if (!addr || !bytes_used || !token)
+		return -EINVAL;
+	if (pdata->last_dequeued >= 0)
+		return -EBUSY;
+
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	do {
+		ret = device_check_ready(dev, POLLIN | POLLOUT, &start);
+		if (ret < 0)
+			return ret;
+		memset(&block, 0, sizeof(block));
+		ret = ioctl_nointr(pdata->fd, BLOCK_DEQUEUE_IOCTL, &block);
+	} while (pdata->blocking && ret == -EAGAIN);
+	if (ret)
+		return ret;
+	if (block.id >= pdata->allocated_nb_blocks) {
+		(void)ioctl_nointr(pdata->fd, BLOCK_ENQUEUE_IOCTL, &block);
+		return -EIO;
+	}
+
+	iio_mutex_lock(pdata->lease_lock);
+	if (pdata->lease_states[block.id] != 0U) {
+		iio_mutex_unlock(pdata->lease_lock);
+		(void)ioctl_nointr(pdata->fd, BLOCK_ENQUEUE_IOCTL, &block);
+		return -EIO;
+	}
+	pdata->lease_states[block.id] = 1U;
+	iio_mutex_unlock(pdata->lease_lock);
+	*addr = pdata->addrs[block.id];
+	*bytes_used = block.bytes_used;
+	*token = (uintptr_t)block.id + 1U;
+	return 0;
+}
+
+static int local_release_buffer_block(const struct iio_device *dev,
+		uintptr_t token, size_t bytes_used)
+{
+	struct iio_device_pdata *pdata = dev->pdata;
+	struct block *block;
+	unsigned int id;
+	int ret;
+
+	if (!token || token - 1U > UINT_MAX)
+		return -EINVAL;
+	id = (unsigned int)(token - 1U);
+	if (pdata->fd == -1)
+		return -EBADF;
+	if (id >= pdata->allocated_nb_blocks || bytes_used > UINT32_MAX)
+		return -EINVAL;
+
+	iio_mutex_lock(pdata->lease_lock);
+	if (pdata->lease_states[id] != 1U) {
+		iio_mutex_unlock(pdata->lease_lock);
+		return -EINVAL;
+	}
+	pdata->lease_states[id] = 0U;
+	iio_mutex_unlock(pdata->lease_lock);
+
+	block = &pdata->blocks[id];
+	block->bytes_used = (uint32_t)bytes_used;
+	ret = ioctl_nointr(pdata->fd, BLOCK_ENQUEUE_IOCTL, block);
+	if (ret) {
+		iio_mutex_lock(pdata->lease_lock);
+		pdata->lease_states[id] = 1U;
+		iio_mutex_unlock(pdata->lease_lock);
+	}
+	return ret;
+}
+
 static ssize_t local_read_all_dev_attrs(const struct iio_device *dev,
 		char *dst, size_t len, enum iio_attr_type type)
 {
@@ -846,6 +933,14 @@ static int enable_high_speed(const struct iio_device *dev)
 		pdata->blocks = NULL;
 		return -ENOMEM;
 	}
+	pdata->lease_states = calloc(nb_blocks, sizeof(*pdata->lease_states));
+	if (!pdata->lease_states) {
+		free(pdata->addrs);
+		pdata->addrs = NULL;
+		free(pdata->blocks);
+		pdata->blocks = NULL;
+		return -ENOMEM;
+	}
 
 	req.id = 0;
 	req.type = 0;
@@ -896,6 +991,8 @@ err_block_free:
 err_freemem:
 	free(pdata->addrs);
 	pdata->addrs = NULL;
+	free(pdata->lease_states);
+	pdata->lease_states = NULL;
 	free(pdata->blocks);
 	pdata->blocks = NULL;
 	return ret;
@@ -1031,6 +1128,8 @@ static int local_close(const struct iio_device *dev)
 		pdata->allocated_nb_blocks = 0;
 		free(pdata->addrs);
 		pdata->addrs = NULL;
+		free(pdata->lease_states);
+		pdata->lease_states = NULL;
 		free(pdata->blocks);
 		pdata->blocks = NULL;
 	}
@@ -1821,6 +1920,12 @@ static int create_device(void *d, const char *path)
 	dev->pdata->fd = -1;
 	dev->pdata->blocking = true;
 	dev->pdata->max_nb_blocks = NB_BLOCKS;
+	dev->pdata->lease_lock = iio_mutex_create();
+	if (!dev->pdata->lease_lock) {
+		local_free_pdata(dev);
+		free(dev);
+		return -ENOMEM;
+	}
 
 	dev->ctx = ctx;
 	dev->id = iio_strdup(strrchr(path, '/') + 1);
@@ -1919,6 +2024,21 @@ static int local_set_timeout(struct iio_context *ctx, unsigned int timeout)
 	return 0;
 }
 
+static int local_get_allocated_kernel_buffers_count(
+		const struct iio_device *dev, unsigned int *count)
+{
+	struct iio_device_pdata *pdata;
+
+	if (!dev || !count)
+		return -EINVAL;
+	pdata = dev->pdata;
+	if (pdata->fd < 0 || !pdata->is_high_speed ||
+			!pdata->allocated_nb_blocks)
+		return -EBADF;
+	*count = pdata->allocated_nb_blocks;
+	return 0;
+}
+
 static void local_cancel(const struct iio_device *dev)
 {
 	struct iio_device_pdata *pdata = dev->pdata;
@@ -1978,10 +2098,14 @@ static const struct iio_backend_ops local_ops = {
 	.shutdown = local_shutdown,
 	.set_timeout = local_set_timeout,
 	.cancel = local_cancel,
+	.acquire_buffer_block = local_acquire_buffer_block,
+	.release_buffer_block = local_release_buffer_block,
+	.get_allocated_kernel_buffers_count =
+		local_get_allocated_kernel_buffers_count,
 };
 
 static const struct iio_backend local_backend = {
-	.api_version = IIO_BACKEND_API_V1,
+	.api_version = IIO_BACKEND_API_V8,
 	.name = "local",
 	.uri_prefix = "local:",
 	.ops = &local_ops,

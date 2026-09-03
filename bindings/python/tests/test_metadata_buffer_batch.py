@@ -14,6 +14,17 @@ class FakeDevice:
     sample_size = 8
 
 
+class DirectAsyncFakeDevice(FakeDevice):
+    _ctx = SimpleNamespace(
+        attrs={
+            "iio,buffer-direct-async": "1",
+            "iio,buffer-direct-async-overrun-policies": (
+                "drop-backlog,preserve-backlog"
+            ),
+        }
+    )
+
+
 class BurstFakeDevice(FakeDevice):
     _ctx = SimpleNamespace(
         attrs={
@@ -29,6 +40,19 @@ class RingFakeDevice(BurstFakeDevice):
             **BurstFakeDevice._ctx.attrs,
             "iio,buffer-ddr-ring": "1",
             "iio,buffer-ddr-ring-max-iq-bytes": "200000000",
+        }
+    )
+
+
+class DirectRingFakeDevice(RingFakeDevice):
+    _ctx = SimpleNamespace(
+        attrs={
+            **RingFakeDevice._ctx.attrs,
+            "iio,buffer-direct-async": "1",
+            "iio,buffer-direct-async-ring": "1",
+            "iio,buffer-direct-async-overrun-policies": (
+                "drop-backlog,preserve-backlog"
+            ),
         }
     )
 
@@ -71,6 +95,8 @@ def test_batch_one_preserves_uncached_behavior(monkeypatch):
     )
     assert buffer.batch_frames == 1
     assert buffer.batch_cache_bytes == 0
+    assert buffer.direct_async_frames == 0
+    assert buffer.direct_async_ring_extension is False
     assert buffer.ddr_burst_enabled is False
     assert buffer.ddr_burst_requested_bytes == 0
     assert buffer.ddr_burst_admitted_bytes == 0
@@ -82,6 +108,175 @@ def test_batch_one_preserves_uncached_behavior(monkeypatch):
     assert buffer.ddr_ring_capture_frames == 0
     assert buffer.ddr_ring_continuous is False
     buffer.close()
+
+
+def test_direct_async_configures_one_finite_capture(monkeypatch):
+    created = object()
+    configured = []
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: created)
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(
+        iio,
+        "_buffer_set_metadata_read_prequeue_async_policy",
+        lambda *args: configured.append(args),
+    )
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+
+    buffer = iio.MetadataBuffer(
+        DirectAsyncFakeDevice(),
+        1024,
+        b"provider",
+        metadata_capacity=32768,
+        direct_async_frames=250,
+    )
+
+    assert configured == [(created, 250, 32768, 1)]
+    assert buffer.direct_async_frames == 250
+    assert buffer.direct_async_ring_extension is False
+    assert buffer.drop_backlog_on_overrun is True
+    assert buffer.ddr_burst_enabled is False
+    assert buffer.ddr_ring_enabled is False
+    buffer.close()
+
+
+def test_direct_async_validation_precedes_creation(monkeypatch):
+    monkeypatch.setattr(
+        iio, "_buffer_set_metadata_read_prequeue_async_policy", lambda *a: 0
+    )
+    monkeypatch.setattr(
+        iio,
+        "_create_buffer_with_metadata",
+        lambda *args: pytest.fail("validation must happen before buffer creation"),
+    )
+    with pytest.raises(OSError, match="does not advertise"):
+        iio.MetadataBuffer(FakeDevice(), 1024, b"provider", direct_async_frames=2)
+    with pytest.raises(ValueError, match="batch_frames=1"):
+        iio.MetadataBuffer(
+            DirectAsyncFakeDevice(),
+            1024,
+            b"provider",
+            batch_frames=2,
+            direct_async_frames=2,
+        )
+    with pytest.raises(ValueError, match="owns the finite frame target"):
+        iio.MetadataBuffer(
+            DirectRingFakeDevice(),
+            1024,
+            b"provider",
+            ddr_ring_bytes=8192,
+            ddr_ring_frames=1,
+            direct_async_frames=2,
+        )
+    with pytest.raises(ValueError, match="sealed DDR burst"):
+        iio.MetadataBuffer(
+            DirectAsyncFakeDevice(),
+            1024,
+            b"provider",
+            ddr_burst_bytes=8192,
+            direct_async_frames=2,
+        )
+
+
+def test_direct_async_ram_ring_extends_the_dma_queue(monkeypatch):
+    created = object()
+    create_calls = []
+    direct_calls = []
+    monkeypatch.setattr(
+        iio,
+        "_create_buffer_with_metadata",
+        lambda *args: create_calls.append(args) or created,
+    )
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(
+        iio,
+        "_buffer_set_metadata_read_prequeue_async_policy",
+        lambda *args: direct_calls.append(args),
+    )
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+
+    buffer = iio.MetadataBuffer(
+        DirectRingFakeDevice(),
+        1024,
+        b"provider",
+        metadata_capacity=32768,
+        direct_async_frames=23,
+        ddr_ring_bytes=32769,
+    )
+
+    assert direct_calls == [(created, 23, 32768, 1)]
+    assert buffer.direct_async_frames == 23
+    assert buffer.direct_async_ring_extension is True
+    assert buffer.ddr_ring_capacity_frames == 4
+    _, _, storage, request_bytes = create_calls[0]
+    assert request_bytes == len(b"provider") + 48
+    assert struct.unpack("<IHHIIQQQQ", storage.raw[-48:]) == (
+        0x52524653,
+        1,
+        48,
+        1,
+        4,
+        32769,
+        0,
+        0,
+        0,
+    )
+    buffer.close()
+
+
+def test_direct_async_can_preserve_backlog_explicitly(monkeypatch):
+    created = object()
+    configured = []
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: created)
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(
+        iio,
+        "_buffer_set_metadata_read_prequeue_async_policy",
+        lambda *args: configured.append(args),
+    )
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+
+    buffer = iio.MetadataBuffer(
+        DirectAsyncFakeDevice(),
+        1024,
+        b"provider",
+        direct_async_frames=2,
+        drop_backlog_on_overrun=False,
+    )
+
+    assert configured == [(created, 2, 65536, 0)]
+    assert buffer.drop_backlog_on_overrun is False
+    buffer.close()
+
+
+@pytest.mark.parametrize("frames", [True, 1.5, "2"])
+def test_direct_async_frame_type_is_exact(monkeypatch, frames):
+    monkeypatch.setattr(
+        iio,
+        "_create_buffer_with_metadata",
+        lambda *args: pytest.fail("validation must happen before buffer creation"),
+    )
+    with pytest.raises(TypeError):
+        iio.MetadataBuffer(
+            DirectAsyncFakeDevice(),
+            1024,
+            b"provider",
+            direct_async_frames=frames,
+        )
+
+
+def test_direct_async_frame_limit_is_independent_of_batch_limit(monkeypatch):
+    monkeypatch.setattr(
+        iio,
+        "_create_buffer_with_metadata",
+        lambda *args: pytest.fail("validation must happen before buffer creation"),
+    )
+    with pytest.raises(ValueError, match=r"\[0, 4096\]"):
+        iio.MetadataBuffer(
+            DirectAsyncFakeDevice(),
+            1024,
+            b"provider",
+            direct_async_frames=4097,
+        )
 
 
 def test_device_ddr_burst_appends_versioned_request(monkeypatch):
@@ -245,6 +440,7 @@ def test_device_ddr_ring_status_decodes_atomic_snapshot(monkeypatch):
         ddr_ring_frames=17
     )
     status = buffer.ddr_ring_status()
+    assert status["version"] == 1
     assert status["state"] == "draining"
     assert status["produced_frames"] == 9
     assert status["consumed_frames"] == 7
@@ -252,6 +448,24 @@ def test_device_ddr_ring_status_decodes_atomic_snapshot(monkeypatch):
     assert status["wrap_count"] == 2
     assert status["last_contiguous_sample_sequence"] == 123456
     assert status["first_unavailable_sample_sequence"] is None
+    buffer.close()
+
+
+def test_inband_metadata_cancel_retains_buffer_for_status(monkeypatch):
+    created = object()
+    calls = []
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: created)
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+    monkeypatch.setattr(
+        iio,
+        "_buffer_cancel_metadata_session",
+        lambda target: calls.append(target),
+    )
+    buffer = iio.MetadataBuffer(FakeDevice(), 1, b"provider")
+    buffer.cancel_metadata_session()
+    assert calls == [created]
+    assert buffer._buffer is created
     buffer.close()
 
 

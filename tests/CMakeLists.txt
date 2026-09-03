@@ -44,6 +44,13 @@ target_include_directories(test_iiod_command_batch PRIVATE ..)
 add_executable(test_metadata_batch_core test_metadata_batch_core.c)
 target_include_directories(test_metadata_batch_core PRIVATE ..)
 target_link_libraries(test_metadata_batch_core iio)
+add_executable(test_buffer_block_lease test_buffer_block_lease.c)
+target_include_directories(test_buffer_block_lease PRIVATE ..)
+target_link_libraries(test_buffer_block_lease iio)
+add_executable(test_direct_async_transport test_direct_async_transport.c
+	../iiod-client.c ../iiod-command-batch.c ../lock.c ../utilities.c)
+target_include_directories(test_direct_async_transport PRIVATE ..)
+target_link_libraries(test_direct_async_transport iio)
 if((PTHREAD_LIBRARIES OR ANDROID) AND NOT WIN32 AND NOT NO_THREADS)
 	target_compile_definitions(test_metadata_batch_core PRIVATE
 		METADATA_BATCH_TEST_PTHREAD=1)
@@ -69,6 +76,29 @@ target_link_libraries(iio_writedev iio iio_tests_helper)
 
 set(IIO_TESTS_TARGETS iio_genxml iio_info iio_attr iio_readdev iio_reg
 	iio_writedev)
+
+add_executable(test_spf_hop_protocol test_spf_hop_protocol.c
+	../iiod/spf-hop-protocol.c)
+add_executable(test_spf_hop_session test_spf_hop_session.c
+	../iiod/spf-hop-protocol.c ../iiod/spf-hop-session.c)
+add_executable(test_spf_hop_scheduler test_spf_hop_scheduler.c
+	../iiod/spf-hop-protocol.c ../iiod/spf-hop-scheduler.c)
+target_include_directories(test_spf_hop_protocol PRIVATE ../iiod)
+target_include_directories(test_spf_hop_session PRIVATE ../iiod)
+target_include_directories(test_spf_hop_scheduler PRIVATE ../iiod)
+target_link_libraries(test_spf_hop_scheduler ${PTHREAD_LIBRARIES})
+list(APPEND IIO_TESTS_TARGETS test_spf_hop_protocol test_spf_hop_session
+	test_spf_hop_scheduler)
+if(IIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER MATCHES
+		"spf-hop-device-userspace\\.c$")
+	add_executable(test_spf_hop_device_userspace
+		test_spf_hop_device_userspace.c)
+	target_include_directories(test_spf_hop_device_userspace PRIVATE ../iiod
+		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+	target_link_libraries(test_spf_hop_device_userspace
+		${PTHREAD_LIBRARIES})
+	list(APPEND IIO_TESTS_TARGETS test_spf_hop_device_userspace)
+endif()
 
 if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	set(SPF_RADIO_FRAME_V3_SOURCE "")
@@ -101,10 +131,17 @@ if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 		../iiod/spf-ddr-ring-request.c)
 	add_executable(test_spf_ddr_ring_status test_spf_ddr_ring_status.c
 		../iiod/spf-ddr-ring-status.c)
+	add_executable(test_spf_sampler_coverage test_spf_sampler_coverage.c
+		../iiod/spf-sampler-coverage.c)
 	add_executable(test_ddr_ring_core test_ddr_ring_core.c
 		../iiod/ddr-ring-core.c)
 	target_include_directories(test_spf_tandem_session PRIVATE ../iiod
 		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+	if(IIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER MATCHES
+			"spf-hop-device-local\\.c$")
+		target_compile_definitions(test_spf_tandem_session PRIVATE
+			IIOD_HAS_KERNEL_PERSISTENT_HOP=1)
+	endif()
 	target_include_directories(test_spf_tandem_metadata PRIVATE ../iiod
 		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
 	target_include_directories(test_spf_temperature_cache PRIVATE ../iiod
@@ -113,6 +150,7 @@ if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	target_include_directories(test_spf_ddr_burst_request PRIVATE ../iiod)
 	target_include_directories(test_spf_ddr_ring_request PRIVATE ../iiod)
 	target_include_directories(test_spf_ddr_ring_status PRIVATE ../iiod)
+	target_include_directories(test_spf_sampler_coverage PRIVATE ../iiod)
 	target_include_directories(test_ddr_ring_core PRIVATE ../iiod)
 	target_link_libraries(test_spf_temperature_cache iio ${PTHREAD_LIBRARIES})
 	set(IIO_TESTS_TARGETS ${IIO_TESTS_TARGETS}
@@ -120,7 +158,7 @@ if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 		test_spf_temperature_cache test_spf_buffer_layout)
 	list(APPEND IIO_TESTS_TARGETS test_spf_ddr_burst_request)
 	list(APPEND IIO_TESTS_TARGETS test_spf_ddr_ring_request
-		test_spf_ddr_ring_status test_ddr_ring_core)
+		test_spf_ddr_ring_status test_spf_sampler_coverage test_ddr_ring_core)
 endif()
 
 if(PTHREAD_LIBRARIES OR ANDROID)
@@ -133,12 +171,26 @@ if(PTHREAD_LIBRARIES OR ANDROID)
 	target_link_libraries(iio_writedev ${PTHREAD_LIBRARIES})
 endif()
 
+if(${CMAKE_SYSTEM_NAME} MATCHES "Linux" AND
+		(PTHREAD_LIBRARIES OR ANDROID) AND NOT NO_THREADS)
+	add_executable(test_thread_pool_affinity test_thread_pool_affinity.c
+		../iiod/thread-pool.c)
+	target_include_directories(test_thread_pool_affinity PRIVATE ../iiod)
+	target_compile_definitions(test_thread_pool_affinity PRIVATE _GNU_SOURCE=1)
+	target_link_libraries(test_thread_pool_affinity ${PTHREAD_LIBRARIES})
+	set_target_properties(test_thread_pool_affinity PROPERTIES
+		C_STANDARD 99
+		C_STANDARD_REQUIRED ON
+		C_EXTENSIONS OFF)
+endif()
+
 set_target_properties(${IIO_TESTS_TARGETS} iio_tests_helper PROPERTIES
 	C_STANDARD 99
 	C_STANDARD_REQUIRED ON
 	C_EXTENSIONS OFF
 )
-set_target_properties(test_iiod_command_batch test_metadata_batch_core PROPERTIES
+set_target_properties(test_iiod_command_batch test_metadata_batch_core
+	test_buffer_block_lease test_direct_async_transport PROPERTIES
 	C_STANDARD 99
 	C_STANDARD_REQUIRED ON
 	C_EXTENSIONS OFF

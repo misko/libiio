@@ -67,5 +67,7 @@ bool spf_radio_frame_v5_build(void *destination, size_t destination_bytes,
 	const spf_radio_frame_v5_args_t *args);
 bool spf_radio_frame_v6_build(void *destination, size_t destination_bytes,
 	const spf_radio_frame_v6_args_t *args);
+bool spf_radio_frame_v6_rebase_gap(void *metadata, size_t metadata_bytes,
+	uint64_t previous_frame_end);
 
 #endif

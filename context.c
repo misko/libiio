@@ -195,8 +195,8 @@ struct iio_context * iio_context_create_from_backend(
 	struct iio_context *ctx;
 	int ret;
 
-	if (!backend || backend->api_version < IIO_BACKEND_API_V1 ||
-		backend->api_version > IIO_BACKEND_API_V4) {
+	if (!backend ||
+		!iio_backend_api_version_supported(backend->api_version)) {
 		errno = EINVAL;
 		return NULL;
 	}

@@ -83,6 +83,8 @@ struct parser_pdata {
 
 extern bool server_demux; /* Defined in iiod.c */
 
+void iiod_set_rw_cpu_affinity(int cpu);
+
 static inline void *zalloc(size_t size)
 {
 	return calloc(1, size);
@@ -113,8 +115,14 @@ ssize_t rw_dev(struct parser_pdata *pdata, struct iio_device *dev,
 ssize_t rw_dev_with_metadata(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t nb,
 		size_t metadata_capacity);
+ssize_t rw_dev_with_metadata_async(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t nb,
+		size_t metadata_capacity, size_t frames,
+		enum iio_buffer_metadata_overrun_policy overrun_policy);
 ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t status_capacity);
+int cancel_buffer_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev);
 
 ssize_t read_dev_attr(struct parser_pdata *pdata, struct iio_device *dev,
 		const char *attr, enum iio_attr_type type);

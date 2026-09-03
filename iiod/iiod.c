@@ -12,6 +12,9 @@
 #include "dns-sd.h"
 #include "ops.h"
 #include "thread-pool.h"
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#include "spf-hop-device.h"
+#endif
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -22,6 +25,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <string.h>
@@ -47,7 +51,7 @@
 static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		      const char *uart_params, bool debug, bool interactive,
 		      bool use_aio, uint16_t port, unsigned int nb_pipes,
-		      int ep0_fd);
+		      int ep0_fd, long cpu_affinity, long rw_cpu_affinity);
 
 struct client_data {
 	int fd;
@@ -85,6 +89,8 @@ static const struct option options[] = {
 	  {"serial", required_argument, 0, 's'},
 	  {"port", required_argument, 0, 'p'},
 	  {"uri", required_argument, 0, 'u'},
+	  {"cpu-affinity", required_argument, 0, 'c'},
+	  {"rw-cpu-affinity", required_argument, 0, 'r'},
 	  {0, 0, 0, 0},
 };
 
@@ -104,6 +110,8 @@ static const char *options_descriptions[] = {
 		"\n\t\t\t    'usb:1.2.3', or 'usb:'"
 		"\n\t\t\t    'serial:/dev/ttyUSB0,115200,8n1'"
 		"\n\t\t\t    'local:' (default)"),
+	"Pin iiOD and every worker it creates to one CPU (disabled by default).",
+	"Pin only per-device I/O workers to one CPU (disabled by default).",
 };
 
 static void usage(void)
@@ -433,7 +441,7 @@ static void *get_xml_zstd_data(const struct iio_context *ctx, size_t *out_len)
 int main(int argc, char **argv)
 {
 	bool debug = false, interactive = false, use_aio = false;
-	long nb_pipes = 3, val;
+	long nb_pipes = 3, val, cpu_affinity = -1, rw_cpu_affinity = -1;
 	char *end;
 	const char *arg = "local:";
 	int c, option_index = 0;
@@ -443,7 +451,7 @@ int main(int argc, char **argv)
 	uint16_t port = IIOD_PORT;
 	int ret, ep0_fd = 0;
 
-	while ((c = getopt_long(argc, argv, "+hVdDiaF:n:s:p:u:",
+	while ((c = getopt_long(argc, argv, "+hVdDiaF:n:s:p:u:c:r:",
 					options, &option_index)) != -1) {
 		switch (c) {
 		case 'd':
@@ -504,6 +512,26 @@ int main(int argc, char **argv)
 		case 'u':
 			arg = optarg;
 			break;
+		case 'c':
+			errno = 0;
+			val = strtol(optarg, &end, 10);
+			if (optarg == end || (end && *end != '\0') ||
+					val < 0 || val >= CPU_SETSIZE || errno == ERANGE) {
+				IIO_ERROR("IIOD invalid CPU affinity\n");
+				return EXIT_FAILURE;
+			}
+			cpu_affinity = val;
+			break;
+		case 'r':
+			errno = 0;
+			val = strtol(optarg, &end, 10);
+			if (optarg == end || (end && *end != '\0') ||
+					val < 0 || val >= CPU_SETSIZE || errno == ERANGE) {
+				IIO_ERROR("IIOD invalid R/W CPU affinity\n");
+				return EXIT_FAILURE;
+			}
+			rw_cpu_affinity = val;
+			break;
 		case 'h':
 			usage();
 			return EXIT_SUCCESS;
@@ -512,6 +540,35 @@ int main(int argc, char **argv)
 					LIBIIO_VERSION_MINOR);
 			return EXIT_SUCCESS;
 		case '?':
+			return EXIT_FAILURE;
+		}
+	}
+	if (cpu_affinity >= 0 && rw_cpu_affinity >= 0) {
+		IIO_ERROR("IIOD CPU affinity modes are mutually exclusive\n");
+		return EXIT_FAILURE;
+	}
+	if (rw_cpu_affinity >= 0) {
+		cpu_set_t allowed;
+
+		if (sched_getaffinity(0, sizeof(allowed), &allowed)) {
+			iio_strerror(errno, err_str, sizeof(err_str));
+			IIO_ERROR("Unable to read allowed CPUs: %s\n", err_str);
+			return EXIT_FAILURE;
+		}
+		if (!CPU_ISSET((unsigned int)rw_cpu_affinity, &allowed)) {
+			IIO_ERROR("IIOD R/W CPU is not available to this process\n");
+			return EXIT_FAILURE;
+		}
+		iiod_set_rw_cpu_affinity((int)rw_cpu_affinity);
+	}
+	if (cpu_affinity >= 0) {
+		cpu_set_t cpuset;
+
+		CPU_ZERO(&cpuset);
+		CPU_SET((unsigned int)cpu_affinity, &cpuset);
+		if (sched_setaffinity(0, sizeof(cpuset), &cpuset)) {
+			iio_strerror(errno, err_str, sizeof(err_str));
+			IIO_ERROR("Unable to set CPU affinity: %s\n", err_str);
 			return EXIT_FAILURE;
 		}
 	}
@@ -547,7 +604,8 @@ int main(int argc, char **argv)
 		restart_usr1 = false;
 
 		ret = start_iiod(arg, ffs_mountpoint, uart_params, debug,
-				 interactive, use_aio, port, nb_pipes, ep0_fd);
+				 interactive, use_aio, port, nb_pipes, ep0_fd,
+				 cpu_affinity, rw_cpu_affinity);
 	} while (!ret && restart_usr1);
 
 	thread_pool_destroy(main_thread_pool);
@@ -561,10 +619,12 @@ int main(int argc, char **argv)
 static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		      const char *uart_params, bool debug, bool interactive,
 		      bool use_aio, uint16_t port, unsigned int nb_pipes,
-		      int ep0_fd)
+		      int ep0_fd, long cpu_affinity, long rw_cpu_affinity)
 {
 	struct iio_context *ctx;
 	char err_str[1024];
+	char cpu_affinity_str[24];
+	char rw_cpu_affinity_str[24];
 	void *xml_zstd;
 	size_t xml_zstd_len = 0;
 	int ret;
@@ -574,6 +634,26 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		iio_strerror(errno, err_str, sizeof(err_str));
 		IIO_ERROR("Unable to create local context: %s\n", err_str);
 		return EXIT_FAILURE;
+	}
+	if (cpu_affinity >= 0) {
+		snprintf(cpu_affinity_str, sizeof(cpu_affinity_str), "%ld",
+			cpu_affinity);
+		ret = iio_context_add_attr(ctx, "iio,iiod-cpu-affinity",
+			cpu_affinity_str);
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+	}
+	if (rw_cpu_affinity >= 0) {
+		snprintf(rw_cpu_affinity_str, sizeof(rw_cpu_affinity_str), "%ld",
+			rw_cpu_affinity);
+		ret = iio_context_add_attr(ctx, "iio,iiod-rw-cpu-affinity",
+			rw_cpu_affinity_str);
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
 	}
 
 #ifdef IIOD_HAS_BUFFER_METADATA
@@ -627,6 +707,74 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
 	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-timing-log", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-direct-async", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx,
+		"iio,buffer-direct-async-exact-kernel-queue", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-direct-async-ring", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx,
+		"iio,buffer-direct-async-overrun-policies",
+		"drop-backlog,preserve-backlog");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx,
+		"iio,buffer-direct-async-default-overrun-policy",
+		"drop-backlog");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (spf_hop_device_v1_capable()) {
+		ret = iio_context_add_attr(ctx, "iio,buffer-persistent-hop", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-request", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-event", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-status", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-cancel", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+	}
+#endif
 #endif
 
 	xml_zstd = get_xml_zstd_data(ctx, &xml_zstd_len);

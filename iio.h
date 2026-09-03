@@ -79,6 +79,7 @@ struct iio_context;
 struct iio_device;
 struct iio_channel;
 struct iio_buffer;
+struct iio_buffer_block;
 
 struct iio_context_info;
 struct iio_scan_context;
@@ -1467,6 +1468,17 @@ __api __check_ret __pure enum iio_modifier iio_channel_get_modifier(
 __api __check_ret __pure const struct iio_device * iio_buffer_get_device(
 		const struct iio_buffer *buf);
 
+/** @brief Read the number of kernel DMA blocks backing the open buffer.
+ * @param buf A pointer to an open iio_buffer structure
+ * @param count Destination for the allocated block count
+ * @return 0 on success, or a negative errno code
+ *
+ * This reports the allocation admitted by the backend, which can be smaller
+ * than iio_device_get_kernel_buffers_count().  Backends without authoritative
+ * allocation reporting return -ENOSYS. */
+__api __check_ret int iio_buffer_get_allocated_kernel_buffers_count(
+		const struct iio_buffer *buf, unsigned int *count);
+
 
 /** @brief Create an input or output buffer associated to the given device
  * @param dev A pointer to an iio_device structure
@@ -1485,6 +1497,9 @@ __api __check_ret struct iio_buffer * iio_device_create_buffer(const struct iio_
 
 /** Maximum number of ordinary metadata reads that may be prequeued. */
 #define IIO_BUFFER_METADATA_BATCH_MAX 64U
+
+/** Maximum frame target for one finite direct-async capture session. */
+#define IIO_BUFFER_METADATA_DIRECT_MAX 4096U
 
 /** Maximum host memory retained by one metadata refill batch. */
 #define IIO_BUFFER_METADATA_BATCH_BYTES_MAX (64U * 1024U * 1024U)
@@ -1525,6 +1540,49 @@ iio_device_create_buffer_with_metadata(const struct iio_device *dev,
 __api __check_ret int iio_buffer_set_metadata_batch_size(
 		struct iio_buffer *buf, unsigned int frames);
 
+/** @brief Start a finite metadata capture whose local iiOD provider acquires
+ * DMA blocks independently of network transmission.
+ * @param buf A metadata-enabled input buffer
+ * @param frames Exact number of frames to capture and transmit
+ * @param metadata_capacity Per-frame metadata capacity
+ * @return 0 on success, a negative errno code otherwise
+ *
+ * This network-only opt-in requires iio,buffer-direct-async=1. It preserves
+ * the ordinary READBUFM response format and is mutually exclusive with host
+ * batching, sealed DDR burst, and standalone DDR ring capture. An admitted
+ * direct-async RAM extension adds its slots to the DMA queue. Each subsequent
+ * iio_buffer_refill_with_metadata() consumes one response. The finite target
+ * is bounded by IIO_BUFFER_METADATA_DIRECT_MAX; unlike an ordinary metadata
+ * batch, it does not retain the complete capture in host memory. */
+__api __check_ret int iio_buffer_set_metadata_read_prequeue_async(
+		struct iio_buffer *buf, unsigned int frames,
+		size_t metadata_capacity);
+
+/** @brief Direct-async behavior after the device reports a source overrun. */
+enum iio_buffer_metadata_overrun_policy {
+	/** Preserve queued frames and account each source discontinuity in order. */
+	IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG = 0,
+	/** Drop queued-but-unsent frames, account the complete jump once, and refill. */
+	IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG = 1,
+};
+
+/** @brief Start a direct-async metadata capture with an explicit overrun policy.
+ * @param buf A metadata-enabled input buffer
+ * @param frames Exact number of frames to deliver to the host
+ * @param metadata_capacity Per-frame metadata capacity
+ * @param policy Queue behavior after a source overrun
+ * @return 0 on success, a negative errno code otherwise
+ *
+ * DROP_BACKLOG never releases the frame currently being transmitted. It
+ * discards only queued frames, rebases the next exact-gap metadata record over
+ * the discarded interval, and acquires replacements until @p frames have been
+ * delivered. The server advertises supported values through
+ * iio,buffer-direct-async-overrun-policies. */
+__api __check_ret int iio_buffer_set_metadata_read_prequeue_async_policy(
+		struct iio_buffer *buf, unsigned int frames,
+		size_t metadata_capacity,
+		enum iio_buffer_metadata_overrun_policy policy);
+
 /** @brief Read the provider-owned status blob for an open metadata buffer.
  * @param buf A metadata-enabled input buffer
  * @param status Destination for the opaque, provider-versioned status bytes
@@ -1535,6 +1593,18 @@ __api __check_ret int iio_buffer_set_metadata_batch_size(
  * without status support return -ENOSYS. */
 __api __check_ret ssize_t iio_buffer_get_metadata_status(
 		struct iio_buffer *buf, void *status, size_t status_capacity);
+
+/** @brief Cancel and restore a provider-owned metadata session in band.
+ * @param buf A metadata-enabled input buffer
+ * @return 0 on successful cancellation/restoration, a negative errno otherwise
+ *
+ * This operation preserves the buffer transport so callers can retrieve the
+ * terminal provider receipt with iio_buffer_get_metadata_status() before
+ * destroying the buffer. It is invalid while direct-async frame responses are
+ * still pending. Backends or servers without in-band cancellation return
+ * -ENOSYS. */
+__api __check_ret int iio_buffer_cancel_metadata_session(
+		struct iio_buffer *buf);
 
 
 /** @brief Destroy the given buffer
@@ -1574,6 +1644,27 @@ __api __check_ret int iio_buffer_set_blocking_mode(struct iio_buffer *buf, bool 
  *
  * <b>NOTE:</b> Only valid for input buffers */
 __api __check_ret ssize_t iio_buffer_refill(struct iio_buffer *buf);
+
+/** @brief Acquire one completed high-speed input block without releasing any
+ * previously acquired block.
+ * @return A block lease on success; NULL with errno set otherwise
+ *
+ * The parent buffer must outlive every lease. This API must not be mixed with
+ * iio_buffer_refill() on the same buffer. */
+__api __check_ret struct iio_buffer_block *
+iio_buffer_block_acquire(struct iio_buffer *buf);
+
+/** @brief Return the start address of a leased block. */
+__api __check_ret __pure void *
+iio_buffer_block_start(const struct iio_buffer_block *block);
+
+/** @brief Return the valid byte count in a leased block. */
+__api __check_ret __pure size_t
+iio_buffer_block_bytes_used(const struct iio_buffer_block *block);
+
+/** @brief Return a leased block to the capture engine. */
+__api __check_ret int
+iio_buffer_block_release(struct iio_buffer_block *block);
 
 /** @brief Refill an input buffer and return metadata associated with the
  * exact captured sample range.

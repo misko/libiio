@@ -40,7 +40,8 @@ int spf_ddr_ring_request_decode(struct spf_ddr_ring_request *destination,
 	if (features != SPF_DDR_RING_FEATURE_QUEUE_IQ)
 		return -EPROTONOSUPPORT;
 	if (flags != SPF_DDR_RING_FLAG_FINITE &&
-		flags != SPF_DDR_RING_FLAG_CONTINUOUS)
+		flags != SPF_DDR_RING_FLAG_CONTINUOUS &&
+		flags != SPF_DDR_RING_FLAG_DIRECT_EXTENSION)
 		return -EINVAL;
 	if (!capacity || get_le64(wire + 32) || get_le64(wire + 40))
 		return -EINVAL;
