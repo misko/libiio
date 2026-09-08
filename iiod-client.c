@@ -979,6 +979,56 @@ ssize_t iiod_client_get_buffer_metadata_status_unlocked(
 	return ret < 0 ? ret : response_bytes;
 }
 
+ssize_t iiod_client_drain_buffer_metadata_unlocked(
+		struct iiod_client *client, struct iiod_client_pdata *desc,
+		const struct iio_device *dev, void *metadata,
+		size_t metadata_capacity, bool *stream_valid)
+{
+	char command[1024];
+	char line[32], *end;
+	long response_bytes;
+	ssize_t ret;
+
+	if (!stream_valid)
+		return -EINVAL;
+	*stream_valid = true;
+	if (!client || !desc || !dev || !metadata || !metadata_capacity ||
+		metadata_capacity > 65536U)
+		return -EINVAL;
+	*stream_valid = false;
+	iio_snprintf(command, sizeof(command), "DRAINBUFM %s %lu\r\n",
+		iio_device_get_id(dev), (unsigned long)metadata_capacity);
+	ret = iiod_client_write_all(client, desc, command, strlen(command));
+	if (ret < 0)
+		return ret;
+	/* Unlike legacy integer replies, this new bounded protocol requires the
+	 * entire line to be a signed decimal integer, without narrowing overflow. */
+	ret = client->ops->read_line(client->pdata, desc, line, sizeof(line) - 1U);
+	if (ret < 0)
+		return ret;
+	if (!ret || ret >= (ssize_t)sizeof(line) || line[ret - 1] != '\n')
+		return -EPROTO;
+	line[ret - 1] = '\0';
+	if ((line[0] < '0' || line[0] > '9') && line[0] != '-')
+		return -EPROTO;
+	errno = 0;
+	response_bytes = strtol(line, &end, 10);
+	if (line == end || end != line + ret - 1 || errno == ERANGE ||
+		response_bytes < -4095 || response_bytes > 65536)
+		return -EPROTO;
+	if (response_bytes < 0) {
+		*stream_valid = true;
+		return response_bytes;
+	}
+	if (!response_bytes || (size_t)response_bytes > metadata_capacity)
+		return -EOVERFLOW;
+	ret = iiod_client_read_all(client, desc, metadata, (size_t)response_bytes);
+	if (ret < 0)
+		return ret;
+	*stream_valid = true;
+	return response_bytes;
+}
+
 int iiod_client_cancel_buffer_metadata_unlocked(
 		struct iiod_client *client, struct iiod_client_pdata *desc,
 		const struct iio_device *dev)

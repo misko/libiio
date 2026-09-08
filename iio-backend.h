@@ -24,9 +24,10 @@ enum iio_backend_api_ver {
 	IIO_BACKEND_API_V7 = 7,
 	IIO_BACKEND_API_V8 = 8,
 	IIO_BACKEND_API_V9 = 9,
+	IIO_BACKEND_API_V10 = 10,
 };
 
-#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V9
+#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V10
 
 static inline bool iio_backend_api_version_supported(unsigned int version)
 {
@@ -141,6 +142,11 @@ struct iio_backend_ops {
 	/* API v9: cancel and restore only a provider-owned metadata session while
 	 * retaining the open buffer transport for terminal status and CLOSE. */
 	int (*cancel_buffer_metadata_session)(const struct iio_device *dev);
+
+	/* API v10: consume one provider-owned metadata-only result after the IQ
+	 * stream is drained. Never initiates acquisition or refills an IQ buffer. */
+	ssize_t (*drain_buffer_metadata)(const struct iio_device *dev,
+			void *metadata, size_t metadata_capacity);
 };
 
 /**

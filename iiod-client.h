@@ -139,6 +139,13 @@ int iiod_client_cancel_buffer_metadata_unlocked(
 				  struct iiod_client_pdata *desc,
 				  const struct iio_device *dev);
 
+/* stream_valid is false once a partial or invalid response makes command
+ * boundaries untrustworthy. A negative provider errno is still a valid reply. */
+ssize_t iiod_client_drain_buffer_metadata_unlocked(
+		struct iiod_client *client, struct iiod_client_pdata *desc,
+		const struct iio_device *dev, void *metadata,
+		size_t metadata_capacity, bool *stream_valid);
+
 ssize_t iiod_client_write_unlocked(struct iiod_client *client,
 				   struct iiod_client_pdata *desc,
 				   const struct iio_device *dev,

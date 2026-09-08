@@ -3582,6 +3582,49 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 	return ret;
 }
 
+ssize_t drain_buffer_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t metadata_capacity)
+{
+	struct ThdEntry *thd;
+	struct DevEntry *entry;
+	uint8_t *metadata = NULL;
+	ssize_t ret;
+
+	if (!metadata_capacity || metadata_capacity > 65536U) {
+		ret = -EINVAL;
+	} else if (!dev) {
+		ret = -ENODEV;
+	} else if (!(thd = parser_lookup_thd_entry(pdata, dev))) {
+		ret = -EBADF;
+	} else if (!(metadata = malloc(metadata_capacity))) {
+		ret = -ENOMEM;
+	} else {
+		entry = thd->entry;
+		/* Pin the same-session provider against producer-owned teardown. The
+		 * provider serializes its result consumer and enforces capture EOF. */
+		pthread_mutex_lock(&entry->thdlist_lock);
+		if (!entry->metadata_enabled || !entry->metadata_provider_context ||
+			!entry->burst_plan.drain_metadata)
+			ret = -ENODATA;
+		else
+			ret = entry->burst_plan.drain_metadata(
+				entry->metadata_provider_context, metadata, metadata_capacity);
+		pthread_mutex_unlock(&entry->thdlist_lock);
+		if (!ret || ret > (ssize_t)metadata_capacity)
+			ret = -EOVERFLOW;
+	}
+	print_value(pdata, ret);
+	if (ret > 0) {
+		ssize_t written = write_all(pdata, metadata, (size_t)ret);
+
+		/* A partial response is terminal, never followed by another errno. */
+		if (written < 0)
+			ret = written;
+	}
+	free(metadata);
+	return ret;
+}
+
 int cancel_buffer_metadata(struct parser_pdata *pdata,
 		struct iio_device *dev)
 {

@@ -16,6 +16,13 @@ struct iiod_buffer_burst_plan {
 	uint64_t ring_capture_frames;
 	uint32_t ring_flags;
 	size_t metadata_capacity;
+	/* Optional, session-opted-in, nonblocking metadata-only drain. The provider
+	 * must reject active capture with -EBUSY, return -EAGAIN for pending work,
+	 * and -ENODATA after its final record. No IQ acquisition or buffer ownership
+	 * passes through this hook. Check capacity before consuming a result.
+	 * Zero-initialized by iiOD; existing providers need not implement a hook. */
+	ssize_t (*drain_metadata)(void *provider_context,
+			void *metadata, size_t metadata_capacity);
 };
 
 struct iiod_buffer_metadata_frame_info {

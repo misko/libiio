@@ -175,6 +175,30 @@ endif()
 
 add_definitions(-D_GNU_SOURCE=1)
 
+if(WITH_TESTS AND WITH_XML_BACKEND)
+	# Hardware-free, XML-only session fixture exercising the actual protocol.
+	add_executable(test_metadata_drain_server
+		../tests/test_metadata_drain_server.c ../tests/metadata-drain-client.c
+		thread-pool.c ddr-ring-core.c
+		spf-ddr-ring-status.c buffer-metadata-none.c ../iiod-client.c
+		../iiod-command-batch.c ../lock.c ../utilities.c
+		${BISON_parser_OUTPUTS} ${FLEX_lexer_OUTPUTS})
+	target_include_directories(test_metadata_drain_server PRIVATE
+		${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+	# Both targets use the generated parser; finish its first build before the
+	# fixture's compilation to avoid duplicate concurrent flex/bison recipes.
+	add_dependencies(test_metadata_drain_server iiod)
+	target_link_libraries(test_metadata_drain_server iio ${PTHREAD_LIBRARIES})
+	set_target_properties(test_metadata_drain_server PROPERTIES
+		C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+	if(WITH_AIO)
+		target_link_libraries(test_metadata_drain_server ${LIBAIO_LIBRARIES})
+	endif()
+	if(WITH_ZSTD)
+		target_link_libraries(test_metadata_drain_server ${LIBZSTD_LIBRARIES})
+	endif()
+endif()
+
 if (HAVE_AVAHI)
 	target_sources(iiod PRIVATE dns-sd.c)
 endif()

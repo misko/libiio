@@ -11,6 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #define TEST_FRAMES 64U
 #define TEST_IQ_BYTES 16U
@@ -220,6 +223,20 @@ static int fake_close(const struct iio_device *dev)
 	return 0;
 }
 
+static ssize_t fake_drain(const struct iio_device *dev, void *metadata,
+		size_t capacity)
+{
+	struct transport_state *state = device_state(dev);
+	bool stream_valid;
+	ssize_t ret = iiod_client_drain_buffer_metadata_unlocked(state->client,
+		(struct iiod_client_pdata *)(void *)state, dev, metadata, capacity,
+		&stream_valid);
+
+	if (!stream_valid)
+		fake_cancel(dev);
+	return ret;
+}
+
 static int fake_get_allocated_kernel_buffers_count(
 		const struct iio_device *dev, unsigned int *count)
 {
@@ -237,6 +254,7 @@ static const struct iio_backend_ops backend_ops = {
 	.read_with_metadata_batch = fake_read,
 	.get_buffer_metadata_status = fake_status,
 	.cancel_buffer_metadata_session = fake_inband_cancel,
+	.drain_buffer_metadata = fake_drain,
 	.prequeue_metadata_reads_async = fake_prequeue_async,
 	.prequeue_metadata_reads_async_policy = fake_prequeue_async_policy,
 	.get_allocated_kernel_buffers_count =
@@ -249,7 +267,7 @@ static struct iio_buffer *fixture_buffer(struct fixture *fixture)
 
 	assert(buffer);
 	fixture->context.ops = &backend_ops;
-	fixture->context.backend_api_version = IIO_BACKEND_API_V9;
+	fixture->context.backend_api_version = IIO_BACKEND_API_CURRENT;
 	fixture->context.attrs = fixture->context_attrs;
 	fixture->context.values = fixture->context_values;
 	fixture->context.nb_attrs = 3;
@@ -509,8 +527,113 @@ static void test_inband_cancel_command_preserves_transport(void)
 	destroy_fixture_buffer(&fixture, buffer);
 }
 
+static void test_metadata_only_drain_preserves_iq(void)
+{
+	struct fixture fixture = {0};
+	struct iio_buffer *buffer = fixture_buffer(&fixture);
+	struct test_metadata metadata;
+	uint8_t original_iq[TEST_IQ_BYTES];
+	size_t bytes;
+	static const char tail[] = "-11\n4\ntail-61\n";
+	char result[16];
+
+	assert(iio_buffer_set_metadata_read_prequeue_async(buffer, TEST_FRAMES,
+		TEST_METADATA_BYTES) == 0);
+	assert(iio_buffer_drain_metadata(buffer, result, sizeof(result)) == -EBUSY);
+	assert(fixture.state.write_calls == 1);
+	for (unsigned int i = 0; i < TEST_FRAMES; i++)
+		assert(iio_buffer_refill_with_metadata(buffer, &metadata,
+			sizeof(metadata), &bytes) == TEST_IQ_BYTES);
+	memcpy(original_iq, iio_buffer_start(buffer), sizeof(original_iq));
+	append_bytes(&fixture.state, tail, sizeof(tail) - 1U);
+	assert(iio_buffer_drain_metadata(buffer, result, sizeof(result)) == -EAGAIN);
+	assert(iio_buffer_drain_metadata(buffer, result, sizeof(result)) == 4);
+	assert(!memcmp(result, "tail", 4));
+	assert(iio_buffer_drain_metadata(buffer, result, sizeof(result)) == -ENODATA);
+	assert(!memcmp(original_iq, iio_buffer_start(buffer), sizeof(original_iq)));
+	assert(buffer->data_length == TEST_IQ_BYTES);
+	assert(fixture.state.cancel_calls == 0);
+	fixture.state.writes[fixture.state.write_bytes] = '\0';
+	assert(strstr(fixture.state.writes,
+		"DRAINBUFM dev0 16\r\nDRAINBUFM dev0 16\r\nDRAINBUFM dev0 16\r\n"));
+	assert(!strstr(fixture.state.writes, "OPEN"));
+	destroy_fixture_buffer(&fixture, buffer);
+}
+
+static void test_metadata_only_drain_gates(void)
+{
+	struct fixture fixture = {0};
+	struct iio_buffer *buffer = fixture_buffer(&fixture);
+	char result[16];
+	struct iio_backend_ops no_drain = backend_ops;
+
+	assert(iio_buffer_drain_metadata(NULL, result, sizeof(result)) == -EINVAL);
+	assert(iio_buffer_drain_metadata(buffer, NULL, sizeof(result)) == -EINVAL);
+	assert(iio_buffer_drain_metadata(buffer, result, 0) == -EINVAL);
+	assert(iio_buffer_drain_metadata(buffer, result, 65537) == -EINVAL);
+	buffer->metadata_enabled = false;
+	assert(iio_buffer_drain_metadata(buffer, result, sizeof(result)) == -EINVAL);
+	buffer->metadata_enabled = true;
+	fixture.context.backend_api_version = IIO_BACKEND_API_V9;
+	assert(iio_buffer_drain_metadata(buffer, result, sizeof(result)) == -ENOSYS);
+	fixture.context.backend_api_version = IIO_BACKEND_API_CURRENT;
+	no_drain.drain_buffer_metadata = NULL;
+	fixture.context.ops = &no_drain;
+	assert(iio_buffer_drain_metadata(buffer, result, sizeof(result)) == -ENOSYS);
+	fixture.context.ops = &backend_ops;
+	buffer->metadata_batch_cached_frames = 2;
+	buffer->metadata_batch_next_frame = 1;
+	assert(iio_buffer_drain_metadata(buffer, result, sizeof(result)) == -EBUSY);
+	buffer->metadata_batch_cached_frames = 0;
+	buffer->metadata_batch_failed = true;
+	assert(iio_buffer_drain_metadata(buffer, result, sizeof(result)) == -EBUSY);
+	assert(fixture.state.write_calls == 0);
+	destroy_fixture_buffer(&fixture, buffer);
+}
+
+static void test_metadata_only_drain_rejects_malformed(void)
+{
+	static const char *const replies[] = {
+		"0\n", "17\n", "4\nab", "abc\n", "4junk\n", "4",
+		"4294967300\n", "-4294967307\n", "9999999999999999999999999999999999",
+		"+4\n", " 4\n", "-\n", "\n", "-0\n", "4\000junk\n",
+	};
+	for (size_t i = 0; i < sizeof(replies) / sizeof(replies[0]); i++) {
+		struct fixture fixture = {0};
+		struct iio_buffer *buffer = fixture_buffer(&fixture);
+		char result[16];
+
+		fixture.state.response_bytes = 0;
+		append_bytes(&fixture.state, replies[i], i == 14 ? 8 : strlen(replies[i]));
+		assert(iio_buffer_drain_metadata(buffer, result, sizeof(result)) < 0);
+		assert(fixture.state.cancel_calls == 1);
+		destroy_fixture_buffer(&fixture, buffer);
+	}
+}
+
+static void test_ordinary_refill_still_rejects_zero_iq(void)
+{
+	struct fixture fixture = {0};
+	struct iio_buffer *buffer = fixture_buffer(&fixture);
+	struct test_metadata metadata;
+	size_t metadata_bytes = 99;
+
+	fixture.state.response_bytes = 0;
+	append_bytes(&fixture.state, "0\n", 2);
+	assert(iio_buffer_set_metadata_read_prequeue_async(buffer, 1,
+		TEST_METADATA_BYTES) == 0);
+	assert(iio_buffer_refill_with_metadata(buffer, &metadata,
+		sizeof(metadata), &metadata_bytes) == -EOVERFLOW);
+	assert(metadata_bytes == 0);
+	assert(fixture.state.cancel_calls == 1);
+	destroy_fixture_buffer(&fixture, buffer);
+}
+
 int main(void)
 {
+#ifndef _WIN32
+	alarm(15); /* Also bounded on minimal ARM systems without timeout(1). */
+#endif
 	test_allocated_kernel_buffer_count_is_backend_authoritative();
 	test_exact_kernel_queue_capability_is_required();
 	test_fifo_drain_single_command();
@@ -520,6 +643,10 @@ int main(void)
 	test_direct_capture_limit();
 	test_terminal_status_survives_early_direct_failure();
 	test_inband_cancel_command_preserves_transport();
+	test_metadata_only_drain_preserves_iq();
+	test_metadata_only_drain_gates();
+	test_metadata_only_drain_rejects_malformed();
+	test_ordinary_refill_still_rejects_zero_iq();
 	puts("direct async transport: PASS");
 	return 0;
 }

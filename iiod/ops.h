@@ -121,6 +121,8 @@ ssize_t rw_dev_with_metadata_async(struct parser_pdata *pdata,
 		enum iio_buffer_metadata_overrun_policy overrun_policy);
 ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t status_capacity);
+ssize_t drain_buffer_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t metadata_capacity);
 int cancel_buffer_metadata(struct parser_pdata *pdata,
 		struct iio_device *dev);
 

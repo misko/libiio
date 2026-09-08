@@ -687,6 +687,15 @@ else:
     _buffer_cancel_metadata_session.argtypes = (_BufferPtr,)
     _buffer_cancel_metadata_session.errcheck = _check_negative
 
+try:
+    _buffer_drain_metadata = _lib.iio_buffer_drain_metadata
+except AttributeError:
+    _buffer_drain_metadata = None
+else:
+    _buffer_drain_metadata.restype = c_ssize_t
+    _buffer_drain_metadata.argtypes = (_BufferPtr, c_void_p, c_size_t)
+    _buffer_drain_metadata.errcheck = _check_negative
+
 _buffer_push_partial = _lib.iio_buffer_push_partial
 _buffer_push_partial.restype = c_ssize_t
 _buffer_push_partial.argtypes = (
@@ -1437,6 +1446,30 @@ class MetadataBuffer(Buffer):
         if _buffer_cancel_metadata_session is None:
             raise OSError("installed libiio does not support in-band metadata cancel")
         _buffer_cancel_metadata_session(self._buffer)
+
+    def drain_metadata(self, capacity=65536):
+        """Retrieve one negotiated metadata-only result after IQ is drained.
+
+        Never refills IQ or replaces ``metadata`` from the last refill. The
+        provider's schema defines the terminal marker. OSError carries EAGAIN
+        for pending results, EBUSY for unfinished capture/queued IQ, ENODATA for
+        unsupported/exhausted sessions and ENOSYS for unsupported transport.
+        """
+        if not self._buffer:
+            raise ValueError("buffer is closed")
+        if (
+            not isinstance(capacity, int)
+            or isinstance(capacity, bool)
+            or not 1 <= capacity <= 65536
+        ):
+            raise ValueError("metadata drain capacity must be an integer in [1, 65536]")
+        if _buffer_drain_metadata is None:
+            raise OSError(_ENOSYS, "installed libiio does not support metadata drain")
+        storage = create_string_buffer(capacity)
+        count = _buffer_drain_metadata(self._buffer, storage, capacity)
+        if not 0 < count <= capacity:
+            raise OSError("IIO server returned an invalid metadata drain size")
+        return storage.raw[:count]
 
     @property
     def metadata(self):

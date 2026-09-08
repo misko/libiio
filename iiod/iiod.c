@@ -712,6 +712,12 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
 	}
+	/* Transport support only: the opaque OPENM request must also opt in. */
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-drain", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
 	ret = iio_context_add_attr(ctx, "iio,buffer-direct-async", "1");
 	if (ret < 0) {
 		iio_context_destroy(ctx);

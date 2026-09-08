@@ -22,6 +22,8 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 %s WANT_CHN
 %s WANT_ATTR
 %s WANT_VALUE
+%s WANT_DRAIN_DEVICE
+%s WANT_DRAIN_CAPACITY
 %%
 
 <INITIAL>VERSION|version {
@@ -93,6 +95,11 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 	return CANCELBUFM;
 }
 
+<INITIAL>DRAINBUFM|drainbufm {
+	BEGIN(WANT_DRAIN_DEVICE);
+	return DRAINBUFM;
+}
+
 <INITIAL>WRITEBUF|writebuf {
 	BEGIN(WANT_DEVICE);
 	return WRITEBUF;
@@ -116,6 +123,20 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 <INITIAL>SET|set {
 	BEGIN(WANT_DEVICE);
 	return SET;
+}
+
+<WANT_DRAIN_DEVICE>[^ \t\r\n]+ {
+	struct parser_pdata *pdata = yyget_extra(yyscanner);
+	yylval->dev = iio_context_find_device(pdata->ctx, yytext);
+	BEGIN(WANT_DRAIN_CAPACITY);
+	return DEVICE;
+}
+
+<WANT_DRAIN_CAPACITY>[^ \t\r\n]+ {
+	/* Retain every character: the legacy catch-all would discard '+' and
+	 * accidentally turn an invalid capacity into a valid one. */
+	yylval->word = strdup(yyleng <= 20 && strlen(yytext) == (size_t)yyleng ? yytext : "");
+	return WORD;
 }
 
 <WANT_DEVICE>{WORD} {

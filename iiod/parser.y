@@ -74,6 +74,7 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token READBUFMA
 %token READBUFMSTAT
 %token CANCELBUFM
+%token DRAINBUFM
 %token WRITEBUF
 %token WRITE
 %token SETTRIG
@@ -391,6 +392,25 @@ Line:
 	| CANCELBUFM SPACE DEVICE END {
 		struct parser_pdata *pdata = yyget_extra(scanner);
 		int ret = cancel_buffer_metadata(pdata, $3);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| DRAINBUFM SPACE DEVICE SPACE WORD END {
+		char *capacity = $5;
+		const char *digit = capacity;
+		size_t cap = 0;
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret;
+		/* Bound during parsing, including on 32-bit ARM. Reject signs,
+		 * suffixes and overflow without narrowing an unchecked strtoul. */
+		while (digit && *digit >= '0' && *digit <= '9' && cap <= 65536U)
+			cap = cap * 10U + (unsigned int)(*digit++ - '0');
+		if (!digit || *digit || !cap || cap > 65536U)
+			cap = 0;
+		ret = drain_buffer_metadata(pdata, $3, cap);
+		free(capacity);
 		if (ret < 0)
 			YYABORT;
 		else
