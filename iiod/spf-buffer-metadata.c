@@ -14,6 +14,9 @@
 #include "spf-hop-protocol.h"
 #include "spf-hop-session.h"
 #endif
+#ifdef IIOD_HAS_SCANNER_GLRT
+#include "spf-scanner-glrt.h"
+#endif
 
 #include <spf_gain_metadata.h>
 #include <spf_gain_read.h>
@@ -59,6 +62,11 @@ struct spf_iiod_metadata_context {
 	bool burst_enabled;
 	bool ring_enabled;
 	bool ring_prefix_complete;
+#ifdef IIOD_HAS_SCANNER_GLRT
+	struct spf_scanner_glrt *glrt;
+	uint8_t *glrt_legacy_metadata;
+	size_t glrt_legacy_capacity;
+#endif
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	struct spf_hop_request_v1 hop_request;
 	struct spf_hop_session_v1 hop_session;
@@ -175,6 +183,15 @@ static uint64_t make_stream_id(const void *address)
 	return value ? value : UINT64_C(1);
 }
 
+#ifdef IIOD_HAS_SCANNER_GLRT
+static ssize_t scanner_glrt_drain(void *provider_context, void *output,
+	size_t capacity)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	return ctx ? spf_scanner_glrt_drain(ctx->glrt, output, capacity) : -ENODATA;
+}
+#endif
+
 int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
 		size_t scan_bytes,
@@ -190,6 +207,10 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	long long sample_rate_hz;
 	size_t tandem_request_bytes = request_bytes;
 	uint32_t timestamp_control;
+#ifdef IIOD_HAS_SCANNER_GLRT
+	leo_scanner_glrt_request_v1 glrt_request;
+	bool glrt_enabled = false;
+#endif
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	struct spf_hop_request_v1 hop_request;
 	long long rf_bandwidth_hz = -1;
@@ -201,6 +222,17 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		!extra_samples || !burst_plan)
 		return -EINVAL;
 	memset(burst_plan, 0, sizeof(*burst_plan));
+#ifdef IIOD_HAS_SCANNER_GLRT
+	if (request_bytes >= 4 && !memcmp(request, "LGO1", 4)) {
+		ret = leo_scanner_glrt_request_decode(&glrt_request, request, request_bytes);
+		if (ret)
+			return ret;
+		request = glrt_request.legacy_request;
+		request_bytes = glrt_request.legacy_bytes;
+		tandem_request_bytes = request_bytes;
+		glrt_enabled = true;
+	}
+#endif
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
 			SPF_HOP_REQUEST_BYTES) {
@@ -232,6 +264,17 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		tandem_request_bytes = sizeof(struct adi_tandem_agc_request_v1);
 	}
 	struct spf_buffer_layout layout;
+#ifdef IIOD_HAS_SCANNER_GLRT
+	/* Only persistent, dual-RX scanner sessions have qualified ownership for
+	 * a post-capture drain. Burst/ring/ordinary requests stay unchanged. */
+	if (glrt_enabled && !hop_enabled)
+		return -ENOTSUP;
+	if (glrt_enabled) {
+		ret = spf_scanner_glrt_validate(&glrt_request, &hop_request, samples_count);
+		if (ret)
+			return ret;
+	}
+#endif
 	ret = spf_buffer_layout_resolve(samples_count, mask, words, scan_bytes,
 		&layout);
 	if (ret)
@@ -438,7 +481,36 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		burst_plan->metadata_capacity += SPF_HOP_SIDECAR_MAX_BYTES;
 	}
 #endif
+#ifdef IIOD_HAS_SCANNER_GLRT
+	if (glrt_enabled) {
+		/* Before the acquisition buffer is created: all allocation, artifact
+		 * validation and worker startup must finish outside the refill path. */
+		if (burst_plan->metadata_capacity >
+				65536U - LEO_SCANNER_GLRT_FRAME_MAX_OVERHEAD) {
+			ret = -EOVERFLOW;
+			goto glrt_open_failed;
+		}
+		ctx->glrt_legacy_capacity = burst_plan->metadata_capacity;
+		ctx->glrt_legacy_metadata = malloc(ctx->glrt_legacy_capacity);
+		if (!ctx->glrt_legacy_metadata) {
+			ret = -ENOMEM;
+			goto glrt_open_failed;
+		}
+		ret = spf_scanner_glrt_open(&ctx->glrt, &glrt_request,
+			&ctx->hop_request, samples_count);
+		if (ret)
+			goto glrt_open_failed;
+		burst_plan->metadata_capacity += LEO_SCANNER_GLRT_FRAME_MAX_OVERHEAD;
+		burst_plan->drain_metadata = scanner_glrt_drain;
+	}
+#endif
 	return 0;
+#ifdef IIOD_HAS_SCANNER_GLRT
+glrt_open_failed:
+	iiod_buffer_metadata_close(ctx);
+	*provider_context = NULL;
+	return ret;
+#endif
 }
 
 int iiod_buffer_metadata_buffer_opened(void *provider_context,
@@ -550,6 +622,10 @@ void iiod_buffer_metadata_close(void *provider_context)
 	if (ctx->hop_lock_initialized)
 		pthread_mutex_destroy(&ctx->hop_lock);
 #endif
+#ifdef IIOD_HAS_SCANNER_GLRT
+	spf_scanner_glrt_close(ctx->glrt);
+	free(ctx->glrt_legacy_metadata);
+#endif
 	free(ctx);
 }
 
@@ -574,11 +650,24 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	size_t header_bytes;
 	size_t total_metadata_bytes;
 	const uint8_t *raw;
+#ifdef IIOD_HAS_SCANNER_GLRT
+	void *frame_metadata = metadata;
+	size_t frame_capacity = metadata_capacity;
+#endif
 	int ret;
 
 	if (!ctx || dev != ctx->rx || !buffer || !metadata || !iq_offset ||
 		!iq_bytes)
 		return -EINVAL;
+#ifdef IIOD_HAS_SCANNER_GLRT
+	if (ctx->glrt) {
+		if (metadata_capacity < ctx->glrt_legacy_capacity +
+				LEO_SCANNER_GLRT_FRAME_MAX_OVERHEAD)
+			return -ENOSPC;
+		metadata = ctx->glrt_legacy_metadata;
+		metadata_capacity = ctx->glrt_legacy_capacity;
+	}
+#endif
 	header_bytes = spf_radio_frame_v5_header_bytes(
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		(uint16_t)ctx->tandem.request.event_capacity);
@@ -761,10 +850,21 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 				(unsigned long long)ctx->hop_session.status.events_emitted);
 			sidecar_bytes = ret;
 		}
+#ifdef IIOD_HAS_SCANNER_GLRT
+		if (sidecar_bytes >= 0)
+			spf_scanner_glrt_begin_frame(ctx->glrt);
+#endif
 		pthread_mutex_unlock(&ctx->hop_lock);
 		if (sidecar_bytes < 0)
 			return sidecar_bytes;
 		total_metadata_bytes = header_bytes + (size_t)sidecar_bytes;
+#ifdef IIOD_HAS_SCANNER_GLRT
+		/* Sidecar events may refer to an earlier block. The bounded collector
+		 * keeps original counter identity and never retains this DMA buffer. */
+		spf_scanner_glrt_feed(ctx->glrt, &sidecar,
+			(const int16_t *)(raw + sizeof(first_sample_sequence)),
+			ctx->samples_per_channel);
+#endif
 	} else
 #endif
 	{
@@ -775,6 +875,11 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	ctx->frames_emitted++;
 	*iq_offset = sizeof(first_sample_sequence);
 	*iq_bytes = ctx->layout.iq_bytes;
+#ifdef IIOD_HAS_SCANNER_GLRT
+	if (ctx->glrt)
+		return spf_scanner_glrt_frame(ctx->glrt, metadata, total_metadata_bytes,
+			frame_metadata, frame_capacity);
+#endif
 	return (ssize_t)total_metadata_bytes;
 }
 
@@ -817,6 +922,9 @@ int iiod_buffer_metadata_cancel(void *provider_context)
 	ret = spf_hop_session_v1_cancel(&ctx->hop_session,
 		SPF_HOP_REASON_CLIENT_CLOSE);
 	pthread_mutex_unlock(&ctx->hop_lock);
+#ifdef IIOD_HAS_SCANNER_GLRT
+	spf_scanner_glrt_finish(ctx->glrt, 1);
+#endif
 	return ret;
 #else
 	(void)provider_context;
@@ -830,6 +938,18 @@ static int spf_exact_gap_header(
 		const spf_radio_meta_v3_prefix_t **header)
 {
 	const spf_radio_meta_v3_prefix_t *record = metadata;
+
+#ifdef IIOD_HAS_SCANNER_GLRT
+	if (ctx && ctx->glrt) {
+		const uint8_t *legacy;
+		int ret = leo_scanner_glrt_legacy_view(metadata, metadata_bytes,
+			&legacy, &metadata_bytes);
+		if (ret)
+			return ret;
+		metadata = legacy;
+		record = metadata;
+	}
+#endif
 
 	if (!ctx || !metadata || !header ||
 			metadata_bytes < sizeof(*record) + sizeof(uint32_t))
@@ -899,6 +1019,6 @@ int iiod_buffer_metadata_rebase_frame(void *provider_context,
 	ret = spf_exact_gap_header(ctx, metadata, metadata_bytes, &const_header);
 	if (ret)
 		return ret;
-	return spf_radio_frame_v6_rebase_gap(metadata, const_header->header_bytes,
+	return spf_radio_frame_v6_rebase_gap((void *)const_header, const_header->header_bytes,
 		previous_frame_end) ? 0 : -ERANGE;
 }

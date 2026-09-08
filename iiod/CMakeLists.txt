@@ -106,6 +106,50 @@ else()
 	set(IIOD_METADATA_CFILES buffer-metadata-none.c)
 endif()
 
+# An ordinary, opt-in userspace SDK: no detector numerics are linked into iiOD.
+# Paths/digests belong to the operator's pinned build, never a network request.
+set(IIOD_SCANNER_GLRT_LIBRARY "" CACHE FILEPATH "Single-RX asynchronous scanner acquisition SDK")
+set(IIOD_SCANNER_GLRT_INCLUDE_DIR "" CACHE PATH "Directory containing the public scanner_glrt.h")
+foreach(GLRT_SETTING WORKER_PATH TEMPLATES_2500000 TEMPLATES_5000000
+		ALGORITHM_SHA256 CONFIGURATION_SHA256)
+	set(IIOD_SCANNER_GLRT_${GLRT_SETTING} "" CACHE STRING "Trusted scanner GLRT ${GLRT_SETTING}")
+endforeach()
+if(IIOD_SCANNER_GLRT_LIBRARY)
+	if(NOT IIOD_HAS_BUFFER_PERSISTENT_HOP)
+		message(FATAL_ERROR "Scanner GLRT requires the SPF persistent-hop metadata provider")
+	endif()
+	if(NOT EXISTS "${IIOD_SCANNER_GLRT_LIBRARY}" OR
+			NOT EXISTS "${IIOD_SCANNER_GLRT_INCLUDE_DIR}/scanner_glrt.h")
+		message(FATAL_ERROR "Scanner GLRT requires a built SDK and its public header")
+	endif()
+	foreach(GLRT_PATH WORKER_PATH TEMPLATES_2500000 TEMPLATES_5000000)
+		if(NOT IS_ABSOLUTE "${IIOD_SCANNER_GLRT_${GLRT_PATH}}" OR
+				IIOD_SCANNER_GLRT_${GLRT_PATH} MATCHES "[\";\\\\\n\r]")
+			message(FATAL_ERROR "Scanner GLRT ${GLRT_PATH} must be a literal absolute runtime path")
+		endif()
+	endforeach()
+	foreach(GLRT_HASH ALGORITHM_SHA256 CONFIGURATION_SHA256)
+		string(LENGTH "${IIOD_SCANNER_GLRT_${GLRT_HASH}}" GLRT_HASH_LENGTH)
+		if(NOT GLRT_HASH_LENGTH EQUAL 64 OR
+				NOT IIOD_SCANNER_GLRT_${GLRT_HASH} MATCHES "^[0-9a-f]+$" OR
+				IIOD_SCANNER_GLRT_${GLRT_HASH} MATCHES "^0+$")
+			message(FATAL_ERROR "Scanner GLRT ${GLRT_HASH} must be a nonzero lowercase SHA-256")
+		endif()
+	endforeach()
+	list(APPEND IIOD_METADATA_CFILES spf-scanner-glrt.c)
+endif()
+
+function(iiod_configure_scanner_glrt target)
+	target_include_directories(${target} PRIVATE ${IIOD_SCANNER_GLRT_INCLUDE_DIR})
+	target_link_libraries(${target} ${IIOD_SCANNER_GLRT_LIBRARY})
+	target_compile_definitions(${target} PRIVATE IIOD_HAS_SCANNER_GLRT=1)
+	foreach(GLRT_SETTING WORKER_PATH TEMPLATES_2500000 TEMPLATES_5000000
+			ALGORITHM_SHA256 CONFIGURATION_SHA256)
+		target_compile_definitions(${target} PRIVATE
+			IIOD_SCANNER_GLRT_${GLRT_SETTING}="${IIOD_SCANNER_GLRT_${GLRT_SETTING}}")
+	endforeach()
+endfunction()
+
 set(IIOD_CFILES iiod.c ops.c thread-pool.c ddr-ring-core.c
 	spf-ddr-ring-status.c
 	${IIOD_METADATA_CFILES}
@@ -143,6 +187,9 @@ if (WITH_IIOD_SERIAL)
 endif()
 
 add_executable(iiod ${IIOD_CFILES})
+if(IIOD_SCANNER_GLRT_LIBRARY)
+	iiod_configure_scanner_glrt(iiod)
+endif()
 if (IIOD_HAS_BUFFER_PERSISTENT_HOP)
 	target_compile_definitions(iiod PRIVATE IIOD_HAS_BUFFER_PERSISTENT_HOP=1)
 	if (IIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER MATCHES
@@ -197,6 +244,18 @@ if(WITH_TESTS AND WITH_XML_BACKEND)
 	if(WITH_ZSTD)
 		target_link_libraries(test_metadata_drain_server ${LIBZSTD_LIBRARIES})
 	endif()
+endif()
+
+if(WITH_TESTS AND IIOD_SCANNER_GLRT_LIBRARY)
+	set(GLRT_FIXTURE_SOURCES ${IIOD_METADATA_CFILES})
+	list(REMOVE_ITEM GLRT_FIXTURE_SOURCES ${IIOD_BUFFER_METADATA_PROVIDER})
+	add_executable(test_scanner_glrt_provider ../tests/test_scanner_glrt_provider.c
+		${GLRT_FIXTURE_SOURCES})
+	target_include_directories(test_scanner_glrt_provider PRIVATE ${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+	target_compile_definitions(test_scanner_glrt_provider PRIVATE IIOD_HAS_BUFFER_PERSISTENT_HOP=1)
+	target_link_libraries(test_scanner_glrt_provider iio ${PTHREAD_LIBRARIES} ${IIOD_BUFFER_METADATA_LIBRARIES})
+	iiod_configure_scanner_glrt(test_scanner_glrt_provider)
+	set_target_properties(test_scanner_glrt_provider PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 endif()
 
 if (HAVE_AVAHI)

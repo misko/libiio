@@ -750,6 +750,22 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 	}
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (spf_hop_device_v1_capable()) {
+#ifdef IIOD_HAS_SCANNER_GLRT
+		static const char *const glrt_attrs[][2] = {
+			{"iio,buffer-scanner-glrt", "1"},
+			{"iio,buffer-scanner-glrt-mode", "unqualified-evidence"},
+			{"iio,buffer-scanner-glrt-algorithm-sha256", IIOD_SCANNER_GLRT_ALGORITHM_SHA256},
+			{"iio,buffer-scanner-glrt-configuration-sha256", IIOD_SCANNER_GLRT_CONFIGURATION_SHA256},
+		};
+		unsigned int glrt_attr;
+		for (glrt_attr = 0; glrt_attr < sizeof(glrt_attrs) / sizeof(glrt_attrs[0]); glrt_attr++) {
+			ret = iio_context_add_attr(ctx, glrt_attrs[glrt_attr][0], glrt_attrs[glrt_attr][1]);
+			if (ret < 0) {
+				iio_context_destroy(ctx);
+				return EXIT_FAILURE;
+			}
+		}
+#endif
 		ret = iio_context_add_attr(ctx, "iio,buffer-persistent-hop", "1");
 		if (ret < 0) {
 			iio_context_destroy(ctx);
