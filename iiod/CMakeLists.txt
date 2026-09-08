@@ -256,6 +256,27 @@ if(WITH_TESTS AND IIOD_SCANNER_GLRT_LIBRARY)
 	target_link_libraries(test_scanner_glrt_provider iio ${PTHREAD_LIBRARIES} ${IIOD_BUFFER_METADATA_LIBRARIES})
 	iiod_configure_scanner_glrt(test_scanner_glrt_provider)
 	set_target_properties(test_scanner_glrt_provider PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+	if(WITH_XML_BACKEND)
+		add_executable(test_scanner_glrt_network_server
+			../tests/test_scanner_glrt_network_server.c ../tests/test_scanner_glrt_provider.c
+			thread-pool.c ddr-ring-core.c spf-ddr-ring-status.c
+			${GLRT_FIXTURE_SOURCES} ${BISON_parser_OUTPUTS} ${FLEX_lexer_OUTPUTS})
+		add_dependencies(test_scanner_glrt_network_server iiod)
+		target_include_directories(test_scanner_glrt_network_server PRIVATE
+			${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR} ${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+		target_compile_definitions(test_scanner_glrt_network_server PRIVATE
+			IIOD_HAS_BUFFER_PERSISTENT_HOP=1 SPF_GLRT_NETWORK_FIXTURE=1)
+		target_link_libraries(test_scanner_glrt_network_server iio
+			${PTHREAD_LIBRARIES} ${IIOD_BUFFER_METADATA_LIBRARIES})
+		iiod_configure_scanner_glrt(test_scanner_glrt_network_server)
+		set_target_properties(test_scanner_glrt_network_server PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+		if(WITH_AIO)
+			target_link_libraries(test_scanner_glrt_network_server ${LIBAIO_LIBRARIES})
+		endif()
+		if(WITH_ZSTD)
+			target_link_libraries(test_scanner_glrt_network_server ${LIBZSTD_LIBRARIES})
+		endif()
+	endif()
 endif()
 
 if (HAVE_AVAHI)

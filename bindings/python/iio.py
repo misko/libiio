@@ -1447,6 +1447,26 @@ class MetadataBuffer(Buffer):
             raise OSError("installed libiio does not support in-band metadata cancel")
         _buffer_cancel_metadata_session(self._buffer)
 
+    def metadata_status_raw(self, capacity=65536):
+        """Read opaque provider status without refilling or replacing frame metadata.
+
+        The provider owns the status schema and its exact expected size. This
+        public port also supports persistent-hop status, not just DDR rings.
+        """
+        if not self._buffer:
+            raise ValueError("buffer is closed")
+        if (
+            not isinstance(capacity, int)
+            or isinstance(capacity, bool)
+            or not 1 <= capacity <= 65536
+        ):
+            raise ValueError("metadata status capacity must be an integer in [1, 65536]")
+        storage = create_string_buffer(capacity)
+        count = _buffer_get_metadata_status(self._buffer, storage, capacity)
+        if not 0 < count <= capacity:
+            raise OSError("IIO server returned an invalid metadata status size")
+        return storage.raw[:count]
+
     def drain_metadata(self, capacity=65536):
         """Retrieve one negotiated metadata-only result after IQ is drained.
 

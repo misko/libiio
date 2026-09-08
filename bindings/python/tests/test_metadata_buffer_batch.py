@@ -77,6 +77,48 @@ class FakeDevice:
     sample_size = 8
 
 
+def test_raw_metadata_status_is_public_opaque_and_does_not_refill(monkeypatch, drain_buffer):
+    def status(buffer, destination, capacity):
+        assert capacity == 32
+        memmove(destination, b"status", 6)
+        return 6
+
+    def no_refill(*args):
+        pytest.fail("metadata status must not refill IQ")
+
+    monkeypatch.setattr(iio, "_buffer_get_metadata_status", status)
+    monkeypatch.setattr(iio, "_buffer_refill_with_metadata", no_refill)
+    drain_buffer._metadata = b"original"
+    assert drain_buffer.metadata_status_raw(32) == b"status"
+    assert drain_buffer.metadata == b"original"
+    drain_buffer.close()
+    with pytest.raises(ValueError, match="closed"):
+        drain_buffer.metadata_status_raw()
+
+
+@pytest.mark.parametrize("capacity", [0, -1, 65537, 2**64, 1.5, True, None])
+def test_raw_metadata_status_capacity_is_bounded(drain_buffer, capacity):
+    with pytest.raises(ValueError, match="capacity"):
+        drain_buffer.metadata_status_raw(capacity)
+
+
+@pytest.mark.parametrize("count", [0, -1, 65537])
+def test_raw_metadata_status_rejects_invalid_count(monkeypatch, drain_buffer, count):
+    monkeypatch.setattr(iio, "_buffer_get_metadata_status", lambda *args: count)
+    with pytest.raises(OSError, match="invalid metadata status size"):
+        drain_buffer.metadata_status_raw()
+
+
+def test_raw_metadata_status_preserves_provider_error(monkeypatch, drain_buffer):
+    def status(*args):
+        raise OSError(errno.EIO, "provider failure")
+
+    monkeypatch.setattr(iio, "_buffer_get_metadata_status", status)
+    with pytest.raises(OSError) as error:
+        drain_buffer.metadata_status_raw()
+    assert error.value.errno == errno.EIO
+
+
 class DirectAsyncFakeDevice(FakeDevice):
     _ctx = SimpleNamespace(
         attrs={

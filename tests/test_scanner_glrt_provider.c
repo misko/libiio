@@ -25,6 +25,13 @@
 #define spf_hop_device_v1_open fixture_hop_open
 #define spf_hop_device_v1_destroy fixture_hop_destroy
 #define spf_scanner_glrt_frame fixture_glrt_frame
+#ifdef SPF_GLRT_NETWORK_FIXTURE
+#define spf_tandem_session_acquire fixture_tandem_acquire
+#define spf_tandem_session_heartbeat fixture_tandem_heartbeat
+#define spf_gain_sampler_limit fixture_sampler_limit
+#define spf_gain_sampler_limit_and_wait_started fixture_sampler_wait
+#define spf_gain_sampler_finish_capture fixture_sampler_finish
+#endif
 #undef _POSIX_C_SOURCE
 #include "../iiod/spf-buffer-metadata.c"
 #undef spf_scanner_glrt_frame
@@ -44,13 +51,44 @@ static uint32_t fixture_rate, register_writes, sampler_starts;
 static uint64_t fixture_first;
 static unsigned int drain_calls, event_delay, restores;
 static struct spf_hop_request_v1 fixture_request;
+#ifndef SPF_GLRT_NETWORK_FIXTURE
 static uint8_t legacy_baseline[7][65536];
 static size_t legacy_baseline_bytes[7];
 static bool inject_failure;
-static struct iio_device *const rx_device = (struct iio_device *)(uintptr_t)16;
+#endif
+static struct iio_device *rx_device = (struct iio_device *)(uintptr_t)16;
 static struct iio_device *const phy_device = (struct iio_device *)(uintptr_t)32;
 
+#ifdef SPF_GLRT_NETWORK_FIXTURE
+#include "scanner-glrt-network-fixture.h"
+static uint64_t network_block_end, network_next_event;
+static bool network_failure;
+void glrt_fixture_configure(struct iio_device *dev, uint32_t rate, unsigned int delay, bool failure)
+{
+	rx_device = dev; fixture_rate = rate; event_delay = delay; network_failure = failure;
+	fixture_first = GLRT_FIXTURE_FIRST;
+}
+void *fixture_buffer_start(const struct iio_buffer *buffer)
+{
+	uint8_t *data = glrt_network_buffer_start(buffer);
+	uint64_t first;
+	memcpy(&first, data, sizeof(first));
+	network_block_end = first + glrt_network_buffer_samples(buffer);
+	return data;
+}
+int fixture_tandem_acquire(struct spf_tandem_session *session)
+{ assert(session); return 0; }
+int fixture_tandem_heartbeat(struct spf_tandem_session *session)
+{ assert(session); return 0; }
+void fixture_sampler_limit(spf_gain_sampler_t *sampler, uint64_t samples)
+{ assert(sampler && samples); }
+bool fixture_sampler_wait(spf_gain_sampler_t *sampler, uint64_t samples, uint32_t timeout)
+{ assert(sampler && samples && timeout); return true; }
+bool fixture_sampler_finish(spf_gain_sampler_t *sampler, uint32_t timeout)
+{ assert(sampler && timeout); return true; }
+#else
 void *fixture_buffer_start(const struct iio_buffer *buffer) { return (void *)buffer; }
+#endif
 const struct iio_context *fixture_context(const struct iio_device *dev)
 { assert(dev == rx_device); return (void *)(uintptr_t)48; }
 struct iio_device *fixture_phy(const struct iio_context *ctx, const char *name)
@@ -79,6 +117,11 @@ uint16_t fixture_gain_collect(spf_gain_sampler_t *sampler, uint64_t first,
 		.sample_sequence_after = first - 1, .read_duration_ns = 1000,
 		.flags = SPF_GAIN_OBSERVATION_VALID | SPF_GAIN_OBSERVATION_SAMPLE_INTERVAL_VALID,
 		.rx1_gain_index = 20, .rx2_gain_index = 20, .rx1_gain_db = 10, .rx2_gain_db = 10};
+#ifdef SPF_GLRT_NETWORK_FIXTURE
+	/* Real host validation requires an observation overlapping this frame. */
+	out->sample_sequence_before = first;
+	out->sample_sequence_after = first + 1;
+#endif
 	*overflow = 0;
 	return 1;
 }
@@ -109,6 +152,31 @@ static int fixture_events(void *opaque, struct spf_hop_device_event_v1 *events,
 {
 	assert(opaque && capacity);
 	*count = 0; *dropped = 0;
+#ifdef SPF_GLRT_NETWORK_FIXTURE
+	/* Only hardware event delivery is synthetic. The real hop state machine
+	 * derives invalid spans, visit inventory, HOPS, HOPT and restoration. */
+	while (*count < capacity && network_next_event < fixture_request.dwell_count) {
+		uint64_t index = network_next_event;
+		uint64_t start = fixture_first + index *
+			(fixture_request.dwell_samples + fixture_request.transition_guard_samples + 7);
+		uint64_t after = start + 7;
+		if (after + fixture_request.transition_guard_samples > network_block_end ||
+			(index && start - fixture_first >= fixture_request.capture_span_samples) ||
+			drain_calls < event_delay) break;
+		unsigned int target = (unsigned int)(index % 8);
+		events[(*count)++] = (struct spf_hop_device_event_v1){
+			.event_sequence = index, .dwell_index = index,
+			.transition_before = start + 3, .transition_after = after,
+			.actual_lo_frequency_hz = fixture_request.profiles[target].lo_frequency_hz,
+			.actual_if_offset_hz = fixture_request.if_offset_hz, .device_event_id = index + 1,
+			.from_profile = index ? (target + 7) % 8 : SPF_HOP_PROFILE_NONE,
+			.to_profile = target, .kind = index ? SPF_HOP_EVENT_RETUNE : SPF_HOP_EVENT_STARTUP,
+			.flags = SPF_HOP_EVENT_FLAGS_V1, .fastlock_slot = target};
+		network_next_event++;
+	}
+	drain_calls++;
+	return 0;
+#else
 	if (drain_calls++ != event_delay) return 0;
 	*events = (struct spf_hop_device_event_v1){.transition_before = fixture_first + 3,
 		.transition_after = fixture_first + 7, .actual_lo_frequency_hz =
@@ -117,11 +185,15 @@ static int fixture_events(void *opaque, struct spf_hop_device_event_v1 *events,
 		.device_event_id = 1, .from_profile = SPF_HOP_PROFILE_NONE, .to_profile = 0,
 		.kind = SPF_HOP_EVENT_STARTUP, .flags = SPF_HOP_EVENT_FLAGS_V1, .fastlock_slot = 0};
 	*count = 1; return 0;
+#endif
 }
 static int fixture_restore(void *opaque, uint16_t reason, struct spf_hop_restore_receipt_v1 *receipt)
 {
 	assert(opaque && reason);
 	uint64_t end = fixture_first + fixture_request.dwell_samples + 1000;
+#ifdef SPF_GLRT_NETWORK_FIXTURE
+	end = network_block_end;
+#endif
 	*receipt = (struct spf_hop_restore_receipt_v1){.transition_before = end,
 		.transition_after = end + 2, .restored_lo_frequency_hz = 900000000,
 		.restored_profile = SPF_HOP_PROFILE_NONE, .flags = SPF_HOP_EVENT_FLAGS_V1};
@@ -136,9 +208,22 @@ int fixture_hop_open(const struct iio_device *rx, const struct iio_device *phy,
 {
 	assert(rx == rx_device && phy == phy_device && tandem && lock);
 	fixture_request = *request; drain_calls = 0; restores = 0;
+#ifdef SPF_GLRT_NETWORK_FIXTURE
+	network_next_event = 0; network_block_end = fixture_first;
+#endif
 	*context = &fixture_request; *ops = &fixture_ops; return 0;
 }
 void fixture_hop_destroy(void *context) { assert(context == &fixture_request); }
+
+#ifdef SPF_GLRT_NETWORK_FIXTURE
+void glrt_fixture_metadata_opened(void *context)
+{
+	struct spf_iiod_metadata_context *state = context;
+	/* A deterministic test-only generation permits exact legacy byte checks. */
+	state->stream_id = 100;
+	if (network_failure && state->glrt) spf_scanner_glrt_feed(state->glrt, NULL, NULL, 0);
+}
+#else
 
 static uint32_t read32(const uint8_t *p)
 { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -348,3 +433,4 @@ int main(void)
 	puts("SPF GLRT provider: both rates, real worker, delayed events, terminal drain and exact-gap tests passed");
 	return 0;
 }
+#endif
