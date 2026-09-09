@@ -98,6 +98,11 @@ if(IIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER MATCHES
 		"spf-hop-device-userspace\\.c$")
 	add_executable(test_spf_hop_device_userspace
 		test_spf_hop_device_userspace.c)
+	if(IIOD_SCANNER_ADAPTIVE_HOP)
+		target_compile_definitions(test_spf_hop_device_userspace PRIVATE IIOD_HAS_SCANNER_ADAPTIVE_HOP=1)
+		target_sources(test_spf_hop_device_userspace PRIVATE
+			../iiod/spf-hop-adaptive-protocol.c ../iiod/spf-hop-protocol.c)
+	endif()
 	target_include_directories(test_spf_hop_device_userspace PRIVATE ../iiod
 		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
 	target_link_libraries(test_spf_hop_device_userspace

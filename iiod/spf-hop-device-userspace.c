@@ -465,11 +465,10 @@ out:
 	return capable;
 }
 
-int spf_hop_device_v1_open(const struct iio_device *rx,
+static int prepare_userspace_io(const struct iio_device *rx,
 	const struct iio_device *phy, struct spf_tandem_session *tandem,
 	pthread_mutex_t *tandem_lock,
-	const struct spf_hop_request_v1 *request, void **device_context,
-	const struct spf_hop_device_ops_v1 **ops)
+	const struct spf_hop_request_v1 *request, struct spf_userspace_hop_io **output)
 {
 	const struct iio_context *context;
 	const char *context_name;
@@ -478,7 +477,7 @@ int spf_hop_device_v1_open(const struct iio_device *rx,
 	int ret;
 
 	if (!rx || !phy || !tandem || !tandem_lock || !request ||
-		!device_context || !ops)
+		!output)
 		return -EINVAL;
 	context = iio_device_get_context(rx);
 	context_name = context ? iio_context_get_name(context) : NULL;
@@ -494,6 +493,20 @@ int spf_hop_device_v1_open(const struct iio_device *rx,
 	io->lo = lo;
 	io->tandem = tandem;
 	io->tandem_lock = tandem_lock;
+	*output = io;
+	return 0;
+}
+
+int spf_hop_device_v1_open(const struct iio_device *rx,
+	const struct iio_device *phy, struct spf_tandem_session *tandem,
+	pthread_mutex_t *tandem_lock, const struct spf_hop_request_v1 *request,
+	void **device_context, const struct spf_hop_device_ops_v1 **ops)
+{
+	struct spf_userspace_hop_io *io;
+	int ret;
+	if (!device_context || !ops) return -EINVAL;
+	ret = prepare_userspace_io(rx, phy, tandem, tandem_lock, request, &io);
+	if (ret) return ret;
 	ret = spf_hop_scheduler_v1_create(request, &userspace_io, io,
 		device_context, ops);
 	if (ret)
@@ -505,3 +518,27 @@ void spf_hop_device_v1_destroy(void *device_context)
 {
 	spf_hop_scheduler_v1_destroy(device_context);
 }
+
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+int spf_hop_device_userspace_v2_open(const struct iio_device *rx, const struct iio_device *phy,
+	struct spf_tandem_session *tandem, pthread_mutex_t *tandem_lock,
+	const struct spf_hop_request_v2 *request, const struct spf_hop_scheduler_policy_v2 *policy,
+	void *policy_context, void **device_context, const struct spf_hop_device_ops_v2 **ops)
+{
+	struct spf_userspace_hop_io *io;
+	uint8_t wire[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
+	int ret;
+	if (!device_context || !ops || !policy || !policy->choose || !policy->commit) return -EINVAL;
+	ret = spf_hop_request_v2_encode(wire, sizeof(wire), request);
+	if (ret) return ret;
+	ret = prepare_userspace_io(rx, phy, tandem, tandem_lock, &request->geometry, &io);
+	if (ret) return ret;
+	ret = spf_hop_scheduler_v2_create(request, &userspace_io, io, policy, policy_context,
+		device_context, ops);
+	if (ret) free(io);
+	return ret;
+}
+
+void spf_hop_device_userspace_v2_destroy(void *context)
+{ spf_hop_scheduler_v2_destroy(context); }
+#endif

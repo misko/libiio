@@ -4,6 +4,12 @@
 #include "spf-hop-protocol.h"
 #include <scanner_glrt.h>
 struct spf_scanner_glrt;
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+struct spf_hop_adaptive_policy;
+/* Attach once, before acquisition. Borrowed policy must outlive this GLRT port
+ * and its scheduler; acquisition owner alone publishes observations. */
+int spf_scanner_glrt_attach_policy(struct spf_scanner_glrt *, struct spf_hop_adaptive_policy *);
+#endif
 int spf_scanner_glrt_validate(const leo_scanner_glrt_request_v1 *request,
 	const struct spf_hop_request_v1 *hop, size_t block_samples);
 int spf_scanner_glrt_open(struct spf_scanner_glrt **output,

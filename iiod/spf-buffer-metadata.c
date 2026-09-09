@@ -17,6 +17,12 @@
 #ifdef IIOD_HAS_SCANNER_GLRT
 #include "spf-scanner-glrt.h"
 #endif
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+#include "spf-hop-adaptive-policy.h"
+#ifndef IIOD_SCANNER_GLRT_POSITIVE_ONLY
+#error Adaptive hopping requires an explicit positive-only detector build
+#endif
+#endif
 
 #include <spf_gain_metadata.h>
 #include <spf_gain_read.h>
@@ -71,6 +77,13 @@ struct spf_iiod_metadata_context {
 	struct spf_hop_request_v1 hop_request;
 	struct spf_hop_session_v1 hop_session;
 	const struct spf_hop_device_ops_v1 *hop_ops;
+	struct spf_hop_request_v2 adaptive_request;
+	struct spf_hop_session_v2 adaptive_session;
+	const struct spf_hop_device_ops_v2 *adaptive_ops;
+	bool hop_adaptive;
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+	struct spf_hop_adaptive_policy *policy;
+#endif
 	void *hop_device_context;
 	pthread_mutex_t hop_lock;
 	pthread_mutex_t tandem_lock;
@@ -83,6 +96,18 @@ struct spf_iiod_metadata_context {
 };
 
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+static size_t hop_sidecar_capacity(const struct spf_iiod_metadata_context *ctx)
+{ return ctx->hop_adaptive ? SPF_HOP_ADAPTIVE_SIDECAR_MAX_BYTES : SPF_HOP_SIDECAR_MAX_BYTES; }
+
+static const struct spf_hop_status_v1 *hop_status_state(const struct spf_iiod_metadata_context *ctx)
+{ return ctx->hop_adaptive ? &ctx->adaptive_session.core.status : &ctx->hop_session.status; }
+
+static int hop_cancel(struct spf_iiod_metadata_context *ctx, uint16_t reason)
+{
+	return ctx->hop_adaptive ? spf_hop_session_v2_cancel(&ctx->adaptive_session, reason) :
+		spf_hop_session_v1_cancel(&ctx->hop_session, reason);
+}
+
 static int tandem_acquire(struct spf_iiod_metadata_context *ctx)
 {
 	int unlock_ret;
@@ -215,6 +240,10 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	struct spf_hop_request_v1 hop_request;
 	long long rf_bandwidth_hz = -1;
 	bool hop_enabled = false;
+	bool hop_adaptive = false;
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+	struct spf_hop_request_v2 adaptive_request;
+#endif
 #endif
 	int ret;
 
@@ -235,6 +264,23 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 #endif
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
+			SPF_HOP_ADAPTIVE_REQUEST_BYTES) {
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+		if (!glrt_enabled) return -ENOTSUP;
+		ret = spf_hop_request_v2_decode(&adaptive_request,
+			(const uint8_t *)request + sizeof(struct adi_tandem_agc_request_v1),
+			SPF_HOP_ADAPTIVE_REQUEST_BYTES);
+		if (ret) return ret;
+		if (adaptive_request.policy.generation != glrt_request.generation) return -ESTALE;
+		ret = spf_hop_adaptive_policy_validate_pinned(&adaptive_request);
+		if (ret) return ret;
+		hop_request = adaptive_request.geometry;
+		hop_enabled = hop_adaptive = true;
+		tandem_request_bytes = sizeof(struct adi_tandem_agc_request_v1);
+#else
+		return -ENOTSUP;
+#endif
+	} else if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
 			SPF_HOP_REQUEST_BYTES) {
 		ret = spf_hop_request_v1_decode(&hop_request,
 			(const uint8_t *)request +
@@ -325,6 +371,10 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		SPF_DDR_RING_REQUEST_BYTES;
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	ctx->hop_enabled = hop_enabled;
+	ctx->hop_adaptive = hop_adaptive;
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+	if (hop_adaptive) ctx->adaptive_request = adaptive_request;
+#endif
 	if (ctx->hop_enabled)
 		ctx->hop_request = hop_request;
 #endif
@@ -429,16 +479,27 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			return -ret;
 		}
 		ctx->tandem_lock_initialized = true;
-		ret = spf_hop_device_v1_open(ctx->rx, ctx->phy, &ctx->tandem,
-			&ctx->tandem_lock, &ctx->hop_request,
-			&ctx->hop_device_context, &ctx->hop_ops);
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+		if (ctx->hop_adaptive) {
+			ret = spf_hop_adaptive_policy_create(&ctx->policy, &ctx->adaptive_request);
+			if (!ret)
+				ret = spf_hop_device_userspace_v2_open(ctx->rx, ctx->phy, &ctx->tandem,
+					&ctx->tandem_lock, &ctx->adaptive_request, spf_hop_adaptive_policy_ports(),
+					ctx->policy, &ctx->hop_device_context, &ctx->adaptive_ops);
+		} else
+#endif
+			ret = spf_hop_device_v1_open(ctx->rx, ctx->phy, &ctx->tandem,
+				&ctx->tandem_lock, &ctx->hop_request,
+				&ctx->hop_device_context, &ctx->hop_ops);
 		if (ret) {
 			iiod_buffer_metadata_close(ctx);
 			return ret;
 		}
 		ctx->hop_device_opened = true;
-		ret = spf_hop_session_v1_init(&ctx->hop_session,
-			&ctx->hop_request, ctx->hop_ops, ctx->hop_device_context);
+		ret = ctx->hop_adaptive ? spf_hop_session_v2_init(&ctx->adaptive_session,
+			&ctx->adaptive_request, ctx->adaptive_ops, ctx->hop_device_context) :
+			spf_hop_session_v1_init(&ctx->hop_session,
+				&ctx->hop_request, ctx->hop_ops, ctx->hop_device_context);
 		if (ret) {
 			iiod_buffer_metadata_close(ctx);
 			return ret;
@@ -473,12 +534,12 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			(uint16_t)ctx->tandem.request.observation_capacity,
 			(uint16_t)ctx->tandem.request.event_capacity);
 		if (!burst_plan->metadata_capacity || burst_plan->metadata_capacity >
-				SIZE_MAX - SPF_HOP_SIDECAR_MAX_BYTES) {
+				SIZE_MAX - hop_sidecar_capacity(ctx)) {
 			iiod_buffer_metadata_close(ctx);
 			*provider_context = NULL;
 			return -EOVERFLOW;
 		}
-		burst_plan->metadata_capacity += SPF_HOP_SIDECAR_MAX_BYTES;
+		burst_plan->metadata_capacity += hop_sidecar_capacity(ctx);
 	}
 #endif
 #ifdef IIOD_HAS_SCANNER_GLRT
@@ -500,6 +561,12 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			&ctx->hop_request, samples_count);
 		if (ret)
 			goto glrt_open_failed;
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+		if (ctx->hop_adaptive) {
+			ret = spf_scanner_glrt_attach_policy(ctx->glrt, ctx->policy);
+			if (ret) goto glrt_open_failed;
+		}
+#endif
 		burst_plan->metadata_capacity += LEO_SCANNER_GLRT_FRAME_MAX_OVERHEAD;
 		burst_plan->drain_metadata = scanner_glrt_drain;
 	}
@@ -537,7 +604,8 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (ctx->hop_enabled) {
 		pthread_mutex_lock(&ctx->hop_lock);
-		ret = spf_hop_session_v1_start(&ctx->hop_session);
+		ret = ctx->hop_adaptive ? spf_hop_session_v2_start(&ctx->adaptive_session) :
+			spf_hop_session_v1_start(&ctx->hop_session);
 		pthread_mutex_unlock(&ctx->hop_lock);
 		if (ret)
 			return ret;
@@ -600,8 +668,7 @@ void iiod_buffer_metadata_close(void *provider_context)
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (ctx->hop_session_initialized) {
 		pthread_mutex_lock(&ctx->hop_lock);
-		(void)spf_hop_session_v1_cancel(&ctx->hop_session,
-			SPF_HOP_REASON_CLIENT_CLOSE);
+		(void)hop_cancel(ctx, SPF_HOP_REASON_CLIENT_CLOSE);
 		pthread_mutex_unlock(&ctx->hop_lock);
 	}
 #endif
@@ -615,8 +682,13 @@ void iiod_buffer_metadata_close(void *provider_context)
 		(void)iio_device_reg_write(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
 				ctx->timestamp_control_previous);
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
-	if (ctx->hop_device_opened)
-		spf_hop_device_v1_destroy(ctx->hop_device_context);
+	if (ctx->hop_device_opened) {
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+		if (ctx->hop_adaptive) spf_hop_device_userspace_v2_destroy(ctx->hop_device_context);
+		else
+#endif
+			spf_hop_device_v1_destroy(ctx->hop_device_context);
+	}
 	if (ctx->tandem_lock_initialized)
 		pthread_mutex_destroy(&ctx->tandem_lock);
 	if (ctx->hop_lock_initialized)
@@ -625,6 +697,10 @@ void iiod_buffer_metadata_close(void *provider_context)
 #ifdef IIOD_HAS_SCANNER_GLRT
 	spf_scanner_glrt_close(ctx->glrt);
 	free(ctx->glrt_legacy_metadata);
+#endif
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+	/* Both hop thread and acquisition owner/worker are stopped before free. */
+	spf_hop_adaptive_policy_destroy(ctx->policy);
 #endif
 	free(ctx);
 }
@@ -674,9 +750,9 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	total_metadata_bytes = header_bytes;
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (ctx->hop_enabled) {
-		if (header_bytes > SIZE_MAX - SPF_HOP_SIDECAR_MAX_BYTES)
+		if (header_bytes > SIZE_MAX - hop_sidecar_capacity(ctx))
 			return -EOVERFLOW;
-		total_metadata_bytes += SPF_HOP_SIDECAR_MAX_BYTES;
+		total_metadata_bytes += hop_sidecar_capacity(ctx);
 	}
 #endif
 	if (!header_bytes || metadata_capacity < total_metadata_bytes)
@@ -825,29 +901,44 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (ctx->hop_enabled) {
 		struct spf_hop_sidecar_v1 sidecar;
+		struct spf_hop_sidecar_v2 adaptive_sidecar;
+		const struct spf_hop_sidecar_v1 *actual;
 		int sidecar_bytes;
 
 		pthread_mutex_lock(&ctx->hop_lock);
-		ret = spf_hop_session_v1_on_block(&ctx->hop_session,
-			sequence.buffer_sequence, first_sample_sequence,
-			first_sample_sequence + ctx->samples_per_channel, &sidecar);
-		if (!ret)
+		if (ctx->hop_adaptive) {
+			ret = spf_hop_session_v2_on_block(&ctx->adaptive_session,
+				sequence.buffer_sequence, first_sample_sequence,
+				first_sample_sequence + ctx->samples_per_channel, &adaptive_sidecar);
+			actual = &adaptive_sidecar.geometry;
+		} else {
+			ret = spf_hop_session_v1_on_block(&ctx->hop_session,
+				sequence.buffer_sequence, first_sample_sequence,
+				first_sample_sequence + ctx->samples_per_channel, &sidecar);
+			actual = &sidecar;
+		}
+		if (!ret && ctx->hop_adaptive)
+			sidecar_bytes = spf_hop_sidecar_v2_encode(
+				(uint8_t *)metadata + header_bytes,
+				metadata_capacity - header_bytes, &adaptive_sidecar);
+		else if (!ret)
 			sidecar_bytes = spf_hop_sidecar_v1_encode(
 				(uint8_t *)metadata + header_bytes,
 				metadata_capacity - header_bytes, &sidecar);
 		else {
+			const struct spf_hop_status_v1 *status = hop_status_state(ctx);
 			fprintf(stderr,
 				"SPF persistent-hop block failed: error=%d state=%u reason=%u "
 				"session_error=%d block=%llu first=%llu end=%llu visits=%llu "
-				"events=%llu\n", ret, ctx->hop_session.status.state,
-				ctx->hop_session.status.terminal_reason,
-				ctx->hop_session.status.error_code,
+				"events=%llu\n", ret, status->state,
+				status->terminal_reason,
+				status->error_code,
 				(unsigned long long)sequence.buffer_sequence,
 				(unsigned long long)first_sample_sequence,
 				(unsigned long long)(first_sample_sequence +
 					ctx->samples_per_channel),
-				(unsigned long long)ctx->hop_session.status.visits_started,
-				(unsigned long long)ctx->hop_session.status.events_emitted);
+				(unsigned long long)status->visits_started,
+				(unsigned long long)status->events_emitted);
 			sidecar_bytes = ret;
 		}
 #ifdef IIOD_HAS_SCANNER_GLRT
@@ -861,10 +952,11 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 #ifdef IIOD_HAS_SCANNER_GLRT
 		/* Sidecar events may refer to an earlier block. The bounded collector
 		 * keeps original counter identity and never retains this DMA buffer. */
-		spf_scanner_glrt_feed(ctx->glrt, &sidecar,
+		spf_scanner_glrt_feed(ctx->glrt, actual,
 			(const int16_t *)(raw + sizeof(first_sample_sequence)),
 			ctx->samples_per_channel);
 #endif
+		(void)actual;
 	} else
 #endif
 	{
@@ -898,8 +990,9 @@ ssize_t iiod_buffer_metadata_status(void *provider_context,
 	if (status_capacity < SPF_HOP_STATUS_BYTES)
 		return -ENOSPC;
 	pthread_mutex_lock(&ctx->hop_lock);
-	spf_hop_session_v1_get_status(&ctx->hop_session, &hop_status);
-	ret = spf_hop_status_v1_encode(status, status_capacity, &hop_status);
+	hop_status = *hop_status_state(ctx);
+	ret = ctx->hop_adaptive ? spf_hop_status_v2_encode(status, status_capacity, &hop_status) :
+		spf_hop_status_v1_encode(status, status_capacity, &hop_status);
 	pthread_mutex_unlock(&ctx->hop_lock);
 	return ret ? ret : SPF_HOP_STATUS_BYTES;
 #else
@@ -919,8 +1012,7 @@ int iiod_buffer_metadata_cancel(void *provider_context)
 	if (!ctx || !ctx->hop_enabled || !ctx->hop_session_initialized)
 		return -ENODATA;
 	pthread_mutex_lock(&ctx->hop_lock);
-	ret = spf_hop_session_v1_cancel(&ctx->hop_session,
-		SPF_HOP_REASON_CLIENT_CLOSE);
+	ret = hop_cancel(ctx, SPF_HOP_REASON_CLIENT_CLOSE);
 	pthread_mutex_unlock(&ctx->hop_lock);
 #ifdef IIOD_HAS_SCANNER_GLRT
 	spf_scanner_glrt_finish(ctx->glrt, 1);
@@ -965,17 +1057,33 @@ static int spf_exact_gap_header(
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (ctx->hop_enabled) {
 		struct spf_hop_sidecar_v1 sidecar;
+		struct spf_hop_sidecar_v2 adaptive_sidecar;
+		const struct spf_hop_sidecar_v1 *actual;
 		int ret;
 
 		if (record->header_bytes == metadata_bytes)
 			return -EBADMSG;
-		ret = spf_hop_sidecar_v1_decode(&sidecar,
-			(const uint8_t *)metadata + record->header_bytes,
-			metadata_bytes - record->header_bytes);
-		if (ret || sidecar.session_id != ctx->hop_request.session_id ||
-			sidecar.buffer_sequence != record->buffer_sequence ||
-			sidecar.block_first_sample != record->first_sample_sequence ||
-			sidecar.block_end_sample != record->first_sample_sequence +
+		if (ctx->hop_adaptive) {
+			ret = spf_hop_sidecar_v2_decode(&adaptive_sidecar,
+				(const uint8_t *)metadata + record->header_bytes,
+				metadata_bytes - record->header_bytes);
+			if (!ret) {
+				for (unsigned i = 0; i < adaptive_sidecar.geometry.event_count; ++i)
+					if (adaptive_sidecar.choices[i].generation != ctx->adaptive_request.policy.generation ||
+						adaptive_sidecar.choices[i].mode != ctx->adaptive_request.policy.mode)
+						return -EBADMSG;
+			}
+			actual = &adaptive_sidecar.geometry;
+		} else {
+			ret = spf_hop_sidecar_v1_decode(&sidecar,
+				(const uint8_t *)metadata + record->header_bytes,
+				metadata_bytes - record->header_bytes);
+			actual = &sidecar;
+		}
+		if (ret || actual->session_id != ctx->hop_request.session_id ||
+			actual->buffer_sequence != record->buffer_sequence ||
+			actual->block_first_sample != record->first_sample_sequence ||
+			actual->block_end_sample != record->first_sample_sequence +
 				record->samples_per_channel)
 			return -EBADMSG;
 	} else

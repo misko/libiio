@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "spf-scanner-glrt.h"
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+#include "spf-hop-adaptive-policy.h"
+#endif
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -12,7 +15,43 @@ struct spf_scanner_glrt {
 	uint64_t session_id, dwell_samples;
 	int finished, frame_pending;
 	atomic_int drain_ready;
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+	struct spf_hop_adaptive_policy *policy;
+	int acquisition_started;
+#endif
 };
+
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+int spf_scanner_glrt_attach_policy(struct spf_scanner_glrt *s, struct spf_hop_adaptive_policy *p)
+{
+	int ret = 0;
+	if (!s || !p) return -EINVAL;
+	pthread_mutex_lock(&s->lock);
+	if (s->policy || s->acquisition_started || s->finished) ret = -EBUSY;
+	else s->policy = p;
+	pthread_mutex_unlock(&s->lock);
+	return ret;
+}
+
+/* Called under the acquisition-owner mutex, never on the scheduler thread.
+ * A failed advisory queue does not change frame/IQ delivery. */
+static void publish_observations(struct spf_scanner_glrt *s)
+{
+	unsigned i;
+	if (!s->policy) return;
+	for (i = 0; i < SPF_HOP_PROFILE_COUNT; ++i) {
+		leo_adaptive_observation_v1 observation;
+		int ret = leo_scanner_glrt_observation(s->session, &observation);
+		if (!ret || ret == -ENODATA) break;
+		if (ret != 1 || spf_hop_adaptive_policy_offer(s->policy, &observation)) {
+			spf_hop_adaptive_policy_fault(s->policy);
+			break;
+		}
+	}
+}
+#else
+static void publish_observations(struct spf_scanner_glrt *s) { (void)s; }
+#endif
 
 static int digest_matches(const uint8_t digest[32], const char *hex)
 {
@@ -126,6 +165,9 @@ void spf_scanner_glrt_begin_frame(struct spf_scanner_glrt *state)
 	if (!state)
 		return;
 	pthread_mutex_lock(&state->lock);
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+	state->acquisition_started = 1;
+#endif
 	state->frame_pending = 1;
 	atomic_store_explicit(&state->drain_ready, 0, memory_order_release);
 	pthread_mutex_unlock(&state->lock);
@@ -164,6 +206,7 @@ void spf_scanner_glrt_feed(struct spf_scanner_glrt *state,
 	}
 	if (ret)
 		leo_scanner_glrt_fail(state->session);
+	publish_observations(state);
 	if (sidecar && sidecar->state >= SPF_HOP_STATE_COMPLETED && !state->finished) {
 		(void)leo_scanner_glrt_finish(state->session,
 			sidecar->state != SPF_HOP_STATE_COMPLETED);
@@ -192,6 +235,7 @@ ssize_t spf_scanner_glrt_frame(struct spf_scanner_glrt *state, const void *legac
 		return -EINVAL;
 	pthread_mutex_lock(&state->lock);
 	ret = leo_scanner_glrt_frame(state->session, legacy, legacy_bytes, output, capacity);
+	publish_observations(state);
 	if (ret > 0) {
 		state->frame_pending = 0;
 		if (state->finished)

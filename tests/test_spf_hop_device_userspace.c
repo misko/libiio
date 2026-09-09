@@ -12,6 +12,8 @@
 #define iio_device_reg_read mock_iio_device_reg_read
 #define spf_hop_scheduler_v1_create mock_spf_hop_scheduler_v1_create
 #define spf_hop_scheduler_v1_destroy mock_spf_hop_scheduler_v1_destroy
+#define spf_hop_scheduler_v2_create mock_spf_hop_scheduler_v2_create
+#define spf_hop_scheduler_v2_destroy mock_spf_hop_scheduler_v2_destroy
 #define spf_tandem_session_acquire mock_spf_tandem_session_acquire
 #define spf_tandem_session_close mock_spf_tandem_session_close
 
@@ -30,6 +32,8 @@
 #undef iio_device_reg_read
 #undef spf_hop_scheduler_v1_create
 #undef spf_hop_scheduler_v1_destroy
+#undef spf_hop_scheduler_v2_create
+#undef spf_hop_scheduler_v2_destroy
 #undef spf_tandem_session_acquire
 #undef spf_tandem_session_close
 
@@ -42,6 +46,8 @@ static unsigned int mock_counter_reads;
 static unsigned int mock_frequency_writes;
 static unsigned int mock_tandem_closes;
 static long long mock_frequency;
+static bool mock_profiles_enabled;
+static unsigned int mock_saved_slot, mock_save_writes;
 
 struct iio_context *mock_iio_create_local_context(void)
 {
@@ -71,15 +77,17 @@ const struct iio_context *mock_iio_device_get_context(
 	const struct iio_device *device)
 {
 	(void)device;
-	return NULL;
+	return mock_profiles_enabled ? (const struct iio_context *)(uintptr_t)1 : NULL;
 }
 
 struct iio_channel *mock_iio_device_find_channel(
 	const struct iio_device *device, const char *name, bool output)
 {
 	(void)device;
-	(void)name;
-	(void)output;
+	if (mock_profiles_enabled) {
+		assert(!strcmp(name, "altvoltage0") && output);
+		return (struct iio_channel *)(uintptr_t)2;
+	}
 	return NULL;
 }
 
@@ -94,9 +102,8 @@ ssize_t mock_iio_channel_attr_read(const struct iio_channel *channel,
 	const char *attribute, char *destination, size_t length)
 {
 	(void)channel;
-	(void)attribute;
-	(void)destination;
-	(void)length;
+	if (mock_profiles_enabled && !strcmp(attribute, "fastlock_save"))
+		return snprintf(destination, length, "%u 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0", mock_saved_slot);
 	return -EIO;
 }
 
@@ -116,6 +123,11 @@ int mock_iio_channel_attr_write_longlong(const struct iio_channel *channel,
 	const char *attribute, long long value)
 {
 	(void)channel;
+	if (mock_profiles_enabled && !strcmp(attribute, "fastlock_save")) {
+		assert(value >= 0 && value < 8);
+		mock_saved_slot = (unsigned)value; ++mock_save_writes;
+		return 0;
+	}
 	assert(!strcmp(attribute, "frequency"));
 	mock_frequency = value;
 	mock_frequency_writes++;
@@ -164,6 +176,73 @@ void mock_spf_hop_scheduler_v1_destroy(void *device_context)
 	(void)device_context;
 }
 
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+static unsigned mock_adaptive_creates, mock_adaptive_destroys;
+static const struct spf_hop_device_ops_v2 mock_adaptive_ops = {0};
+int mock_spf_hop_scheduler_v2_create(const struct spf_hop_request_v2 *r,
+	const struct spf_hop_scheduler_io_v1 *ops, void *io,
+	const struct spf_hop_scheduler_policy_v2 *policy, void *policy_context,
+	void **output, const struct spf_hop_device_ops_v2 **device_ops)
+{
+	assert(r->policy.generation == 9 && r->policy.mode == SPF_HOP_ADAPTIVE);
+	assert(ops == &userspace_io && io && policy && policy_context);
+	++mock_adaptive_creates;
+	*output = io; *device_ops = &mock_adaptive_ops;
+	return 0;
+}
+void mock_spf_hop_scheduler_v2_destroy(void *context)
+{ ++mock_adaptive_destroys; free(context); }
+static int unused_choose(void *p, uint64_t visit, uint64_t now, struct spf_hop_choice_v2 *c)
+{ (void)p; (void)visit; (void)now; (void)c; assert(0); return -EIO; }
+static int unused_commit(void *p, const struct spf_hop_device_event_v2 *e, uint64_t first, uint64_t end)
+{ (void)p; (void)e; (void)first; (void)end; assert(0); return -EIO; }
+
+static void test_adaptive_factory_validates_before_creating_scheduler(void)
+{
+	struct spf_hop_request_v2 r = {0};
+	uint8_t values[16] = {0};
+	const struct spf_hop_scheduler_policy_v2 policy = {unused_choose, unused_commit};
+	const struct spf_hop_device_ops_v2 *ops = NULL;
+	struct iio_device *rx = (void *)(uintptr_t)1, *phy = (void *)(uintptr_t)2;
+	struct spf_tandem_session tandem = {0};
+	pthread_mutex_t lock;
+	void *context = NULL;
+	r.geometry.required_features = SPF_HOP_REQUIRED_FEATURES_V1;
+	r.geometry.flags = SPF_HOP_REQUEST_FLAGS_V1;
+	r.geometry.session_id = 71;
+	r.geometry.sample_rate_hz = r.geometry.rf_bandwidth_hz = 2500000;
+	r.geometry.dwell_samples = 300000; r.geometry.transition_guard_samples = 2500;
+	r.geometry.dwell_count = 64; r.geometry.capture_span_samples = 10000000;
+	for (unsigned i = 0; i < 8; ++i) {
+		r.geometry.profiles[i] = (struct spf_hop_profile_v1){
+			.profile_id = i, .fastlock_slot = 7 - i, .center_frequency_hz = 1000000000 + i * 1000000,
+			.lo_frequency_hz = 1000000000 + i * 1000000, .profile_crc32 = crc32_bytes(values, sizeof(values)),
+		};
+	}
+	r.policy = (struct spf_hop_policy_v2){0, SPF_HOP_ADAPTIVE, 3, 3, 3, 1, 2000, 3000, 160, 1000, 3};
+	mock_frequency = 1000000000; mock_frequency_writes = 0;
+	mock_profiles_enabled = true;
+	assert(!pthread_mutex_init(&lock, NULL));
+	assert(spf_hop_device_userspace_v2_open(rx, phy, &tandem, &lock, &r, &policy,
+		&r, &context, &ops) == -EINVAL);
+	assert(!context && !mock_save_writes && !mock_adaptive_creates);
+	r.policy.generation = 9;
+	r.geometry.profiles[4].profile_crc32 ^= 1;
+	assert(spf_hop_device_userspace_v2_open(rx, phy, &tandem, &lock, &r, &policy,
+		&r, &context, &ops) == -ESTALE);
+	assert(!context && mock_save_writes == 5 && !mock_adaptive_creates);
+	r.geometry.profiles[4].profile_crc32 ^= 1;
+	assert(!spf_hop_device_userspace_v2_open(rx, phy, &tandem, &lock, &r, &policy,
+		&r, &context, &ops));
+	assert(context && ops == &mock_adaptive_ops && mock_adaptive_creates == 1);
+	assert(mock_save_writes == 13 && !mock_frequency_writes);
+	spf_hop_device_userspace_v2_destroy(context);
+	assert(mock_adaptive_destroys == 1);
+	mock_profiles_enabled = false;
+	assert(!pthread_mutex_destroy(&lock));
+}
+#endif
+
 static void test_counter_failure_does_not_skip_physical_restore(void)
 {
 	const uint64_t expected_lo = UINT64_C(10875000000);
@@ -198,5 +277,8 @@ static void test_counter_failure_does_not_skip_physical_restore(void)
 int main(void)
 {
 	test_counter_failure_does_not_skip_physical_restore();
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+	test_adaptive_factory_validates_before_creating_scheduler();
+#endif
 	return 0;
 }

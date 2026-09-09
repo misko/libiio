@@ -24,6 +24,8 @@
 #define spf_tandem_session_collect fixture_tandem_collect
 #define spf_hop_device_v1_open fixture_hop_open
 #define spf_hop_device_v1_destroy fixture_hop_destroy
+#define spf_hop_device_userspace_v2_open fixture_hop_v2_open
+#define spf_hop_device_userspace_v2_destroy fixture_hop_v2_destroy
 #define spf_scanner_glrt_frame fixture_glrt_frame
 #ifdef SPF_GLRT_NETWORK_FIXTURE
 #define spf_tandem_session_acquire fixture_tandem_acquire
@@ -58,6 +60,9 @@ static bool inject_failure;
 #endif
 static struct iio_device *rx_device = (struct iio_device *)(uintptr_t)16;
 static struct iio_device *const phy_device = (struct iio_device *)(uintptr_t)32;
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+static void fixture_adaptive_prepare(uint8_t *, uint64_t, size_t);
+#endif
 
 #ifdef SPF_GLRT_NETWORK_FIXTURE
 #include "scanner-glrt-network-fixture.h"
@@ -74,6 +79,9 @@ void *fixture_buffer_start(const struct iio_buffer *buffer)
 	uint64_t first;
 	memcpy(&first, data, sizeof(first));
 	network_block_end = first + glrt_network_buffer_samples(buffer);
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+	fixture_adaptive_prepare(data, first, glrt_network_buffer_samples(buffer));
+#endif
 	return data;
 }
 int fixture_tandem_acquire(struct spf_tandem_session *session)
@@ -87,7 +95,15 @@ bool fixture_sampler_wait(spf_gain_sampler_t *sampler, uint64_t samples, uint32_
 bool fixture_sampler_finish(spf_gain_sampler_t *sampler, uint32_t timeout)
 { assert(sampler && timeout); return true; }
 #else
-void *fixture_buffer_start(const struct iio_buffer *buffer) { return (void *)buffer; }
+void *fixture_buffer_start(const struct iio_buffer *buffer)
+{
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+	uint64_t first;
+	memcpy(&first, buffer, sizeof(first));
+	fixture_adaptive_prepare((uint8_t *)buffer, first, fixture_rate / 50);
+#endif
+	return (void *)buffer;
+}
 #endif
 const struct iio_context *fixture_context(const struct iio_device *dev)
 { assert(dev == rx_device); return (void *)(uintptr_t)48; }
@@ -214,6 +230,10 @@ int fixture_hop_open(const struct iio_device *rx, const struct iio_device *phy,
 	*context = &fixture_request; *ops = &fixture_ops; return 0;
 }
 void fixture_hop_destroy(void *context) { assert(context == &fixture_request); }
+
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+#include "scanner-glrt-adaptive-fixture.h"
+#endif
 
 #ifdef SPF_GLRT_NETWORK_FIXTURE
 void glrt_fixture_metadata_opened(void *context)
@@ -422,7 +442,7 @@ static void test_provider(bool enabled, unsigned int delay)
 
 int main(void)
 {
-	alarm(30);
+	alarm(60);
 	fixture_first = (UINT64_C(1) << 53) + 10000;
 	for (fixture_rate = 2500000; fixture_rate <= 5000000; fixture_rate += 2500000) {
 		test_rejected_open_is_side_effect_free();
@@ -433,6 +453,12 @@ int main(void)
 		inject_failure = true;
 		test_provider(true, 0);
 		inject_failure = false;
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+		test_adaptive_provider(SPF_HOP_SHADOW, false, false);
+		test_adaptive_provider(SPF_HOP_ADAPTIVE, false, false);
+		test_adaptive_provider(SPF_HOP_ADAPTIVE, true, false);
+		test_adaptive_provider(SPF_HOP_ADAPTIVE, false, true);
+#endif
 	}
 	puts("SPF GLRT provider: both rates, real worker, delayed events, terminal drain and exact-gap tests passed");
 	return 0;

@@ -21,4 +21,14 @@ int spf_hop_device_v1_open(const struct iio_device *rx,
 void spf_hop_device_v1_destroy(void *device_context);
 bool spf_hop_device_v1_capable(void);
 
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+struct spf_hop_scheduler_policy_v2;
+/* Userspace provider only. No kernel/FW implementation advertises V2. */
+int spf_hop_device_userspace_v2_open(const struct iio_device *, const struct iio_device *,
+	struct spf_tandem_session *, pthread_mutex_t *, const struct spf_hop_request_v2 *,
+	const struct spf_hop_scheduler_policy_v2 *, void *, void **,
+	const struct spf_hop_device_ops_v2 **);
+void spf_hop_device_userspace_v2_destroy(void *);
+#endif
+
 #endif

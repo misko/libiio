@@ -756,6 +756,13 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 			{"iio,buffer-scanner-glrt-mode", IIOD_SCANNER_GLRT_MODE},
 			{"iio,buffer-scanner-glrt-algorithm-sha256", IIOD_SCANNER_GLRT_ALGORITHM_SHA256},
 			{"iio,buffer-scanner-glrt-configuration-sha256", IIOD_SCANNER_GLRT_CONFIGURATION_SHA256},
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+			{"iio,buffer-adaptive-hop-request", "2"},
+			{"iio,buffer-adaptive-hop-event", "2"},
+			{"iio,buffer-adaptive-hop-status", "2"},
+			{"iio,buffer-adaptive-hop-modes", "shadow,adaptive"},
+			{"iio,buffer-adaptive-hop-policy", "three-miss-two-second-v1"},
+#endif
 		};
 		unsigned int glrt_attr;
 		for (glrt_attr = 0; glrt_attr < sizeof(glrt_attrs) / sizeof(glrt_attrs[0]); glrt_attr++) {

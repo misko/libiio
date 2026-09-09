@@ -50,7 +50,9 @@ def configure(tmp_path, *options):
         *options,
     ]
     return (
-        subprocess.run(command, text=True, capture_output=True, timeout=30, check=False),
+        subprocess.run(
+            command, text=True, capture_output=True, timeout=30, check=False
+        ),
         build,
         sdk,
     )
@@ -61,6 +63,7 @@ def test_default_remains_unqualified_and_links_exact_sdk_path(tmp_path):
     assert result.returncode == 0, result.stderr
     flags = (build / "iiod/CMakeFiles/iiod.dir/flags.make").read_text()
     assert "unqualified-evidence" in flags and "POSITIVE_ONLY" not in flags
+    assert "IIOD_HAS_SCANNER_ADAPTIVE_HOP" not in flags
     link = (build / "iiod/CMakeFiles/iiod.dir/link.txt").read_text()
     assert str(sdk) in link and "-lcandidate-sdk" not in link
 
@@ -124,3 +127,28 @@ def test_invalid_or_ambiguous_thresholds_fail_configuration(tmp_path, score, mar
 def test_mode_and_threshold_opt_in_cannot_be_implicit(tmp_path, options, expected):
     result, _, _ = configure(tmp_path, *options)
     assert result.returncode != 0 and expected in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["unqualified-evidence", "positive-only-v1"])
+@pytest.mark.parametrize("provider", ["userspace", "local"])
+def test_adaptive_mode_requires_positive_userspace_build(tmp_path, mode, provider):
+    options = [
+        "-DIIOD_SCANNER_ADAPTIVE_HOP=ON",
+        f"-DIIOD_SCANNER_GLRT_MODE={mode}",
+        f"-DIIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER={ROOT}/iiod/spf-hop-device-{provider}.c",
+    ]
+    if mode == "positive-only-v1":
+        options += [
+            "-DIIOD_SCANNER_GLRT_MINIMUM_EXACT_SCORE=0.175",
+            "-DIIOD_SCANNER_GLRT_MINIMUM_MARGIN=0.025",
+        ]
+    result, build, _ = configure(tmp_path, *options)
+    if mode == "positive-only-v1" and provider == "userspace":
+        assert result.returncode == 0, result.stderr
+        assert (
+            "IIOD_HAS_SCANNER_ADAPTIVE_HOP=1"
+            in (build / "iiod/CMakeFiles/iiod.dir/flags.make").read_text()
+        )
+    else:
+        assert result.returncode != 0
+        assert "Adaptive hop V2 requires" in result.stderr

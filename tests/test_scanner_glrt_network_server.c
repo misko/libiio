@@ -173,6 +173,13 @@ int main(int argc, char **argv)
 		"<context-attribute name=\"iio,buffer-scanner-glrt-mode\" value=\"" IIOD_SCANNER_GLRT_MODE "\"/>"
 		"<context-attribute name=\"iio,buffer-scanner-glrt-algorithm-sha256\" value=\"%s\"/>"
 		"<context-attribute name=\"iio,buffer-scanner-glrt-configuration-sha256\" value=\"%s\"/>"
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+		"<context-attribute name=\"iio,buffer-adaptive-hop-request\" value=\"2\"/>"
+		"<context-attribute name=\"iio,buffer-adaptive-hop-event\" value=\"2\"/>"
+		"<context-attribute name=\"iio,buffer-adaptive-hop-status\" value=\"2\"/>"
+		"<context-attribute name=\"iio,buffer-adaptive-hop-modes\" value=\"shadow,adaptive\"/>"
+		"<context-attribute name=\"iio,buffer-adaptive-hop-policy\" value=\"three-miss-two-second-v1\"/>"
+#endif
 		"<device id=\"dev0\" name=\"cf-ad9361-lpc\">"
 		"<channel id=\"voltage0\" type=\"input\"><scan-element index=\"0\" format=\"le:S16/16&gt;&gt;0\"/></channel>"
 		"<channel id=\"voltage1\" type=\"input\"><scan-element index=\"1\" format=\"le:S16/16&gt;&gt;0\"/></channel>"

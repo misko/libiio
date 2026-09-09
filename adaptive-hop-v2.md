@@ -1,8 +1,9 @@
 # Adaptive userspace hop protocol, major 2
 
-Implementation checkpoint, 2026-09-09. This is not an advertised or deployed
-radio capability. Provider OPENM negotiation, platform factory composition and
-host adapters still need integration. No kernel, FPGA or firmware change.
+Implementation checkpoint, 2026-09-09. Provider OPENM, userspace factory and host
+stream/lifecycle integration are implemented and tested offline. The build
+option defaults OFF; nothing is deployed on a radio. No kernel, FPGA or flashed
+firmware change. Durable application publication/UI and qualification remain.
 
 ## Boundaries
 
@@ -39,10 +40,18 @@ HOPT offsets 4/8 hold version/features. Reserved fields stay zero.
 | 40 / 44 | u32 / u32 | Maximum result age in milliseconds / unhealthy-result limit |
 | 48–63 | bytes | Reserved, zero |
 
-The complete request must be retained, not just the generation number. Before
-production OPENM integration, require the policy generation to match the GLRT
-request generation and require an explicitly pinned positive-only detector
-profile. Generation alone is not a configuration digest or authentication.
+The complete request must be retained, not just the generation number. OPENM
+requires the policy generation to match the GLRT request generation and the
+explicit positive-only detector profile. Generation alone is not a
+configuration digest or authentication.
+
+`IIOD_SCANNER_ADAPTIVE_HOP=ON` additionally requires the SDK, `positive-only-v1`
+and `spf-hop-device-userspace.c`. Configuration rejects the unchanged kernel
+provider. Only that opt-in build advertises `iio,buffer-adaptive-hop-{request,
+event,status}=2`, modes `shadow,adaptive` and policy
+`three-miss-two-second-v1`. The provider pins settings 3/3/3/1, 2000 ms cooldown,
+3000 ms revisit, 160 ms hop budget, 1000 ms feedback age and health limit 3.
+These are engineering policy settings, not detector quality qualification.
 
 ## Choice, relative to each event offset 80
 
@@ -103,7 +112,17 @@ native policy and causally timed synthetic observations. The separate policy
 test covers every activity mask, fixed-shadow accounting, queue overflow,
 source/epoch mismatch, latched fallback and two-thread queue handoff.
 
-These are offline component tests. They do not demonstrate actual worker-fed
-adaptive OPENM, variable-visit host publication, ARM runtime, detector quality or
-live duty. Do not advertise/enable the capability until those integrations and
-qualification gates pass.
+The adaptive provider fixture now exercises actual OPENM, SDK collection,
+numerical worker, feedback and policy at both rates/modes with paced synthetic
+pilots. Hardware recall receipts are substituted there; the actual threaded
+scheduler remains independently tested. Worker failure latches equal scanning
+without losing the recording or result inventory. The userspace factory unit
+also validates the complete request and saved-profile CRCs before scheduler
+creation, and tests physical-restore intent with all IO mocked.
+
+The host's actual TCP tests cover V2 decoding, cross-frame actual-visit IQ,
+terminal result drain, full 300 s counter spans and cancellation/restoration.
+TCP IQ is synthetic zero RX1/constant RX0 and counters are accelerated: this is
+not full positive-RF network/load qualification, ARM runtime, scientific quality
+or live duty. Application publication/UI and authorized live qualification are
+still required before enabling a production radio.

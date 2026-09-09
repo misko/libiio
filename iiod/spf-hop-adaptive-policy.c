@@ -21,6 +21,19 @@ struct spf_hop_adaptive_policy {
 	int have_source_epoch;
 };
 
+int spf_hop_adaptive_policy_validate_pinned(const struct spf_hop_request_v2 *r)
+{
+	const struct spf_hop_policy_v2 *p;
+	uint8_t wire[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
+	int ret = spf_hop_request_v2_encode(wire, sizeof(wire), r);
+	if (ret) return ret;
+	p = &r->policy;
+	return p->warmup_visits == 3 && p->missed_dwells == 3 &&
+		p->active_weight == 3 && p->quiet_weight == 1 && p->cooldown_ms == 2000 &&
+		p->maximum_revisit_ms == 3000 && p->hop_budget_ms == 160 &&
+		p->maximum_result_age_ms == 1000 && p->unhealthy_limit == 3 ? 0 : -ENOTSUP;
+}
+
 void spf_hop_adaptive_policy_destroy(struct spf_hop_adaptive_policy *p)
 {
 	if (!p) return;

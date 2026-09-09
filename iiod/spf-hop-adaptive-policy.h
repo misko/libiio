@@ -6,6 +6,10 @@
 #include "adaptive_scan.h"
 
 struct spf_hop_adaptive_policy;
+#define SPF_HOP_ADAPTIVE_POLICY_ID "three-miss-two-second-v1"
+/* The first provider release pins the agreed policy; generic offline policy
+ * tests may still exercise other bounded configurations. No allocation/IO. */
+int spf_hop_adaptive_policy_validate_pinned(const struct spf_hop_request_v2 *);
 /* Startup allocation only. No worker, IIO, filesystem or radio access. */
 int spf_hop_adaptive_policy_create(struct spf_hop_adaptive_policy **,
 	const struct spf_hop_request_v2 *);
