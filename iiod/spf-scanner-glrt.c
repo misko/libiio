@@ -17,6 +17,8 @@ struct spf_scanner_glrt {
 	atomic_int drain_ready;
 #ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
 	uint64_t callback_budget_ns;
+	uint64_t block_samples;
+	int source_pressure;
 #endif
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
 	struct spf_hop_adaptive_policy *policy;
@@ -162,6 +164,7 @@ int spf_scanner_glrt_open(struct spf_scanner_glrt **output,
 		ret = leo_scanner_glrt_enable_protection(state->session, &protection);
 		state->callback_budget_ns = (uint64_t)block_samples * UINT64_C(1000000000) /
 			config.rate_hz * 4 / 5;
+		state->block_samples = block_samples;
 	}
 #endif
 	if (ret) {
@@ -185,7 +188,7 @@ void spf_scanner_glrt_capture_budget(struct spf_scanner_glrt *s,
 	pthread_mutex_lock(&s->lock);
 	if (!s->finished) {
 		(void)leo_scanner_glrt_capture_pressure(s->session,
-			missing_samples || callback_ns >= s->callback_budget_ns);
+			s->source_pressure || missing_samples || callback_ns >= s->callback_budget_ns);
 		publish_observations(s);
 	}
 	pthread_mutex_unlock(&s->lock);
@@ -200,6 +203,31 @@ int spf_scanner_glrt_protection_stats(struct spf_scanner_glrt *s,
 	ret = leo_scanner_glrt_protection_stats(s->session, out);
 	pthread_mutex_unlock(&s->lock);
 	return ret;
+}
+
+/* A hop timestamp newer than the delivered IQ is a lower bound on source
+ * backlog, even when metadata callbacks themselves are fast. Observe the
+ * already-attested event: no extra IIO read, clock epoch conversion or wait.
+ * Empty carriers cannot prove recovery; wait for a fresh event below the low
+ * watermark, then let the existing four healthy callbacks permit admission.
+ * This is an advisory early warning, not a guarantee against DMA/network loss. */
+static void observe_source_backlog(struct spf_scanner_glrt *s,
+	const struct spf_hop_sidecar_v1 *sidecar)
+{
+	uint64_t latest = 0, lag;
+	unsigned int j;
+	if (!sidecar->event_count) return;
+	for (j = 0; j < sidecar->event_count; ++j)
+		if (sidecar->events[j].device.transition_after > latest)
+			latest = sidecar->events[j].device.transition_after;
+	lag = latest > sidecar->block_end_sample ? latest - sidecar->block_end_sample : 0;
+	if (lag >= 2 * s->block_samples) {
+		s->source_pressure = 1;
+		/* Assert before visit/history collection for this very block. */
+		(void)leo_scanner_glrt_capture_pressure(s->session, 1);
+	} else if (lag <= s->block_samples) {
+		s->source_pressure = 0;
+	}
 }
 #endif
 
@@ -230,6 +258,9 @@ void spf_scanner_glrt_feed(struct spf_scanner_glrt *state,
 		sidecar->block_end_sample - sidecar->block_first_sample != samples) {
 		ret = -EINVAL;
 	} else {
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+		observe_source_backlog(state, sidecar);
+#endif
 		for (j = 0; !ret && j < sidecar->event_count; j++) {
 			const struct spf_hop_event_v1 *event = &sidecar->events[j];
 			/* This opt-in scanner mode follows the published eight-profile

@@ -370,6 +370,60 @@ static void test_protection_budget_and_recovery(void)
 	assert(stats.pressure_entries == 1 && stats.resumptions == 1 && !stats.disabled);
 	spf_scanner_glrt_close(state);
 }
+
+static void test_source_backlog_precedes_callback_overrun(void)
+{
+	uint8_t packet[4096];
+	leo_scanner_glrt_request_v1 decoded;
+	struct spf_hop_request_v1 hop;
+	const size_t samples = fixture_rate / 50;
+	int16_t *iq = calloc(samples * 4, sizeof(*iq));
+	assert(iq);
+	size_t bytes = make_request(packet, true);
+	assert(leo_scanner_glrt_request_decode(&decoded, packet, bytes) == 0);
+	assert(spf_hop_request_v1_decode(&hop, decoded.legacy_request + 104, SPF_HOP_REQUEST_BYTES) == 0);
+	hop.dwell_count = 2;
+	hop.capture_span_samples = 2 * hop.dwell_samples;
+	for (unsigned int boundary = 0; boundary < 3; ++boundary) {
+		struct spf_scanner_glrt *state = NULL;
+		leo_scanner_glrt_protection_stats_v1 stats;
+		struct spf_hop_sidecar_v1 frame = {.session_id = hop.session_id,
+			.state = SPF_HOP_STATE_RUNNING, .block_first_sample = fixture_first,
+			.block_end_sample = fixture_first + samples, .event_count = 1};
+		frame.events[0].device.transition_after = frame.block_end_sample + 2 * samples - !boundary;
+		frame.events[0].invalid_end = frame.events[0].device.transition_after + hop.transition_guard_samples;
+		assert(spf_scanner_glrt_open(&state, &decoded, &hop, samples) == 0);
+		spf_scanner_glrt_feed(state, &frame, iq, samples);
+		spf_scanner_glrt_capture_budget(state, 0, 0); /* Fast callbacks are not proof of timely IQ. */
+		assert(spf_scanner_glrt_protection_stats(state, &stats) == 0);
+		assert(stats.suspended == !!boundary);
+		if (!boundary) { spf_scanner_glrt_close(state); continue; }
+		assert(stats.pressure_entries == 1 && stats.history_blocks_skipped == 1);
+		for (unsigned int block = 1; block <= 13; ++block) {
+			frame.buffer_sequence = block;
+			frame.block_first_sample += samples;
+			frame.block_end_sample += samples;
+			frame.event_count = 0;
+			if (block == 10) {
+				/* Only a fresh hop proves the observed lower bound has caught up.
+				 * Empty carriers must not erase a known source-pressure latch. */
+				frame.event_count = 1;
+				frame.events[0].device.dwell_index = 1;
+				frame.events[0].device.to_profile = 1;
+				frame.events[0].device.transition_after = frame.block_end_sample + samples + (boundary == 2);
+				frame.events[0].invalid_end = frame.events[0].device.transition_after + hop.transition_guard_samples;
+			}
+			spf_scanner_glrt_feed(state, &frame, iq, samples);
+			spf_scanner_glrt_capture_budget(state, 0, 0);
+			assert(spf_scanner_glrt_protection_stats(state, &stats) == 0);
+			assert(stats.suspended == (block < 13 || boundary == 2));
+		}
+		assert(stats.pressure_entries == 1 && stats.resumptions == (boundary == 1) && !stats.disabled);
+		spf_scanner_glrt_close(state);
+	}
+	for (size_t j = 0; j < samples * 4; ++j) assert(iq[j] == 0);
+	free(iq);
+}
 #endif
 
 static unsigned int consume_results(const uint8_t *packet)
@@ -549,6 +603,7 @@ int main(void)
 		test_cancel_cannot_overtake_reserved_carrier();
 #ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
 		test_protection_budget_and_recovery();
+		test_source_backlog_precedes_callback_overrun();
 #endif
 		test_provider(false, 0);
 		test_provider(true, 0);
