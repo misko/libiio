@@ -176,7 +176,8 @@ int spf_hop_session_v1_start(struct spf_hop_session_v1 *session)
 
 static int validate_device_event(struct spf_hop_session_v1 *session,
 	const struct spf_hop_device_event_v1 *device,
-	struct spf_hop_event_v1 *event)
+	struct spf_hop_event_v1 *event, const struct spf_hop_choice_v2 *choice,
+	const struct spf_hop_policy_v2 *policy)
 {
 	const struct spf_hop_profile_v1 *profile;
 	uint8_t expected_from;
@@ -190,13 +191,14 @@ static int validate_device_event(struct spf_hop_session_v1 *session,
 		if (device->kind != SPF_HOP_EVENT_STARTUP)
 			return -EILSEQ;
 	} else {
-		expected_from = (uint8_t)((device->dwell_index - 1) %
-			SPF_HOP_PROFILE_COUNT);
+		expected_from = choice ? session->last_event.device.to_profile :
+			(uint8_t)((device->dwell_index - 1) % SPF_HOP_PROFILE_COUNT);
 		if (device->kind != SPF_HOP_EVENT_RETUNE)
 			return -EILSEQ;
 	}
 	if (device->from_profile != expected_from ||
-		device->to_profile != device->dwell_index % SPF_HOP_PROFILE_COUNT ||
+		device->to_profile >= SPF_HOP_PROFILE_COUNT ||
+		(!choice && device->to_profile != device->dwell_index % SPF_HOP_PROFILE_COUNT) ||
 		device->flags != SPF_HOP_EVENT_FLAGS_V1 ||
 		!device->device_event_id ||
 		device->transition_before > device->transition_after ||
@@ -225,6 +227,13 @@ static int validate_device_event(struct spf_hop_session_v1 *session,
 		device->transition_before;
 	event->invalid_end = device->transition_after +
 		session->request.transition_guard_samples;
+	if (choice && (!policy || choice->generation != policy->generation ||
+		choice->mode != policy->mode || spf_hop_choice_v2_validate(choice, event) ||
+		choice->consecutive_misses > policy->missed_dwells ||
+		choice->cooldown_remaining_samples >
+			session->request.sample_rate_hz * policy->cooldown_ms / 1000 ||
+		(session->have_last_event && choice->decision_counter < event->invalid_start)))
+		return -EBADMSG;
 	if (session->have_last_event) {
 		if (event->invalid_start < session->last_event.invalid_end ||
 			device->transition_before < event->invalid_start ||
@@ -282,9 +291,9 @@ static int maybe_complete(struct spf_hop_session_v1 *session,
 		SPF_HOP_STATE_COMPLETED, final_counter);
 }
 
-int spf_hop_session_v1_on_block(struct spf_hop_session_v1 *session,
+static int session_on_block(struct spf_hop_session_v1 *session,
 	uint64_t buffer_sequence, uint64_t first_sample, uint64_t block_end,
-	struct spf_hop_sidecar_v1 *sidecar)
+	struct spf_hop_sidecar_v1 *sidecar, struct spf_hop_session_v2 *adaptive)
 {
 	struct spf_hop_device_event_v1 device_events[SPF_HOP_EVENT_CAPACITY];
 	uint64_t dropped_events = 0;
@@ -319,8 +328,12 @@ int spf_hop_session_v1_on_block(struct spf_hop_session_v1 *session,
 		device_events[i].transition_after = extend_counter_near(
 			device_events[i].transition_before,
 			device_events[i].transition_after);
+		if (adaptive)
+			adaptive->pending[i].decision_counter = extend_counter_near(
+				device_events[i].transition_before, adaptive->pending[i].decision_counter);
 		ret = validate_device_event(session, &device_events[i],
-			&sidecar->events[i]);
+			&sidecar->events[i], adaptive ? &adaptive->pending[i] : NULL,
+			adaptive ? &adaptive->request.policy : NULL);
 		if (ret)
 			return fail(session,
 				ret == -EILSEQ ? SPF_HOP_REASON_EVENT_SEQUENCE :
@@ -346,6 +359,12 @@ int spf_hop_session_v1_on_block(struct spf_hop_session_v1 *session,
 	return 0;
 }
 
+int spf_hop_session_v1_on_block(struct spf_hop_session_v1 *session,
+	uint64_t sequence, uint64_t first, uint64_t end, struct spf_hop_sidecar_v1 *sidecar)
+{
+	return session_on_block(session, sequence, first, end, sidecar, NULL);
+}
+
 int spf_hop_session_v1_cancel(struct spf_hop_session_v1 *session,
 	uint16_t reason)
 {
@@ -364,3 +383,77 @@ void spf_hop_session_v1_get_status(const struct spf_hop_session_v1 *session,
 	if (session && status)
 		*status = session->status;
 }
+
+static int adaptive_submit(void *opaque, const struct spf_hop_request_v1 *geometry)
+{
+	struct spf_hop_session_v2 *s = opaque;
+	(void)geometry;
+	return s->ops->submit_plan(s->device_context, &s->request);
+}
+
+static int adaptive_drain(void *opaque, struct spf_hop_device_event_v1 *events,
+	size_t capacity, size_t *count, uint64_t *dropped)
+{
+	struct spf_hop_session_v2 *s = opaque;
+	struct spf_hop_device_event_v2 incoming[SPF_HOP_EVENT_CAPACITY];
+	size_t i;
+	int ret;
+	if (capacity > SPF_HOP_EVENT_CAPACITY) return -EINVAL;
+	ret = s->ops->drain_events(s->device_context, incoming, capacity, count, dropped);
+	if (ret) return ret;
+	if (*count > capacity) return -EOVERFLOW;
+	for (i = 0; i < *count; ++i) {
+		events[i] = incoming[i].device;
+		s->pending[i] = incoming[i].choice;
+	}
+	return 0;
+}
+
+static int adaptive_restore(void *opaque, uint16_t reason, struct spf_hop_restore_receipt_v1 *r)
+{
+	struct spf_hop_session_v2 *s = opaque;
+	return s->ops->cancel_restore(s->device_context, reason, r);
+}
+
+static const struct spf_hop_device_ops_v1 adaptive_core_ops = {
+	.submit_plan = adaptive_submit, .drain_events = adaptive_drain,
+	.cancel_restore = adaptive_restore,
+};
+
+int spf_hop_session_v2_init(struct spf_hop_session_v2 *s, const struct spf_hop_request_v2 *r,
+	const struct spf_hop_device_ops_v2 *ops, void *context)
+{
+	uint8_t wire[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
+	int ret;
+	if (!s || !r || !ops || !ops->submit_plan || !ops->drain_events || !ops->cancel_restore)
+		return -EINVAL;
+	ret = spf_hop_request_v2_encode(wire, sizeof(wire), r);
+	if (ret) return ret;
+	memset(s, 0, sizeof(*s));
+	s->request = *r;
+	s->ops = ops;
+	s->device_context = context;
+	return spf_hop_session_v1_init(&s->core, &r->geometry, &adaptive_core_ops, s);
+}
+
+int spf_hop_session_v2_start(struct spf_hop_session_v2 *s)
+{ return s ? spf_hop_session_v1_start(&s->core) : -EINVAL; }
+
+int spf_hop_session_v2_on_block(struct spf_hop_session_v2 *s, uint64_t sequence,
+	uint64_t first, uint64_t end, struct spf_hop_sidecar_v2 *sidecar)
+{
+	struct spf_hop_sidecar_v2 out = {0};
+	int ret;
+	if (!s || !sidecar) return -EINVAL;
+	ret = session_on_block(&s->core, sequence, first, end, &out.geometry, s);
+	if (ret) return ret;
+	memcpy(out.choices, s->pending, out.geometry.event_count * sizeof(out.choices[0]));
+	*sidecar = out;
+	return 0;
+}
+
+int spf_hop_session_v2_cancel(struct spf_hop_session_v2 *s, uint16_t reason)
+{ return s ? spf_hop_session_v1_cancel(&s->core, reason) : -EINVAL; }
+
+void spf_hop_session_v2_get_status(const struct spf_hop_session_v2 *s, struct spf_hop_status_v1 *out)
+{ if (s) spf_hop_session_v1_get_status(&s->core, out); }

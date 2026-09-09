@@ -19,9 +19,13 @@ struct spf_hop_scheduler_v1 {
 	struct spf_hop_request_v1 request;
 	struct spf_hop_scheduler_io_v1 io;
 	void *io_context;
+	struct spf_hop_request_v2 adaptive_request;
+	struct spf_hop_scheduler_policy_v2 policy;
+	void *policy_context;
+	bool adaptive;
 	pthread_mutex_t lock;
 	pthread_t thread;
-	struct spf_hop_device_event_v1 queue[SPF_HOP_SCHEDULER_QUEUE_CAPACITY];
+	struct spf_hop_device_event_v2 queue[SPF_HOP_SCHEDULER_QUEUE_CAPACITY];
 	struct spf_hop_restore_receipt_v1 restore_receipt;
 	size_t queue_head;
 	size_t queue_count;
@@ -89,7 +93,7 @@ static int wait_until(struct spf_hop_scheduler_v1 *scheduler,
 }
 
 static int enqueue_event(struct spf_hop_scheduler_v1 *scheduler,
-	const struct spf_hop_device_event_v1 *event)
+	const struct spf_hop_device_event_v2 *event)
 {
 	size_t tail;
 
@@ -124,8 +128,10 @@ static void *scheduler_worker(void *opaque)
 	struct spf_hop_scheduler_v1 *scheduler = opaque;
 	struct spf_hop_scheduler_transition_v1 transition;
 	struct spf_hop_device_event_v1 event;
+	struct spf_hop_device_event_v2 adaptive_event;
 	uint64_t startup_invalid_start = 0;
 	uint64_t next_invalid_start = 0;
+	uint8_t previous_profile = SPF_HOP_PROFILE_NONE;
 	uint64_t index;
 	int ret = 0;
 
@@ -143,6 +149,23 @@ static void *scheduler_worker(void *opaque)
 		} else if (cancellation_requested(scheduler)) {
 			ret = -ECANCELED;
 			break;
+		}
+		memset(&adaptive_event, 0, sizeof(adaptive_event));
+		if (scheduler->adaptive) {
+			uint64_t now;
+			ret = scheduler->io.get_counter(scheduler->io_context, &now);
+			if (ret) { ret = ret > 0 ? -EIO : ret; break; }
+			ret = scheduler->policy.choose(scheduler->policy_context, index, now,
+				&adaptive_event.choice);
+			if (ret) { ret = ret > 0 ? -EIO : ret; break; }
+			if (adaptive_event.choice.decision_counter != now ||
+				adaptive_event.choice.generation != scheduler->adaptive_request.policy.generation ||
+				adaptive_event.choice.mode != scheduler->adaptive_request.policy.mode ||
+				adaptive_event.choice.proposed_target >= SPF_HOP_PROFILE_COUNT) {
+				ret = -EBADMSG; break;
+			}
+			if (scheduler->adaptive_request.policy.mode == SPF_HOP_ADAPTIVE)
+				profile = (uint8_t)adaptive_event.choice.proposed_target;
 		}
 
 		memset(&transition, 0, sizeof(transition));
@@ -171,18 +194,12 @@ static void *scheduler_worker(void *opaque)
 		event.actual_lo_frequency_hz = transition.actual_lo_frequency_hz;
 		event.actual_if_offset_hz = scheduler->request.if_offset_hz;
 		event.device_event_id = transition.device_event_id;
-		event.from_profile = index ? (uint8_t)((index - 1) %
-			SPF_HOP_PROFILE_COUNT) : SPF_HOP_PROFILE_NONE;
+		event.from_profile = previous_profile;
 		event.to_profile = profile;
 		event.kind = index ? SPF_HOP_EVENT_RETUNE : SPF_HOP_EVENT_STARTUP;
 		event.flags = SPF_HOP_EVENT_FLAGS_V1;
 		event.fastlock_slot =
 			scheduler->request.profiles[profile].fastlock_slot;
-		ret = enqueue_event(scheduler, &event);
-		if (ret)
-			break;
-		if (!index)
-			startup_invalid_start = transition.transition_before;
 		if (transition.transition_after > UINT64_MAX -
 				scheduler->request.transition_guard_samples ||
 			transition.transition_after +
@@ -194,6 +211,21 @@ static void *scheduler_worker(void *opaque)
 		next_invalid_start = transition.transition_after +
 			scheduler->request.transition_guard_samples +
 			scheduler->request.dwell_samples;
+		adaptive_event.device = event;
+		if (scheduler->adaptive) {
+			struct spf_hop_event_v1 checked = {0};
+			checked.device = event;
+			ret = spf_hop_choice_v2_validate(&adaptive_event.choice, &checked);
+			if (ret) break;
+			ret = scheduler->policy.commit(scheduler->policy_context, &adaptive_event,
+				transition.transition_after + scheduler->request.transition_guard_samples,
+				next_invalid_start);
+			if (ret) { ret = ret > 0 ? -EIO : ret; break; }
+		}
+		ret = enqueue_event(scheduler, &adaptive_event);
+		if (ret) break;
+		previous_profile = profile;
+		if (!index) startup_invalid_start = transition.transition_before;
 	}
 	if (!ret && index == scheduler->request.dwell_count &&
 		(next_invalid_start < startup_invalid_start ||
@@ -245,7 +277,7 @@ static int scheduler_drain(void *opaque,
 		capacity;
 	for (i = 0; i < count; i++)
 		events[i] = scheduler->queue[(scheduler->queue_head + i) %
-			SPF_HOP_SCHEDULER_QUEUE_CAPACITY];
+			SPF_HOP_SCHEDULER_QUEUE_CAPACITY].device;
 	scheduler->queue_head = (scheduler->queue_head + count) %
 		SPF_HOP_SCHEDULER_QUEUE_CAPACITY;
 	scheduler->queue_count -= count;
@@ -356,3 +388,68 @@ void spf_hop_scheduler_v1_destroy(void *device_context)
 	pthread_mutex_destroy(&scheduler->lock);
 	free(scheduler);
 }
+
+static int scheduler_submit_v2(void *opaque, const struct spf_hop_request_v2 *request)
+{
+	struct spf_hop_scheduler_v1 *s = opaque;
+	uint8_t actual[SPF_HOP_ADAPTIVE_REQUEST_BYTES], expected[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
+	if (!s || !s->adaptive || !request ||
+		spf_hop_request_v2_encode(actual, sizeof(actual), request) ||
+		spf_hop_request_v2_encode(expected, sizeof(expected), &s->adaptive_request) ||
+		memcmp(actual, expected, sizeof(actual))) return -EINVAL;
+	return scheduler_submit(s, &request->geometry);
+}
+
+static int scheduler_drain_v2(void *opaque, struct spf_hop_device_event_v2 *events,
+	size_t capacity, size_t *count, uint64_t *dropped)
+{
+	struct spf_hop_scheduler_v1 *s = opaque;
+	size_t i, n;
+	int ret;
+	if (!s || !s->adaptive || (!events && capacity) || !count || !dropped) return -EINVAL;
+	pthread_mutex_lock(&s->lock);
+	n = s->queue_count < capacity ? s->queue_count : capacity;
+	for (i = 0; i < n; ++i)
+		events[i] = s->queue[(s->queue_head + i) % SPF_HOP_SCHEDULER_QUEUE_CAPACITY];
+	s->queue_head = (s->queue_head + n) % SPF_HOP_SCHEDULER_QUEUE_CAPACITY;
+	s->queue_count -= n;
+	*count = n;
+	*dropped = s->dropped_events;
+	ret = s->worker_error;
+	pthread_mutex_unlock(&s->lock);
+	return ret;
+}
+
+static const struct spf_hop_device_ops_v2 scheduler_ops_v2 = {
+	.submit_plan = scheduler_submit_v2, .drain_events = scheduler_drain_v2,
+	.cancel_restore = scheduler_cancel_restore,
+};
+
+int spf_hop_scheduler_v2_create(const struct spf_hop_request_v2 *request,
+	const struct spf_hop_scheduler_io_v1 *io, void *io_context,
+	const struct spf_hop_scheduler_policy_v2 *policy, void *policy_context,
+	void **context, const struct spf_hop_device_ops_v2 **ops)
+{
+	uint8_t wire[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
+	const struct spf_hop_device_ops_v1 *unused;
+	struct spf_hop_scheduler_v1 *s;
+	void *created;
+	int ret;
+	if (!request || !policy || !policy->choose || !policy->commit || !context || !ops)
+		return -EINVAL;
+	ret = spf_hop_request_v2_encode(wire, sizeof(wire), request);
+	if (ret) return ret;
+	ret = spf_hop_scheduler_v1_create(&request->geometry, io, io_context, &created, &unused);
+	if (ret) return ret;
+	s = created;
+	s->adaptive = true;
+	s->adaptive_request = *request;
+	s->policy = *policy;
+	s->policy_context = policy_context;
+	*context = s;
+	*ops = &scheduler_ops_v2;
+	return 0;
+}
+
+void spf_hop_scheduler_v2_destroy(void *context)
+{ spf_hop_scheduler_v1_destroy(context); }

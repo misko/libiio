@@ -86,6 +86,7 @@ if (IIOD_BUFFER_METADATA_PROVIDER)
 		if (IIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER)
 			set(SPF_HOP_SOURCES
 				${CMAKE_CURRENT_SOURCE_DIR}/spf-hop-protocol.c
+				${CMAKE_CURRENT_SOURCE_DIR}/spf-hop-adaptive-protocol.c
 				${CMAKE_CURRENT_SOURCE_DIR}/spf-hop-session.c
 				${CMAKE_CURRENT_SOURCE_DIR}/spf-hop-scheduler.c
 				${IIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER})
@@ -159,7 +160,7 @@ if(IIOD_SCANNER_GLRT_LIBRARY)
 			message(FATAL_ERROR "Scanner GLRT ${GLRT_HASH} must be a nonzero lowercase SHA-256")
 		endif()
 	endforeach()
-	list(APPEND IIOD_METADATA_CFILES spf-scanner-glrt.c)
+	list(APPEND IIOD_METADATA_CFILES spf-scanner-glrt.c spf-hop-adaptive-policy.c)
 	# Treat the explicitly supplied SDK as an exact artifact, including when
 	# its basename does not follow libNAME.so or it has no SONAME. Linking a
 	# guessed -lNAME can select the wrong library or fail despite this path.
@@ -287,6 +288,18 @@ if(WITH_TESTS AND WITH_XML_BACKEND)
 endif()
 
 if(WITH_TESTS AND IIOD_SCANNER_GLRT_LIBRARY)
+	add_executable(test_spf_hop_adaptive_native ../tests/test_spf_hop_adaptive.c
+		spf-hop-adaptive-policy.c spf-hop-adaptive-protocol.c spf-hop-protocol.c
+		spf-hop-scheduler.c spf-hop-session.c)
+	target_compile_definitions(test_spf_hop_adaptive_native PRIVATE SPF_HOP_TEST_NATIVE_POLICY=1)
+	target_link_libraries(test_spf_hop_adaptive_native ${PTHREAD_LIBRARIES})
+	iiod_configure_scanner_glrt(test_spf_hop_adaptive_native)
+	set_target_properties(test_spf_hop_adaptive_native PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+	add_executable(test_spf_hop_adaptive_policy ../tests/test_spf_hop_adaptive_policy.c
+		spf-hop-adaptive-policy.c spf-hop-adaptive-protocol.c spf-hop-protocol.c)
+	target_link_libraries(test_spf_hop_adaptive_policy ${PTHREAD_LIBRARIES})
+	iiod_configure_scanner_glrt(test_spf_hop_adaptive_policy)
+	set_target_properties(test_spf_hop_adaptive_policy PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
 	set(GLRT_FIXTURE_SOURCES ${IIOD_METADATA_CFILES})
 	list(REMOVE_ITEM GLRT_FIXTURE_SOURCES ${IIOD_BUFFER_METADATA_PROVIDER})
 	add_executable(test_scanner_glrt_provider ../tests/test_scanner_glrt_provider.c

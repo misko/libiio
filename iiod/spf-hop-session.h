@@ -3,6 +3,7 @@
 #define __SPF_HOP_SESSION_H__
 
 #include "spf-hop-protocol.h"
+#include "spf-hop-adaptive-protocol.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -56,5 +57,34 @@ int spf_hop_session_v1_cancel(struct spf_hop_session_v1 *session,
 	uint16_t reason);
 void spf_hop_session_v1_get_status(const struct spf_hop_session_v1 *session,
 	struct spf_hop_status_v1 *status);
+
+struct spf_hop_device_event_v2 {
+	struct spf_hop_device_event_v1 device;
+	struct spf_hop_choice_v2 choice;
+};
+
+struct spf_hop_device_ops_v2 {
+	int (*submit_plan)(void *, const struct spf_hop_request_v2 *);
+	int (*drain_events)(void *, struct spf_hop_device_event_v2 *, size_t,
+		size_t *, uint64_t *);
+	int (*cancel_restore)(void *, uint16_t, struct spf_hop_restore_receipt_v1 *);
+};
+
+struct spf_hop_session_v2 {
+	/* Shared lifecycle/counter geometry, never exposed as a V1 recording. */
+	struct spf_hop_session_v1 core;
+	struct spf_hop_request_v2 request;
+	const struct spf_hop_device_ops_v2 *ops;
+	void *device_context;
+	struct spf_hop_choice_v2 pending[SPF_HOP_EVENT_CAPACITY];
+};
+
+int spf_hop_session_v2_init(struct spf_hop_session_v2 *, const struct spf_hop_request_v2 *,
+	const struct spf_hop_device_ops_v2 *, void *);
+int spf_hop_session_v2_start(struct spf_hop_session_v2 *);
+int spf_hop_session_v2_on_block(struct spf_hop_session_v2 *, uint64_t, uint64_t,
+	uint64_t, struct spf_hop_sidecar_v2 *);
+int spf_hop_session_v2_cancel(struct spf_hop_session_v2 *, uint16_t);
+void spf_hop_session_v2_get_status(const struct spf_hop_session_v2 *, struct spf_hop_status_v1 *);
 
 #endif
