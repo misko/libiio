@@ -96,8 +96,19 @@ int spf_scanner_glrt_open(struct spf_scanner_glrt **output,
 		return -ENOMEM;
 	ret = pthread_mutex_init(&state->lock, NULL);
 	if (ret) { free(state); return -ret; }
+#ifdef IIOD_SCANNER_GLRT_POSITIVE_ONLY
+	{
+		const leo_scanner_glrt_positive_policy_v1 policy = {
+			.minimum_exact_score = IIOD_SCANNER_GLRT_MINIMUM_EXACT_SCORE,
+			.minimum_margin = IIOD_SCANNER_GLRT_MINIMUM_MARGIN,
+		};
+		ret = leo_scanner_glrt_open_positive(&state->session, &config,
+			IIOD_SCANNER_GLRT_WORKER_PATH, templates, &policy);
+	}
+#else
 	ret = leo_scanner_glrt_open(&state->session, &config,
 		IIOD_SCANNER_GLRT_WORKER_PATH, templates);
+#endif
 	if (ret) {
 		pthread_mutex_destroy(&state->lock);
 		free(state);

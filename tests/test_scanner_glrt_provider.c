@@ -321,7 +321,11 @@ static unsigned int consume_results(const uint8_t *packet)
 		assert(read64(record + 24) == fixture_first + 71 + fixture_rate / 50 * 6);
 		assert(read32(record + 64) == fixture_rate && record[68] == 1 && record[69] == 0);
 		assert(record[70] == 1 && record[71] == 0); /* RX1, unavailable */
+#ifdef IIOD_SCANNER_GLRT_POSITIVE_ONLY
+		assert(read32(record + 72) == (inject_failure ? 2U : 4U)); /* failed or not confirmed */
+#else
 		assert(read32(record + 72) == (inject_failure ? 2U : 5U)); /* failed or unqualified */
+#endif
 		assert(read32(record + 76) == (inject_failure ? 0U : 63U));
 	}
 	return count;

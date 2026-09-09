@@ -170,7 +170,7 @@ int main(int argc, char **argv)
 		"<context-attribute name=\"iio,buffer-persistent-hop-cancel\" value=\"1\"/>"
 		"<context-attribute name=\"iio,buffer-metadata-drain\" value=\"1\"/>"
 		"<context-attribute name=\"iio,buffer-scanner-glrt\" value=\"1\"/>"
-		"<context-attribute name=\"iio,buffer-scanner-glrt-mode\" value=\"unqualified-evidence\"/>"
+		"<context-attribute name=\"iio,buffer-scanner-glrt-mode\" value=\"" IIOD_SCANNER_GLRT_MODE "\"/>"
 		"<context-attribute name=\"iio,buffer-scanner-glrt-algorithm-sha256\" value=\"%s\"/>"
 		"<context-attribute name=\"iio,buffer-scanner-glrt-configuration-sha256\" value=\"%s\"/>"
 		"<device id=\"dev0\" name=\"cf-ad9361-lpc\">"

@@ -753,7 +753,7 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 #ifdef IIOD_HAS_SCANNER_GLRT
 		static const char *const glrt_attrs[][2] = {
 			{"iio,buffer-scanner-glrt", "1"},
-			{"iio,buffer-scanner-glrt-mode", "unqualified-evidence"},
+			{"iio,buffer-scanner-glrt-mode", IIOD_SCANNER_GLRT_MODE},
 			{"iio,buffer-scanner-glrt-algorithm-sha256", IIOD_SCANNER_GLRT_ALGORITHM_SHA256},
 			{"iio,buffer-scanner-glrt-configuration-sha256", IIOD_SCANNER_GLRT_CONFIGURATION_SHA256},
 		};
