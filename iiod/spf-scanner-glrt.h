@@ -21,6 +21,15 @@ void spf_scanner_glrt_close(struct spf_scanner_glrt *);
 void spf_scanner_glrt_begin_frame(struct spf_scanner_glrt *);
 void spf_scanner_glrt_feed(struct spf_scanner_glrt *,
 	const struct spf_hop_sidecar_v1 *, const int16_t *dual_rx_iq, size_t samples);
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+/* One sample per accepted block, after formatting: measured metadata/GLRT
+ * callback cost, or an observed sample-counter gap, sheds subsequent checks.
+ * This does not measure network-send, DMA/IRQ or all other acquisition work. */
+void spf_scanner_glrt_capture_budget(struct spf_scanner_glrt *,
+	uint64_t callback_ns, uint64_t missing_samples);
+int spf_scanner_glrt_protection_stats(struct spf_scanner_glrt *,
+	leo_scanner_glrt_protection_stats_v1 *);
+#endif
 void spf_scanner_glrt_finish(struct spf_scanner_glrt *, int cancelled);
 ssize_t spf_scanner_glrt_frame(struct spf_scanner_glrt *, const void *legacy,
 	size_t legacy_bytes, void *output, size_t capacity);

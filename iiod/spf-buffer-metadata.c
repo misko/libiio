@@ -208,6 +208,15 @@ static uint64_t make_stream_id(const void *address)
 	return value ? value : UINT64_C(1);
 }
 
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+static uint64_t scanner_callback_clock(void)
+{
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now)) return UINT64_MAX;
+	return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+}
+#endif
+
 #ifdef IIOD_HAS_SCANNER_GLRT
 static ssize_t scanner_glrt_drain(void *provider_context, void *output,
 	size_t capacity)
@@ -710,6 +719,9 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		size_t raw_bytes, void *metadata, size_t metadata_capacity,
 		size_t *iq_offset, size_t *iq_bytes)
 {
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+	uint64_t callback_start = scanner_callback_clock();
+#endif
 	struct spf_iiod_metadata_context *ctx = provider_context;
 	spf_gain_observation_v3_t observations[SPF_IIOD_OBSERVATION_CAPACITY];
 	struct adi_tandem_agc_event events[SPF_TANDEM_EVENT_QUEUE_CAPACITY];
@@ -968,9 +980,17 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	*iq_offset = sizeof(first_sample_sequence);
 	*iq_bytes = ctx->layout.iq_bytes;
 #ifdef IIOD_HAS_SCANNER_GLRT
-	if (ctx->glrt)
-		return spf_scanner_glrt_frame(ctx->glrt, metadata, total_metadata_bytes,
+	if (ctx->glrt) {
+		ssize_t bytes = spf_scanner_glrt_frame(ctx->glrt, metadata, total_metadata_bytes,
 			frame_metadata, frame_capacity);
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+		uint64_t callback_end = scanner_callback_clock();
+		spf_scanner_glrt_capture_budget(ctx->glrt,
+			callback_start == UINT64_MAX || callback_end == UINT64_MAX || callback_end < callback_start ?
+				UINT64_MAX : callback_end - callback_start, sequence.missing_samples_before);
+#endif
+		return bytes;
+	}
 #endif
 	return (ssize_t)total_metadata_bytes;
 }

@@ -64,8 +64,28 @@ def test_default_remains_unqualified_and_links_exact_sdk_path(tmp_path):
     flags = (build / "iiod/CMakeFiles/iiod.dir/flags.make").read_text()
     assert "unqualified-evidence" in flags and "POSITIVE_ONLY" not in flags
     assert "IIOD_HAS_SCANNER_ADAPTIVE_HOP" not in flags
+    assert "IIOD_SCANNER_GLRT_CAPTURE_PROTECTION" not in flags
     link = (build / "iiod/CMakeFiles/iiod.dir/link.txt").read_text()
     assert str(sdk) in link and "-lcandidate-sdk" not in link
+
+
+def test_capture_protection_requires_explicit_sdk(tmp_path):
+    result, _, _ = configure(tmp_path, "-DIIOD_SCANNER_GLRT_LIBRARY=",
+                             "-DIIOD_SCANNER_GLRT_CAPTURE_PROTECTION=ON")
+    assert result.returncode != 0
+    assert "capture protection requires an explicit GLRT SDK" in result.stderr
+
+
+@pytest.mark.parametrize("mode", ["unqualified-evidence", "positive-only-v1"])
+def test_capture_protection_is_an_explicit_additive_opt_in(tmp_path, mode):
+    options = ["-DIIOD_SCANNER_GLRT_CAPTURE_PROTECTION=ON", f"-DIIOD_SCANNER_GLRT_MODE={mode}"]
+    if mode == "positive-only-v1":
+        options += ["-DIIOD_SCANNER_GLRT_MINIMUM_EXACT_SCORE=0.175",
+                    "-DIIOD_SCANNER_GLRT_MINIMUM_MARGIN=0.025"]
+    result, build, _ = configure(tmp_path, *options)
+    assert result.returncode == 0, result.stderr
+    flags = (build / "iiod/CMakeFiles/iiod.dir/flags.make").read_text()
+    assert "IIOD_SCANNER_GLRT_CAPTURE_PROTECTION=1" in flags
 
 
 @pytest.mark.parametrize(

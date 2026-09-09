@@ -15,6 +15,9 @@ struct spf_scanner_glrt {
 	uint64_t session_id, dwell_samples;
 	int finished, frame_pending;
 	atomic_int drain_ready;
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+	uint64_t callback_budget_ns;
+#endif
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
 	struct spf_hop_adaptive_policy *policy;
 	int acquisition_started;
@@ -148,7 +151,21 @@ int spf_scanner_glrt_open(struct spf_scanner_glrt **output,
 	ret = leo_scanner_glrt_open(&state->session, &config,
 		IIOD_SCANNER_GLRT_WORKER_PATH, templates);
 #endif
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+	if (!ret) {
+		/* Engineering profile, not a claim of qualified live-duty headroom.
+		 * The reviewed release identity must bind this explicit opt-in. */
+		const leo_scanner_glrt_protection_v1 protection = {
+			.max_occupied_slots = 2, .admission_age_ms = 250,
+			.worker_timeout_ms = 500, .recovery_blocks = 4,
+		};
+		ret = leo_scanner_glrt_enable_protection(state->session, &protection);
+		state->callback_budget_ns = (uint64_t)block_samples * UINT64_C(1000000000) /
+			config.rate_hz * 4 / 5;
+	}
+#endif
 	if (ret) {
+		leo_scanner_glrt_close(state->session);
 		pthread_mutex_destroy(&state->lock);
 		free(state);
 		return ret;
@@ -159,6 +176,32 @@ int spf_scanner_glrt_open(struct spf_scanner_glrt **output,
 	*output = state;
 	return 0;
 }
+
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+void spf_scanner_glrt_capture_budget(struct spf_scanner_glrt *s,
+	uint64_t callback_ns, uint64_t missing_samples)
+{
+	if (!s) return;
+	pthread_mutex_lock(&s->lock);
+	if (!s->finished) {
+		(void)leo_scanner_glrt_capture_pressure(s->session,
+			missing_samples || callback_ns >= s->callback_budget_ns);
+		publish_observations(s);
+	}
+	pthread_mutex_unlock(&s->lock);
+}
+
+int spf_scanner_glrt_protection_stats(struct spf_scanner_glrt *s,
+	leo_scanner_glrt_protection_stats_v1 *out)
+{
+	int ret;
+	if (!s || !out) return -EINVAL;
+	pthread_mutex_lock(&s->lock);
+	ret = leo_scanner_glrt_protection_stats(s->session, out);
+	pthread_mutex_unlock(&s->lock);
+	return ret;
+}
+#endif
 
 void spf_scanner_glrt_begin_frame(struct spf_scanner_glrt *state)
 {

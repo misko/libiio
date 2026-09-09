@@ -39,6 +39,11 @@
 #undef spf_scanner_glrt_frame
 ssize_t spf_scanner_glrt_frame(struct spf_scanner_glrt *, const void *, size_t, void *, size_t);
 
+#if defined(IIOD_SCANNER_GLRT_CAPTURE_PROTECTION) && !defined(SPF_GLRT_NETWORK_FIXTURE)
+static bool inject_pressure;
+static unsigned int pressure_injections;
+#endif
+
 ssize_t fixture_glrt_frame(struct spf_scanner_glrt *state, const void *legacy,
 	size_t bytes, void *output, size_t capacity)
 {
@@ -46,6 +51,14 @@ ssize_t fixture_glrt_frame(struct spf_scanner_glrt *state, const void *legacy,
 	/* Simulate a drain arriving in the feed/frame gap, including the terminal
 	 * block. It must not consume results, advance sequence or emit FINAL. */
 	assert(spf_scanner_glrt_drain(state, scratch, sizeof(scratch)) == -EBUSY);
+#if defined(IIOD_SCANNER_GLRT_CAPTURE_PROTECTION) && !defined(SPF_GLRT_NETWORK_FIXTURE)
+	if (inject_pressure && !pressure_injections++) {
+		/* Deliberately exceed the real metadata callback's 16 ms budget.
+		 * The production callback never sleeps; only this fixture does. */
+		struct timespec pause = {0, 25000000};
+		while (nanosleep(&pause, &pause) && errno == EINTR) {}
+	}
+#endif
 	return spf_scanner_glrt_frame(state, legacy, bytes, output, capacity);
 }
 
@@ -330,6 +343,35 @@ static void test_cancel_cannot_overtake_reserved_carrier(void)
 	spf_scanner_glrt_close(state);
 }
 
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+static void test_protection_budget_and_recovery(void)
+{
+	uint8_t packet[4096];
+	leo_scanner_glrt_request_v1 decoded;
+	struct spf_hop_request_v1 hop;
+	struct spf_scanner_glrt *state = NULL;
+	leo_scanner_glrt_protection_stats_v1 stats;
+	size_t bytes = make_request(packet, true);
+	assert(leo_scanner_glrt_request_decode(&decoded, packet, bytes) == 0);
+	assert(spf_hop_request_v1_decode(&hop, decoded.legacy_request + 104, SPF_HOP_REQUEST_BYTES) == 0);
+	assert(spf_scanner_glrt_open(&state, &decoded, &hop, fixture_rate / 50) == 0);
+	assert(spf_scanner_glrt_protection_stats(state, &stats) == 0 && stats.enabled);
+	spf_scanner_glrt_capture_budget(state, 15999999, 0); /* 80% of a 20 ms block */
+	assert(spf_scanner_glrt_protection_stats(state, &stats) == 0 && !stats.suspended);
+	spf_scanner_glrt_capture_budget(state, 16000000, 0);
+	assert(spf_scanner_glrt_protection_stats(state, &stats) == 0 && stats.suspended);
+	for (unsigned int j = 0; j < 3; ++j) spf_scanner_glrt_capture_budget(state, 0, 0);
+	assert(spf_scanner_glrt_protection_stats(state, &stats) == 0 && stats.suspended);
+	spf_scanner_glrt_capture_budget(state, 0, 1); /* Source-counter gap resets recovery. */
+	for (unsigned int j = 0; j < 3; ++j) spf_scanner_glrt_capture_budget(state, 0, 0);
+	assert(spf_scanner_glrt_protection_stats(state, &stats) == 0 && stats.suspended);
+	spf_scanner_glrt_capture_budget(state, 0, 0);
+	assert(spf_scanner_glrt_protection_stats(state, &stats) == 0 && !stats.suspended);
+	assert(stats.pressure_entries == 1 && stats.resumptions == 1 && !stats.disabled);
+	spf_scanner_glrt_close(state);
+}
+#endif
+
 static unsigned int consume_results(const uint8_t *packet)
 {
 	unsigned int j, count = packet[16] | (unsigned int)packet[17] << 8;
@@ -341,12 +383,17 @@ static unsigned int consume_results(const uint8_t *packet)
 		assert(read64(record + 24) == fixture_first + 71 + fixture_rate / 50 * 6);
 		assert(read32(record + 64) == fixture_rate && record[68] == 1 && record[69] == 0);
 		assert(record[70] == 1 && record[71] == 0); /* RX1, unavailable */
+		unsigned int expected_mask = inject_failure ? 0U : 63U;
 #ifdef IIOD_SCANNER_GLRT_POSITIVE_ONLY
-		assert(read32(record + 72) == (inject_failure ? 2U : 4U)); /* failed or not confirmed */
+		unsigned int expected_reason = inject_failure ? 2U : 4U;
 #else
-		assert(read32(record + 72) == (inject_failure ? 2U : 5U)); /* failed or unqualified */
+		unsigned int expected_reason = inject_failure ? 2U : 5U;
 #endif
-		assert(read32(record + 76) == (inject_failure ? 0U : 63U));
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+		if (inject_pressure) { expected_mask = 0; expected_reason = 4; }
+#endif
+		assert(read32(record + 72) == expected_reason);
+		assert(read32(record + 76) == expected_mask);
 	}
 	return count;
 }
@@ -362,6 +409,9 @@ static void test_provider(bool enabled, unsigned int delay)
 	assert(iiod_buffer_metadata_open(rx_device, fixture_rate / 50, &mask, 1, 8,
 		request, request_bytes, &context, &extra, &plan) == 0);
 	struct spf_iiod_metadata_context *state = context;
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+	pressure_injections = 0;
+#endif
 	assert(extra == 1 && !!state->glrt == enabled && !!plan.drain_metadata == enabled);
 	state->stream_id = 100; /* deterministic fixture identity */
 	assert(spf_hop_session_v1_start(&state->hop_session) == 0);
@@ -383,6 +433,13 @@ static void test_provider(bool enabled, unsigned int delay)
 		ssize_t bytes = iiod_buffer_metadata_get(context, rx_device, (void *)raw,
 			state->layout.raw_bytes, output, sizeof(output), &offset, &iq_bytes);
 		assert(bytes > 0 && offset == 8 && iq_bytes == state->layout.iq_bytes);
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+		if (enabled && inject_pressure && !frame) {
+			leo_scanner_glrt_protection_stats_v1 stats;
+			assert(spf_scanner_glrt_protection_stats(state->glrt, &stats) == 0);
+			assert(stats.enabled && stats.suspended && stats.pressure_entries == 1);
+		}
+#endif
 		assert(!memcmp(raw, original, state->layout.raw_bytes));
 		const uint8_t *legacy = output; size_t legacy_bytes = (size_t)bytes;
 		if (enabled) {
@@ -434,6 +491,14 @@ static void test_provider(bool enabled, unsigned int delay)
 		}
 		assert(final && records == 1 && read64(output + 48) == 1);
 		assert(plan.drain_metadata(context, output, sizeof(output)) == -ENODATA);
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+		if (inject_pressure) {
+			leo_scanner_glrt_protection_stats_v1 stats;
+			assert(spf_scanner_glrt_protection_stats(state->glrt, &stats) == 0);
+			assert(stats.pressure_skips == 1 && stats.history_blocks_skipped >= 4);
+			assert(stats.resumptions == 1 && !stats.disabled);
+		}
+#endif
 	}
 	iiod_buffer_metadata_close(context);
 	assert(restores == 1);
@@ -447,9 +512,17 @@ int main(void)
 	for (fixture_rate = 2500000; fixture_rate <= 5000000; fixture_rate += 2500000) {
 		test_rejected_open_is_side_effect_free();
 		test_cancel_cannot_overtake_reserved_carrier();
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+		test_protection_budget_and_recovery();
+#endif
 		test_provider(false, 0);
 		test_provider(true, 0);
 		test_provider(true, 2);
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+		inject_pressure = true;
+		test_provider(true, 0);
+		inject_pressure = false;
+#endif
 		inject_failure = true;
 		test_provider(true, 0);
 		inject_failure = false;
