@@ -344,8 +344,31 @@ static void test_userspace_low_counter_is_anchored_across_wrap(void)
 	assert(session.status.restore_after == epoch + UINT64_C(0x100000162));
 }
 
+static void test_arm_does_not_submit_or_start_after_cancellation(void)
+{
+	struct spf_hop_request_v1 request = make_request();
+	struct spf_hop_session_v1 session;
+	struct fake_device device = {0};
+	init_receipt(&device, 1234);
+	assert(spf_hop_session_v1_arm(NULL) == -EINVAL);
+	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
+	assert(spf_hop_session_v1_arm(&session) == 0);
+	assert(session.status.state == SPF_HOP_STATE_ARMED && device.submit_calls == 0);
+	assert(spf_hop_session_v1_arm(&session) == -EINVAL);
+	assert(spf_hop_session_v1_cancel(&session, SPF_HOP_REASON_CLIENT_CLOSE) == 0);
+	assert(device.submit_calls == 0 && device.restore_calls == 1);
+	assert(spf_hop_session_v1_start(&session) == -EINVAL);
+	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
+	assert(spf_hop_session_v1_arm(&session) == 0);
+	assert(spf_hop_session_v1_start(&session) == 0);
+	assert(device.submit_calls == 1 && session.status.state == SPF_HOP_STATE_RUNNING);
+	assert(spf_hop_session_v1_start(&session) == -EINVAL);
+	assert(spf_hop_session_v1_arm(&session) == -EINVAL);
+}
+
 int main(void)
 {
+	test_arm_does_not_submit_or_start_after_cancellation();
 	test_complete_valid_visits();
 	test_restore_cannot_truncate_final_dwell();
 	test_event_sequence_fails_closed();

@@ -613,8 +613,11 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (ctx->hop_enabled) {
 		pthread_mutex_lock(&ctx->hop_lock);
-		ret = ctx->hop_adaptive ? spf_hop_session_v2_start(&ctx->adaptive_session) :
-			spf_hop_session_v1_start(&ctx->hop_session);
+		/* Opening/enabling DMA does not prove the first usable IQ has
+		 * arrived. Starting here races startup latency and optional discarded
+		 * frames, letting the first valid dwell precede delivered IQ. */
+		ret = ctx->hop_adaptive ? spf_hop_session_v2_arm(&ctx->adaptive_session) :
+			spf_hop_session_v1_arm(&ctx->hop_session);
 		pthread_mutex_unlock(&ctx->hop_lock);
 		if (ret)
 			return ret;
@@ -918,6 +921,16 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		int sidecar_bytes;
 
 		pthread_mutex_lock(&ctx->hop_lock);
+		if (hop_status_state(ctx)->state == SPF_HOP_STATE_ARMED) {
+			/* Gain/RSSI and this actual DMA frame have passed validation.
+			 * Prime once, after usable IQ exists, not after a guessed sleep. */
+			ret = ctx->hop_adaptive ? spf_hop_session_v2_start(&ctx->adaptive_session) :
+				spf_hop_session_v1_start(&ctx->hop_session);
+			if (ret) {
+				pthread_mutex_unlock(&ctx->hop_lock);
+				return ret;
+			}
+		}
 		if (ctx->hop_adaptive) {
 			ret = spf_hop_session_v2_on_block(&ctx->adaptive_session,
 				sequence.buffer_sequence, first_sample_sequence,

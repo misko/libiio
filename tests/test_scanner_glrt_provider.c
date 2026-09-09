@@ -27,13 +27,11 @@
 #define spf_hop_device_userspace_v2_open fixture_hop_v2_open
 #define spf_hop_device_userspace_v2_destroy fixture_hop_v2_destroy
 #define spf_scanner_glrt_frame fixture_glrt_frame
-#ifdef SPF_GLRT_NETWORK_FIXTURE
 #define spf_tandem_session_acquire fixture_tandem_acquire
 #define spf_tandem_session_heartbeat fixture_tandem_heartbeat
 #define spf_gain_sampler_limit fixture_sampler_limit
 #define spf_gain_sampler_limit_and_wait_started fixture_sampler_wait
 #define spf_gain_sampler_finish_capture fixture_sampler_finish
-#endif
 #undef _POSIX_C_SOURCE
 #include "../iiod/spf-buffer-metadata.c"
 #undef spf_scanner_glrt_frame
@@ -64,7 +62,8 @@ ssize_t fixture_glrt_frame(struct spf_scanner_glrt *state, const void *legacy,
 
 static uint32_t fixture_rate, register_writes, sampler_starts;
 static uint64_t fixture_first;
-static unsigned int drain_calls, event_delay, restores;
+static unsigned int drain_calls, event_delay, restores, submit_calls;
+static bool empty_gain_frame;
 static struct spf_hop_request_v1 fixture_request;
 #ifndef SPF_GLRT_NETWORK_FIXTURE
 static uint8_t legacy_baseline[7][65536];
@@ -97,16 +96,6 @@ void *fixture_buffer_start(const struct iio_buffer *buffer)
 #endif
 	return data;
 }
-int fixture_tandem_acquire(struct spf_tandem_session *session)
-{ assert(session); return 0; }
-int fixture_tandem_heartbeat(struct spf_tandem_session *session)
-{ assert(session); return 0; }
-void fixture_sampler_limit(spf_gain_sampler_t *sampler, uint64_t samples)
-{ assert(sampler && samples); }
-bool fixture_sampler_wait(spf_gain_sampler_t *sampler, uint64_t samples, uint32_t timeout)
-{ assert(sampler && samples && timeout); return true; }
-bool fixture_sampler_finish(spf_gain_sampler_t *sampler, uint32_t timeout)
-{ assert(sampler && timeout); return true; }
 #else
 void *fixture_buffer_start(const struct iio_buffer *buffer)
 {
@@ -118,6 +107,16 @@ void *fixture_buffer_start(const struct iio_buffer *buffer)
 	return (void *)buffer;
 }
 #endif
+int fixture_tandem_acquire(struct spf_tandem_session *session)
+{ assert(session); return 0; }
+int fixture_tandem_heartbeat(struct spf_tandem_session *session)
+{ assert(session); return 0; }
+void fixture_sampler_limit(spf_gain_sampler_t *sampler, uint64_t samples)
+{ assert(sampler && samples); }
+bool fixture_sampler_wait(spf_gain_sampler_t *sampler, uint64_t samples, uint32_t timeout)
+{ assert(sampler && samples && timeout); return true; }
+bool fixture_sampler_finish(spf_gain_sampler_t *sampler, uint32_t timeout)
+{ assert(sampler && timeout); return true; }
 const struct iio_context *fixture_context(const struct iio_device *dev)
 { assert(dev == rx_device); return (void *)(uintptr_t)48; }
 struct iio_device *fixture_phy(const struct iio_context *ctx, const char *name)
@@ -142,6 +141,7 @@ uint16_t fixture_gain_collect(spf_gain_sampler_t *sampler, uint64_t first,
 	uint32_t samples, spf_gain_observation_v3_t *out, uint16_t capacity, uint32_t *overflow)
 {
 	assert(sampler && samples && capacity);
+	if (empty_gain_frame) { *overflow = 0; return 0; }
 	*out = (spf_gain_observation_v3_t){.sample_sequence_before = first - 2,
 		.sample_sequence_after = first - 1, .read_duration_ns = 1000,
 		.flags = SPF_GAIN_OBSERVATION_VALID | SPF_GAIN_OBSERVATION_SAMPLE_INTERVAL_VALID,
@@ -175,7 +175,7 @@ int fixture_tandem_collect(struct spf_tandem_session *session, uint64_t first,
 	*count = 0; return 0;
 }
 static int fixture_submit(void *opaque, const struct spf_hop_request_v1 *request)
-{ assert(opaque && request->session_id == fixture_request.session_id); return 0; }
+{ assert(opaque && request->session_id == fixture_request.session_id); submit_calls++; return 0; }
 static int fixture_events(void *opaque, struct spf_hop_device_event_v1 *events,
 	size_t capacity, size_t *count, uint64_t *dropped)
 {
@@ -236,7 +236,7 @@ int fixture_hop_open(const struct iio_device *rx, const struct iio_device *phy,
 	const struct spf_hop_device_ops_v1 **ops)
 {
 	assert(rx == rx_device && phy == phy_device && tandem && lock);
-	fixture_request = *request; drain_calls = 0; restores = 0;
+	fixture_request = *request; drain_calls = 0; restores = 0; submit_calls = 0;
 #ifdef SPF_GLRT_NETWORK_FIXTURE
 	network_next_event = 0; network_block_end = fixture_first;
 #endif
@@ -398,6 +398,38 @@ static unsigned int consume_results(const uint8_t *packet)
 	return count;
 }
 
+static void test_hops_wait_for_first_accepted_iq(bool enabled, bool cancel_before_iq)
+{
+	uint8_t request[4096], output[65536];
+	uint32_t mask = 15;
+	size_t extra, offset, iq_bytes, bytes = make_request(request, enabled);
+	struct iiod_buffer_burst_plan plan;
+	void *context = NULL;
+	event_delay = 0;
+	assert(iiod_buffer_metadata_open(rx_device, fixture_rate / 50, &mask, 1, 8,
+		request, bytes, &context, &extra, &plan) == 0);
+	struct spf_iiod_metadata_context *state = context;
+	assert(iiod_buffer_metadata_buffer_opened(context, 8) == 0);
+	assert(state->hop_session.status.state == SPF_HOP_STATE_ARMED);
+	assert(submit_calls == 0); /* Buffer-open is not proof that IQ has arrived. */
+	if (!cancel_before_iq) {
+		uint8_t *raw = calloc(1, state->layout.raw_bytes);
+		assert(raw);
+		memcpy(raw, &fixture_first, sizeof(fixture_first));
+		empty_gain_frame = true;
+		assert(iiod_buffer_metadata_get(context, rx_device, (void *)raw,
+			state->layout.raw_bytes, output, sizeof(output), &offset, &iq_bytes) == -EAGAIN);
+		assert(submit_calls == 0 && state->hop_session.status.state == SPF_HOP_STATE_ARMED);
+		empty_gain_frame = false;
+		assert(iiod_buffer_metadata_get(context, rx_device, (void *)raw,
+			state->layout.raw_bytes, output, sizeof(output), &offset, &iq_bytes) > 0);
+		assert(submit_calls == 1 && state->hop_session.status.state == SPF_HOP_STATE_RUNNING);
+		free(raw);
+	}
+	iiod_buffer_metadata_close(context);
+	assert(restores == 1 && submit_calls == (cancel_before_iq ? 0U : 1U));
+}
+
 static void test_provider(bool enabled, unsigned int delay)
 {
 	uint8_t request[4096], output[65536], scratch[65536];
@@ -511,6 +543,9 @@ int main(void)
 	fixture_first = (UINT64_C(1) << 53) + 10000;
 	for (fixture_rate = 2500000; fixture_rate <= 5000000; fixture_rate += 2500000) {
 		test_rejected_open_is_side_effect_free();
+		test_hops_wait_for_first_accepted_iq(false, false);
+		test_hops_wait_for_first_accepted_iq(true, false);
+		test_hops_wait_for_first_accepted_iq(true, true);
 		test_cancel_cannot_overtake_reserved_carrier();
 #ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
 		test_protection_budget_and_recovery();

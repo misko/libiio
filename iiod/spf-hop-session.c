@@ -158,11 +158,20 @@ int spf_hop_session_v1_init(struct spf_hop_session_v1 *session,
 	return 0;
 }
 
+int spf_hop_session_v1_arm(struct spf_hop_session_v1 *session)
+{
+	if (!session || session->status.state != SPF_HOP_STATE_IDLE)
+		return -EINVAL;
+	session->status.state = SPF_HOP_STATE_ARMED;
+	return 0;
+}
+
 int spf_hop_session_v1_start(struct spf_hop_session_v1 *session)
 {
 	int ret;
 
-	if (!session || session->status.state != SPF_HOP_STATE_IDLE)
+	if (!session || (session->status.state != SPF_HOP_STATE_IDLE &&
+			session->status.state != SPF_HOP_STATE_ARMED))
 		return -EINVAL;
 	session->status.state = SPF_HOP_STATE_ARMED;
 	ret = session->ops->submit_plan(session->device_context,
@@ -435,6 +444,9 @@ int spf_hop_session_v2_init(struct spf_hop_session_v2 *s, const struct spf_hop_r
 	s->device_context = context;
 	return spf_hop_session_v1_init(&s->core, &r->geometry, &adaptive_core_ops, s);
 }
+
+int spf_hop_session_v2_arm(struct spf_hop_session_v2 *s)
+{ return s ? spf_hop_session_v1_arm(&s->core) : -EINVAL; }
 
 int spf_hop_session_v2_start(struct spf_hop_session_v2 *s)
 { return s ? spf_hop_session_v1_start(&s->core) : -EINVAL; }
