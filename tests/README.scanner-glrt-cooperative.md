@@ -47,7 +47,10 @@ The fixture's RX0 sentinel must remain byte-identical across every frame.
 `IIOD_SCANNER_GLRT_FAIR_ADMISSION` also defaults to OFF. It requires all the
 cooperative prerequisites and cooperative skips itself. Its engineering
 profile uses three occupied slots, 450 ms admission age, 500 ms watchdog,
-four recovery blocks, a 120 ms pending-age bound and 2500 ms freshness trigger.
+four recovery blocks, a default 120 ms pending-age bound and 2500 ms freshness trigger.
+`IIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS` explicitly selects 1..240 ms;
+nondefault values require fair admission and a newly pinned/qualified bundle.
+This changes neither the three-slot allocation nor the capture wait behavior.
 All values and this new policy must be bound to a new bundle identity. The
 matching SDK and numerical worker use the private LP03 pool ABI; an older
 worker is not interchangeable even though public wire layouts are unchanged.

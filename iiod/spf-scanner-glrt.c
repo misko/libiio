@@ -179,7 +179,8 @@ int spf_scanner_glrt_open(struct spf_scanner_glrt **output,
 #ifdef IIOD_SCANNER_GLRT_FAIR_ADMISSION
 	if (!ret) {
 		const leo_scanner_glrt_admission_v1 admission = {
-			.maximum_pending_age_ms = 120, .freshness_trigger_ms = 2500,
+			.maximum_pending_age_ms = IIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS,
+			.freshness_trigger_ms = 2500,
 		};
 		ret = leo_scanner_glrt_enable_fair_admission(state->session, &admission);
 	}

@@ -139,6 +139,32 @@ def test_fair_admission_is_never_implied_by_cooperative_build(tmp_path, enabled)
     assert result.returncode == 0, result.stderr
     flags = (build / "iiod/CMakeFiles/iiod.dir/flags.make").read_text()
     assert ("IIOD_SCANNER_GLRT_FAIR_ADMISSION=1" in flags) == enabled
+    assert ("IIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS=120" in flags) == enabled
+
+
+@pytest.mark.parametrize("age", ["1", "120", "200", "240", "0", "241", "-1", "0120", "120.0", "nan", "120;240", ""])
+def test_fair_pending_age_is_explicit_bounded_and_unambiguous(tmp_path, age):
+    result, build, _ = configure(tmp_path,
+        "-DIIOD_SCANNER_GLRT_MODE=positive-only-v1",
+        "-DIIOD_SCANNER_GLRT_MINIMUM_EXACT_SCORE=0.175",
+        "-DIIOD_SCANNER_GLRT_MINIMUM_MARGIN=0.025",
+        "-DIIOD_SCANNER_GLRT_CAPTURE_PROTECTION=ON",
+        "-DIIOD_SCANNER_GLRT_COOPERATIVE_SKIPS=ON",
+        "-DIIOD_SCANNER_GLRT_FAIR_ADMISSION=ON",
+        f"-DIIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS={age}")
+    if age in ("1", "120", "200", "240"):
+        assert result.returncode == 0, result.stderr
+        flags = (build / "iiod/CMakeFiles/iiod.dir/flags.make").read_text()
+        assert f"IIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS={age}" in flags
+    else:
+        assert result.returncode != 0
+        assert "pending age must be an integer in 1..240 ms" in result.stderr
+
+
+def test_nondefault_pending_age_cannot_silently_enable_fair_mode(tmp_path):
+    result, _, _ = configure(tmp_path, "-DIIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS=240")
+    assert result.returncode != 0
+    assert "Nondefault pending age requires explicit fair GLRT admission" in result.stderr
 
 
 @pytest.mark.parametrize("mode", ["unqualified-evidence", "positive-only-v1"])

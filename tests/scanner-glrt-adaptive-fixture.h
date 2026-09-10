@@ -164,6 +164,7 @@ static unsigned adaptive_consume(const uint8_t *packet, unsigned *positives, uns
 static void test_adaptive_provider(unsigned mode, bool cancelled, bool failure, bool pressure)
 {
 	bool expect_fallback = failure;
+	bool fault_injected = false;
 #ifndef IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS
 	expect_fallback = expect_fallback || pressure;
 #endif
@@ -240,15 +241,23 @@ static void test_adaptive_provider(unsigned mode, bool cancelled, bool failure, 
 		assert(!spf_scanner_glrt_admission_stats(state->glrt, &admission));
 		assert(admission.enabled && admission.pending <= 1 && admission.running <= 1);
 #endif
-		if (failure && frames == (pressure ? 130U : 9U))
+		/* A failure-after-recovery scenario must observe actual recovery
+		 * before killing the worker. A fixed frame number can instead kill
+		 * still-pending work and cannot prove numerical recovery. The same
+		 * four-second capture bounds this wait; failure must still occur. */
+		if (failure && !fault_injected &&
+			(pressure ? frames >= 130U && recovered : frames == 9U)) {
+			printf("fault injection rate=%u frame=%u recovered=%u\n", fixture_rate, frames, recovered);
 			spf_scanner_glrt_feed(state->glrt, NULL, NULL, 0);
+			fault_injected = true;
+		}
 		if (cancelled && frames == 9) { assert(!iiod_buffer_metadata_cancel(context)); break; }
 		if (hop.geometry.state == SPF_HOP_STATE_COMPLETED) break;
 		/* Real-time synthetic producer pacing, no RF. Detector completion is
 		 * asynchronous; source time never waits on an individual GLRT result. */
 		struct timespec pause = {0, 20000000}; nanosleep(&pause, NULL);
 	}
-	assert(frames < 240 && restores == 1);
+	assert(frames < 240 && restores == 1 && fault_injected == failure);
 	bool final = false;
 	for (unsigned attempt = 0; attempt < 2500; ++attempt) {
 		ssize_t result = plan.drain_metadata(context, output, sizeof(output));
