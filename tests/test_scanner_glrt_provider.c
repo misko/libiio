@@ -593,7 +593,7 @@ static void test_provider(bool enabled, unsigned int delay)
 
 int main(void)
 {
-	alarm(60);
+	alarm(90);
 	fixture_first = (UINT64_C(1) << 53) + 10000;
 	for (fixture_rate = 2500000; fixture_rate <= 5000000; fixture_rate += 2500000) {
 		test_rejected_open_is_side_effect_free();
@@ -617,10 +617,15 @@ int main(void)
 		test_provider(true, 0);
 		inject_failure = false;
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
-		test_adaptive_provider(SPF_HOP_SHADOW, false, false);
-		test_adaptive_provider(SPF_HOP_ADAPTIVE, false, false);
-		test_adaptive_provider(SPF_HOP_ADAPTIVE, true, false);
-		test_adaptive_provider(SPF_HOP_ADAPTIVE, false, true);
+		test_adaptive_provider(SPF_HOP_SHADOW, false, false, false);
+		test_adaptive_provider(SPF_HOP_ADAPTIVE, false, false, false);
+		test_adaptive_provider(SPF_HOP_ADAPTIVE, true, false, false);
+		test_adaptive_provider(SPF_HOP_ADAPTIVE, false, true, false);
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+		test_adaptive_provider(SPF_HOP_SHADOW, false, false, true);
+		test_adaptive_provider(SPF_HOP_ADAPTIVE, false, false, true);
+		test_adaptive_provider(SPF_HOP_ADAPTIVE, false, true, true);
+#endif
 #endif
 	}
 	puts("SPF GLRT provider: both rates, real worker, delayed events, terminal drain and exact-gap tests passed");

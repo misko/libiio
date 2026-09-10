@@ -65,6 +65,7 @@ def test_default_remains_unqualified_and_links_exact_sdk_path(tmp_path):
     assert "unqualified-evidence" in flags and "POSITIVE_ONLY" not in flags
     assert "IIOD_HAS_SCANNER_ADAPTIVE_HOP" not in flags
     assert "IIOD_SCANNER_GLRT_CAPTURE_PROTECTION" not in flags
+    assert "IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS" not in flags
     link = (build / "iiod/CMakeFiles/iiod.dir/link.txt").read_text()
     assert str(sdk) in link and "-lcandidate-sdk" not in link
 
@@ -74,6 +75,37 @@ def test_capture_protection_requires_explicit_sdk(tmp_path):
                              "-DIIOD_SCANNER_GLRT_CAPTURE_PROTECTION=ON")
     assert result.returncode != 0
     assert "capture protection requires an explicit GLRT SDK" in result.stderr
+
+
+@pytest.mark.parametrize("missing", ["sdk", "protection", "positive"])
+def test_cooperative_skips_require_all_prerequisites(tmp_path, missing):
+    options = ["-DIIOD_SCANNER_GLRT_COOPERATIVE_SKIPS=ON"]
+    if missing == "sdk":
+        options.append("-DIIOD_SCANNER_GLRT_LIBRARY=")
+    if missing != "protection":
+        options.append("-DIIOD_SCANNER_GLRT_CAPTURE_PROTECTION=ON")
+    if missing != "positive":
+        options += ["-DIIOD_SCANNER_GLRT_MODE=positive-only-v1",
+                    "-DIIOD_SCANNER_GLRT_MINIMUM_EXACT_SCORE=0.175",
+                    "-DIIOD_SCANNER_GLRT_MINIMUM_MARGIN=0.025"]
+    result, _, _ = configure(tmp_path, *options)
+    assert result.returncode != 0
+    assert "Cooperative GLRT skips require" in result.stderr
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cooperative_skips_are_never_implied_by_protected_adaptive_build(tmp_path, enabled):
+    options = ["-DIIOD_SCANNER_GLRT_MODE=positive-only-v1",
+               "-DIIOD_SCANNER_GLRT_MINIMUM_EXACT_SCORE=0.175",
+               "-DIIOD_SCANNER_GLRT_MINIMUM_MARGIN=0.025",
+               "-DIIOD_SCANNER_GLRT_CAPTURE_PROTECTION=ON",
+               "-DIIOD_SCANNER_ADAPTIVE_HOP=ON"]
+    if enabled:
+        options.append("-DIIOD_SCANNER_GLRT_COOPERATIVE_SKIPS=ON")
+    result, build, _ = configure(tmp_path, *options)
+    assert result.returncode == 0, result.stderr
+    flags = (build / "iiod/CMakeFiles/iiod.dir/flags.make").read_text()
+    assert ("IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS=1" in flags) == enabled
 
 
 @pytest.mark.parametrize("mode", ["unqualified-evidence", "positive-only-v1"])

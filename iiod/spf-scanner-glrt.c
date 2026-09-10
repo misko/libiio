@@ -167,6 +167,11 @@ int spf_scanner_glrt_open(struct spf_scanner_glrt **output,
 		state->block_samples = block_samples;
 	}
 #endif
+#ifdef IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS
+	/* Startup-only opt-in, bound to a new reviewed bundle configuration. A
+	 * genuine failure still faults; never reinterpret unavailable wire reasons. */
+	if (!ret) ret = leo_scanner_glrt_enable_cooperative_skips(state->session);
+#endif
 	if (ret) {
 		leo_scanner_glrt_close(state->session);
 		pthread_mutex_destroy(&state->lock);
