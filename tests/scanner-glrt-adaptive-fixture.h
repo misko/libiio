@@ -235,6 +235,11 @@ static void test_adaptive_provider(unsigned mode, bool cancelled, bool failure, 
 		struct iiod_buffer_metadata_frame_info info;
 		assert(!iiod_buffer_metadata_describe_frame(context, output, (size_t)result, &info));
 		assert(info.first_sample_sequence == first && !info.missing_samples_before);
+#ifdef IIOD_SCANNER_GLRT_FAIR_ADMISSION
+		leo_scanner_glrt_admission_stats_v1 admission;
+		assert(!spf_scanner_glrt_admission_stats(state->glrt, &admission));
+		assert(admission.enabled && admission.pending <= 1 && admission.running <= 1);
+#endif
 		if (failure && frames == (pressure ? 130U : 9U))
 			spf_scanner_glrt_feed(state->glrt, NULL, NULL, 0);
 		if (cancelled && frames == 9) { assert(!iiod_buffer_metadata_cancel(context)); break; }
@@ -281,6 +286,19 @@ static void test_adaptive_provider(unsigned mode, bool cancelled, bool failure, 
 		assert(stats.history_blocks_skipped >= 36 && stats.disabled == failure);
 		assert(recovered); /* Actual numerical checks resumed after pressure. */
 	}
+#endif
+#ifdef IIOD_SCANNER_GLRT_FAIR_ADMISSION
+	leo_scanner_glrt_admission_stats_v1 admission;
+	assert(!spf_scanner_glrt_admission_stats(state->glrt, &admission));
+	assert(admission.enabled && !admission.pending && !admission.running);
+	if (getenv("SPF_EXPECT_FAIR_SHEDDING") && !cancelled && !failure && !pressure) {
+		assert(admission.dispatched && admission.dispatched < records);
+		assert(admission.replacements || admission.expired || admission.freshness_skips);
+	}
+	printf("fair provider rate=%u mode=%u dispatched=%llu replaced=%llu expired=%llu freshness=%llu pressure_drops=%llu\n",
+		fixture_rate, mode, (unsigned long long)admission.dispatched,
+		(unsigned long long)admission.replacements, (unsigned long long)admission.expired,
+		(unsigned long long)admission.freshness_skips, (unsigned long long)admission.pressure_drops);
 #endif
 	iiod_buffer_metadata_close(context);
 	assert(restores == 1 && !adaptive_fixture.opened);

@@ -118,6 +118,13 @@ set(IIOD_SCANNER_GLRT_MINIMUM_MARGIN "" CACHE STRING "Pinned positive-only margi
 option(IIOD_SCANNER_ADAPTIVE_HOP "Opt in to userspace adaptive hop V2 (requires positive-only GLRT)" OFF)
 option(IIOD_SCANNER_GLRT_CAPTURE_PROTECTION "Opt in to bounded GLRT admission, pressure shedding and watchdog" OFF)
 option(IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS "Opt in to healthy UNKNOWN for explicit GLRT admission skips" OFF)
+option(IIOD_SCANNER_GLRT_FAIR_ADMISSION "Opt in to bounded held-dwell admission with freshness guard" OFF)
+if(IIOD_SCANNER_GLRT_FAIR_ADMISSION AND
+		(NOT IIOD_SCANNER_GLRT_LIBRARY OR NOT IIOD_SCANNER_GLRT_CAPTURE_PROTECTION OR
+		 NOT IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS OR
+		 NOT IIOD_SCANNER_GLRT_MODE STREQUAL "positive-only-v1"))
+	message(FATAL_ERROR "Fair GLRT admission requires a positive-only SDK, protection and cooperative skips")
+endif()
 if(IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS AND
 		(NOT IIOD_SCANNER_GLRT_LIBRARY OR NOT IIOD_SCANNER_GLRT_CAPTURE_PROTECTION OR
 		 NOT IIOD_SCANNER_GLRT_MODE STREQUAL "positive-only-v1"))
@@ -196,6 +203,9 @@ function(iiod_configure_scanner_glrt target)
 	endif()
 	if(IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS)
 		target_compile_definitions(${target} PRIVATE IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS=1)
+	endif()
+	if(IIOD_SCANNER_GLRT_FAIR_ADMISSION)
+		target_compile_definitions(${target} PRIVATE IIOD_SCANNER_GLRT_FAIR_ADMISSION=1)
 	endif()
 	if(IIOD_SCANNER_ADAPTIVE_HOP)
 		target_compile_definitions(${target} PRIVATE IIOD_HAS_SCANNER_ADAPTIVE_HOP=1)

@@ -31,6 +31,11 @@ void spf_scanner_glrt_capture_budget(struct spf_scanner_glrt *,
 	uint64_t callback_ns, uint64_t missing_samples);
 int spf_scanner_glrt_protection_stats(struct spf_scanner_glrt *,
 	leo_scanner_glrt_protection_stats_v1 *);
+#ifdef IIOD_SCANNER_GLRT_FAIR_ADMISSION
+/* Runtime diagnostics only; no IIO/wire or persisted layout change. */
+int spf_scanner_glrt_admission_stats(struct spf_scanner_glrt *,
+	leo_scanner_glrt_admission_stats_v1 *);
+#endif
 #endif
 void spf_scanner_glrt_finish(struct spf_scanner_glrt *, int cancelled);
 ssize_t spf_scanner_glrt_frame(struct spf_scanner_glrt *, const void *legacy,

@@ -158,7 +158,11 @@ int spf_scanner_glrt_open(struct spf_scanner_glrt **output,
 		/* Engineering profile, not a claim of qualified live-duty headroom.
 		 * The reviewed release identity must bind this explicit opt-in. */
 		const leo_scanner_glrt_protection_v1 protection = {
+#ifdef IIOD_SCANNER_GLRT_FAIR_ADMISSION
+			.max_occupied_slots = 3, .admission_age_ms = 450,
+#else
 			.max_occupied_slots = 2, .admission_age_ms = 250,
+#endif
 			.worker_timeout_ms = 500, .recovery_blocks = 4,
 		};
 		ret = leo_scanner_glrt_enable_protection(state->session, &protection);
@@ -171,6 +175,14 @@ int spf_scanner_glrt_open(struct spf_scanner_glrt **output,
 	/* Startup-only opt-in, bound to a new reviewed bundle configuration. A
 	 * genuine failure still faults; never reinterpret unavailable wire reasons. */
 	if (!ret) ret = leo_scanner_glrt_enable_cooperative_skips(state->session);
+#endif
+#ifdef IIOD_SCANNER_GLRT_FAIR_ADMISSION
+	if (!ret) {
+		const leo_scanner_glrt_admission_v1 admission = {
+			.maximum_pending_age_ms = 120, .freshness_trigger_ms = 2500,
+		};
+		ret = leo_scanner_glrt_enable_fair_admission(state->session, &admission);
+	}
 #endif
 	if (ret) {
 		leo_scanner_glrt_close(state->session);
@@ -209,6 +221,19 @@ int spf_scanner_glrt_protection_stats(struct spf_scanner_glrt *s,
 	pthread_mutex_unlock(&s->lock);
 	return ret;
 }
+
+#ifdef IIOD_SCANNER_GLRT_FAIR_ADMISSION
+int spf_scanner_glrt_admission_stats(struct spf_scanner_glrt *s,
+	leo_scanner_glrt_admission_stats_v1 *out)
+{
+	int ret;
+	if (!s || !out) return -EINVAL;
+	pthread_mutex_lock(&s->lock);
+	ret = leo_scanner_glrt_admission_stats(s->session, out);
+	pthread_mutex_unlock(&s->lock);
+	return ret;
+}
+#endif
 
 /* A hop timestamp newer than the delivered IQ is a lower bound on source
  * backlog, even when metadata callbacks themselves are fast. Observe the

@@ -41,3 +41,20 @@ worker; the provider classifies RX1 only while retaining both receivers.
 These are synthetic-IQ desktop tests. They do not prove ARM compute latency,
 RF sensitivity, live duty, fair admission on saved RF, or deployment readiness.
 The fixture's RX0 sentinel must remain byte-identical across every frame.
+
+## Fair admission is a separate opt-in
+
+`IIOD_SCANNER_GLRT_FAIR_ADMISSION` also defaults to OFF. It requires all the
+cooperative prerequisites and cooperative skips itself. Its engineering
+profile uses three occupied slots, 450 ms admission age, 500 ms watchdog,
+four recovery blocks, a 120 ms pending-age bound and 2500 ms freshness trigger.
+All values and this new policy must be bound to a new bundle identity. The
+matching SDK and numerical worker use the private LP03 pool ABI; an older
+worker is not interchangeable even though public wire layouts are unchanged.
+
+The provider fixture checks enabled admission, at most one pending/running
+request, complete terminal drain and pressure/fault behavior. To test real
+overload, link a test-only dwell-delay wrapper into the numerical worker and
+set `SPF_EXPECT_FAIR_SHEDDING=1`; ordinary no-pressure cases must then perform
+some checks and intentionally shed others. This is synthetic pacing, not a
+measurement of ARM runtime or live capture duty.
