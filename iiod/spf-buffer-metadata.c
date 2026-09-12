@@ -8,6 +8,7 @@
 #include "spf-sampler-coverage.h"
 #include "spf-tandem-metadata.h"
 #include "spf-tandem-session.h"
+#include "spf-legacy-metadata.h"
 #include "spf-temperature-cache.h"
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 #include "spf-hop-device.h"
@@ -346,34 +347,47 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
 		return -ENOMEM;
-	ret = spf_tandem_session_init(&ctx->tandem, request,
-		tandem_request_bytes, NULL);
-	if (ret) {
-		free(ctx);
-		return ret;
+	if (request_bytes == SPF_LEGACY_METADATA_REQUEST_BYTES) {
+		uint16_t capacity;
+		ret = spf_legacy_metadata_decode(request, request_bytes,
+			&ctx->observation_interval_samples, &capacity);
+		if (ret) {
+			free(ctx);
+			return ret;
+		}
+		ctx->tandem.request.observation_capacity = capacity;
+		/* No FPGA event claims and, critically, no tandem lease. */
+		ctx->tandem.request.event_capacity = 0;
+	} else {
+		ret = spf_tandem_session_init(&ctx->tandem, request,
+			tandem_request_bytes, NULL);
+		if (ret) {
+			free(ctx);
+			return ret;
+		}
+		if (!ctx->tandem.request.observation_capacity ||
+			ctx->tandem.request.observation_capacity >
+				SPF_IIOD_OBSERVATION_CAPACITY ||
+			!ctx->tandem.request.event_capacity ||
+			ctx->tandem.request.event_capacity >
+				SPF_TANDEM_EVENT_QUEUE_CAPACITY) {
+			free(ctx);
+			return -ENOSPC;
+		}
+		ret = spf_tandem_request_validate_event_window(&ctx->tandem.request,
+			(uint32_t)samples_count);
+		if (ret) {
+			fprintf(stderr,
+				"SPF tandem request cannot retain the refill arm window: "
+				"samples=%zu events=%u cooldown=%u measurement=%u error=%d\n",
+				samples_count, ctx->tandem.request.event_capacity,
+				ctx->tandem.request.cooldown_periods,
+				ctx->tandem.request.power_measurement_samples, ret);
+			free(ctx);
+			return ret;
+		}
+		ctx->tandem_initialized = true;
 	}
-	if (!ctx->tandem.request.observation_capacity ||
-		ctx->tandem.request.observation_capacity >
-			SPF_IIOD_OBSERVATION_CAPACITY ||
-		!ctx->tandem.request.event_capacity ||
-		ctx->tandem.request.event_capacity >
-			SPF_TANDEM_EVENT_QUEUE_CAPACITY) {
-		free(ctx);
-		return -ENOSPC;
-	}
-	ret = spf_tandem_request_validate_event_window(&ctx->tandem.request,
-		(uint32_t)samples_count);
-	if (ret) {
-		fprintf(stderr,
-			"SPF tandem request cannot retain the refill arm window: "
-			"samples=%zu events=%u cooldown=%u measurement=%u error=%d\n",
-			samples_count, ctx->tandem.request.event_capacity,
-			ctx->tandem.request.cooldown_periods,
-			ctx->tandem.request.power_measurement_samples, ret);
-		free(ctx);
-		return ret;
-	}
-	ctx->tandem_initialized = true;
 	ctx->burst_enabled = request_bytes == tandem_request_bytes +
 		SPF_DDR_BURST_REQUEST_BYTES;
 	ctx->ring_enabled = request_bytes == tandem_request_bytes +
@@ -455,8 +469,9 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	}
 	ctx->timestamp_configured = true;
 	ctx->samples_per_channel = (uint32_t)samples_count;
-	ret = spf_tandem_request_observation_interval(&ctx->tandem.request,
-		(uint32_t)samples_count, &ctx->observation_interval_samples);
+	ret = ctx->tandem_initialized ?
+		spf_tandem_request_observation_interval(&ctx->tandem.request,
+		(uint32_t)samples_count, &ctx->observation_interval_samples) : 0;
 	if (ret) {
 		(void)iio_device_reg_write(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
 			ctx->timestamp_control_previous);
@@ -603,7 +618,7 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 		SPF_GAIN_SAMPLER_RING_CAPACITY, &coverage);
 	if (ret)
 		return ret;
-	ret = tandem_acquire(ctx);
+	ret = ctx->tandem_initialized ? tandem_acquire(ctx) : 0;
 	if (ret)
 		return ret;
 	ctx->sampler_coverage_window_samples = coverage.window_samples;
@@ -660,7 +675,7 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 	/* Every completed refill proves the owner is alive, including frames that
 	 * metadata_get() subsequently discards during sampler startup.
 	 */
-	return tandem_heartbeat(ctx);
+	return ctx->tandem_initialized ? tandem_heartbeat(ctx) : 0;
 }
 
 void iiod_buffer_metadata_ring_prefix_complete(void *provider_context,
@@ -728,7 +743,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	struct spf_iiod_metadata_context *ctx = provider_context;
 	spf_gain_observation_v3_t observations[SPF_IIOD_OBSERVATION_CAPACITY];
 	struct adi_tandem_agc_event events[SPF_TANDEM_EVENT_QUEUE_CAPACITY];
-	struct adi_tandem_agc_status tandem_status;
+	struct adi_tandem_agc_status tandem_status = {0};
 	uint32_t observation_overflow_count = 0;
 	uint64_t first_sample_sequence;
 	struct spf_buffer_sequence_result sequence;
@@ -736,7 +751,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	spf_rssi_pair_t rssi_end;
 	uint32_t rssi_overflow_count = 0;
 	uint16_t observation_count;
-	size_t event_count;
+	size_t event_count = 0;
 	spf_gain_frame_decision_t frame_decision;
 	size_t header_bytes;
 	size_t total_metadata_bytes;
@@ -834,8 +849,9 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			rssi_overflow_count, (unsigned long long)ctx->frames_emitted);
 		return -EOVERFLOW;
 	}
-	ret = tandem_collect(ctx, first_sample_sequence, events, &event_count,
-		&tandem_status);
+	ret = ctx->tandem_initialized ?
+		tandem_collect(ctx, first_sample_sequence, events, &event_count,
+			&tandem_status) : 0;
 	if (ret) {
 		fprintf(stderr,
 			"SPF metadata tandem collection failed: error=%d frame=%llu "
@@ -871,7 +887,8 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	}
 	const spf_radio_frame_v6_args_t args = {
 		.frame = {
-			.metadata_features = SPF_META_REQUIRED_FEATURES_V6,
+			.metadata_features = ctx->tandem_initialized ?
+				SPF_META_REQUIRED_FEATURES_V6 : SPF_META_LEGACY_FEATURES_V6,
 			.stream_id = ctx->stream_id,
 			.buffer_sequence = sequence.buffer_sequence,
 			.first_sample_sequence = first_sample_sequence,
@@ -904,7 +921,7 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			},
 			.device_iio_overflow = sequence.missing_samples_before != 0,
 		},
-		.tandem_status = &tandem_status,
+		.tandem_status = ctx->tandem_initialized ? &tandem_status : NULL,
 		.ad9361_temperature_mdeg_c = ctx->temperature_sampler_started ?
 			spf_temperature_sampler_get(&ctx->temperature_sampler) :
 			SPF_TEMPERATURE_INVALID,
