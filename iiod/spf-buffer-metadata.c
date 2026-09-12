@@ -2,6 +2,10 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "buffer-metadata.h"
+#include "spf-counter-metadata.h"
+#include "adi-rx-counter.h"
+#include <fcntl.h>
+#include <sys/ioctl.h>
 #include "spf-buffer-layout.h"
 #include "spf-ddr-burst-request.h"
 #include "spf-ddr-ring-request.h"
@@ -32,6 +36,9 @@
 
 struct spf_iiod_metadata_context {
 	struct iio_device *rx;
+	bool counter_only;
+	int counter_fd;
+	uint32_t counter_rate;
 	struct iio_device *phy;
 	spf_gain_sampler_t sampler;
 	struct spf_temperature_sampler temperature_sampler;
@@ -73,6 +80,57 @@ static uint64_t make_stream_id(const void *address)
 	return value ? value : UINT64_C(1);
 }
 
+static int counter_open(const struct iio_device *dev, size_t samples_count, const uint32_t *mask,
+			size_t words, size_t scan_bytes, const void *request, size_t request_bytes,
+			void **provider_context, size_t *extra_samples)
+{
+	struct spf_counter_request decoded;
+	struct spf_buffer_layout layout;
+	struct spf_iiod_metadata_context *ctx;
+	struct adi_rx_counter_request lease = {0};
+	int ret;
+	if (!iio_device_get_name(dev) || strcmp(iio_device_get_name(dev), "cf-ad9361-lpc"))
+		return -ENODEV;
+	ret = spf_buffer_layout_resolve(samples_count, mask, words, scan_bytes, &layout);
+	if (ret)
+		return ret;
+	ret = spf_counter_request_decode(request, request_bytes, samples_count,
+					 layout.enabled_scan_mask, &decoded);
+	if (ret)
+		return ret;
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx)
+		return -ENOMEM;
+	ctx->counter_fd = open("/dev/tandem-agc-events", O_RDWR | O_CLOEXEC);
+	if (ctx->counter_fd < 0) {
+		ret = -errno;
+		free(ctx);
+		return ret;
+	}
+	lease.magic = ADI_RX_COUNTER_MAGIC;
+	lease.version = 1;
+	lease.size = sizeof(lease);
+	lease.required_features = ADI_RX_COUNTER_FEATURES;
+	lease.scan_mask = 3;
+	lease.sample_rate_hz = decoded.sample_rate_hz;
+	lease.samples_per_channel = decoded.samples_per_channel;
+	if (ioctl(ctx->counter_fd, ADI_RX_COUNTER_IOC_ACQUIRE, &lease) < 0) {
+		ret = -errno;
+		close(ctx->counter_fd);
+		free(ctx);
+		return ret;
+	}
+	ctx->counter_only = true;
+	ctx->counter_rate = decoded.sample_rate_hz;
+	ctx->rx = (struct iio_device *)dev;
+	ctx->layout = layout;
+	ctx->samples_per_channel = decoded.samples_per_channel;
+	ctx->stream_id = make_stream_id(ctx);
+	*provider_context = ctx;
+	*extra_samples = layout.extra_samples;
+	return 0;
+}
+
 int iiod_buffer_metadata_open(const struct iio_device *dev,
 		size_t samples_count, const uint32_t *mask, size_t words,
 		size_t scan_bytes,
@@ -94,6 +152,9 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		!extra_samples || !burst_plan)
 		return -EINVAL;
 	memset(burst_plan, 0, sizeof(*burst_plan));
+	if (request_bytes >= 4 && spf_counter_read32(request) == SPF_COUNTER_REQUEST_MAGIC)
+		return counter_open(dev, samples_count, mask, words, scan_bytes, request,
+				    request_bytes, provider_context, extra_samples);
 	if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
 			SPF_DDR_BURST_REQUEST_BYTES) {
 		ret = spf_ddr_burst_request_decode(&burst_request,
@@ -121,6 +182,12 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
 		return -ENOMEM;
+	/* A single transferred receiver still requires the paired physical PHY. */
+	if (!iio_device_find_channel(dev, "voltage2", false) ||
+	    !iio_device_find_channel(dev, "voltage3", false)) {
+		free(ctx);
+		return -EOPNOTSUPP;
+	}
 	ret = spf_tandem_session_init(&ctx->tandem, request,
 		tandem_request_bytes, NULL);
 	if (ret) {
@@ -249,6 +316,8 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 
 	if (!ctx || !kernel_buffers_count)
 		return -EINVAL;
+	if (ctx->counter_only)
+		return 0;
 	ret = spf_sampler_coverage_plan_compute(ctx->samples_per_channel,
 		ctx->observation_interval_samples, kernel_buffers_count,
 		SPF_GAIN_SAMPLER_RING_CAPACITY, &coverage);
@@ -270,6 +339,8 @@ int iiod_buffer_metadata_before_refill(void *provider_context)
 
 	if (!ctx)
 		return -EINVAL;
+	if (ctx->counter_only)
+		return 0;
 	/* The first dequeue consumes an already queued block. Every later refill
 	 * can rearm one block while all older queued blocks remain capture work.
 	 * Reset to the complete queue-depth window so producer copy/backpressure
@@ -291,6 +362,8 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 
 	if (!ctx)
 		return -EINVAL;
+	if (ctx->counter_only)
+		return 0;
 	if (ctx->refills_started > 1 &&
 		!spf_gain_sampler_finish_capture(
 			&ctx->sampler, SPF_IIOD_SAMPLER_START_TIMEOUT_MS))
@@ -315,6 +388,11 @@ void iiod_buffer_metadata_close(void *provider_context)
 	struct spf_iiod_metadata_context *ctx = provider_context;
 	if (!ctx)
 		return;
+	if (ctx->counter_only) {
+		close(ctx->counter_fd);
+		free(ctx);
+		return;
+	}
 	if (ctx->tandem_initialized)
 		spf_tandem_session_close(&ctx->tandem);
 	if (ctx->sampler_started)
@@ -351,6 +429,35 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (!ctx || dev != ctx->rx || !buffer || !metadata || !iq_offset ||
 		!iq_bytes)
 		return -EINVAL;
+	if (ctx->counter_only) {
+		if (raw_bytes != ctx->layout.raw_bytes)
+			return -EIO;
+		raw = iio_buffer_start(buffer);
+		if (!raw)
+			return -EIO;
+		first_sample_sequence = spf_counter_read64(raw);
+		/* util_cpack2 emits two RX0 samples after the counter advanced twice.
+		 * SPFC1 defines the counter of the first sample, not the packing edge.
+		 * Keep the paired ABI's existing timestamp interpretation unchanged. */
+		if (first_sample_sequence < 2)
+			return -ERANGE;
+		first_sample_sequence -= 2;
+		ret = spf_buffer_sequence_resolve(&ctx->sequence, first_sample_sequence,
+						  ctx->samples_per_channel, &sequence);
+		if (ret)
+			return ret;
+		ret = spf_counter_frame_build(metadata, metadata_capacity, ctx->stream_id,
+					      sequence.buffer_sequence, first_sample_sequence,
+					      sequence.missing_samples_before,
+					      ctx->samples_per_channel, ctx->counter_rate);
+		if (ret < 0)
+			return ret;
+		spf_buffer_sequence_commit(&ctx->sequence, &sequence);
+		ctx->frames_emitted++;
+		*iq_offset = 8;
+		*iq_bytes = ctx->layout.iq_bytes;
+		return ret;
+	}
 	header_bytes = spf_radio_frame_v5_header_bytes(
 		(uint16_t)ctx->tandem.request.observation_capacity,
 		(uint16_t)ctx->tandem.request.event_capacity);
@@ -537,6 +644,8 @@ int iiod_buffer_metadata_describe_frame(void *provider_context,
 
 	if (!info)
 		return -EINVAL;
+	if (ctx && ctx->counter_only)
+		return spf_counter_frame_describe(metadata, metadata_bytes, info);
 	ret = spf_exact_gap_header(ctx, metadata, metadata_bytes, &header);
 	if (ret)
 		return ret;
@@ -556,6 +665,8 @@ int iiod_buffer_metadata_rebase_frame(void *provider_context,
 	const spf_radio_meta_v3_prefix_t *const_header;
 	int ret;
 
+	if (ctx && ctx->counter_only)
+		return spf_counter_frame_rebase(metadata, metadata_bytes, previous_frame_end);
 	ret = spf_exact_gap_header(ctx, metadata, metadata_bytes, &const_header);
 	if (ret)
 		return ret;
