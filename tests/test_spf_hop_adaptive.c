@@ -180,11 +180,11 @@ struct replay {
 	struct spf_hop_device_event_v2 events[VISITS];
 	size_t cursor;
 	uint64_t end;
-	unsigned restores;
+	unsigned restores, starts;
 	int corrupt;
 };
 static int replay_start(void *p, const struct spf_hop_request_v2 *r)
-{ (void)p; return r->policy.generation == 9 ? 0 : -EINVAL; }
+{ ++((struct replay *)p)->starts; return r->policy.generation == 9 ? 0 : -EINVAL; }
 static int replay_drain(void *p, struct spf_hop_device_event_v2 *out, size_t capacity,
 	size_t *count, uint64_t *dropped)
 {
@@ -224,9 +224,14 @@ static void test_session(struct replay *replay, const struct spf_hop_request_v2 
 	unsigned batch;
 	int ret;
 	replay->cursor = 0; replay->corrupt = corrupt; replay->restores = 0;
+	replay->starts = 0;
 	replay->end = first + request->geometry.capture_span_samples;
 	assert(!spf_hop_session_v2_init(&s, request, &replay_ops, replay));
+	assert(!spf_hop_session_v2_arm(&s));
+	spf_hop_session_v2_get_status(&s, &status);
+	assert(status.state == SPF_HOP_STATE_ARMED && replay->starts == 0);
 	assert(!spf_hop_session_v2_start(&s));
+	assert(replay->starts == 1);
 	for (batch = 0; batch < 5; ++batch) {
 		ret = spf_hop_session_v2_on_block(&s, batch, first + batch * span,
 			first + (batch + 1) * span, &sidecar);

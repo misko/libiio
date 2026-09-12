@@ -344,8 +344,46 @@ static void test_userspace_low_counter_is_anchored_across_wrap(void)
 	assert(session.status.restore_after == epoch + UINT64_C(0x100000162));
 }
 
+static void test_arm_defers_hops_until_dma_is_ready(void)
+{
+	struct spf_hop_request_v1 request = make_request();
+	struct spf_hop_session_v1 session;
+	struct spf_hop_sidecar_v1 sidecar;
+	struct fake_device device = {0};
+	assert(spf_hop_session_v1_arm(NULL) == -EINVAL);
+	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
+	assert(spf_hop_session_v1_arm(&session) == 0);
+	assert(session.status.state == SPF_HOP_STATE_ARMED && device.submit_calls == 0);
+	assert(spf_hop_session_v1_arm(&session) == -EINVAL);
+	/* DMA may start late or discard uncovered startup frames. Until one is
+	 * accepted, there is no claimed first visit and no device submission. */
+	assert(spf_hop_session_v1_on_block(&session, 0, 1000, 1100, &sidecar) == -EINVAL);
+	assert(!session.status.visits_started && !session.status.first_counter);
+	assert(spf_hop_session_v1_start(&session) == 0);
+	assert(device.submit_calls == 1 && session.status.state == SPF_HOP_STATE_RUNNING);
+	assert(spf_hop_session_v1_start(&session) == -EINVAL);
+	device.events[0] = make_event(&request, 0, 1100, 1102);
+	device.event_count = 1;
+	assert(spf_hop_session_v1_on_block(&session, 0, 1000, 1100, &sidecar) == 0);
+	assert(sidecar.events[0].invalid_end == 1112);
+	assert(session.status.first_counter == 1100);
+	init_receipt(&device, 1200);
+	assert(spf_hop_session_v1_cancel(&session, SPF_HOP_REASON_CLIENT_CLOSE) == 0);
+	assert(device.restore_calls == 1);
+
+	/* Cancellation before any accepted frame still restores exactly once. */
+	memset(&device, 0, sizeof(device));
+	init_receipt(&device, 1200);
+	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
+	assert(spf_hop_session_v1_arm(&session) == 0);
+	assert(spf_hop_session_v1_cancel(&session, SPF_HOP_REASON_CLIENT_CLOSE) == 0);
+	assert(device.submit_calls == 0 && device.restore_calls == 1);
+	assert(spf_hop_session_v1_start(&session) == -EINVAL);
+}
+
 int main(void)
 {
+	test_arm_defers_hops_until_dma_is_ready();
 	test_complete_valid_visits();
 	test_restore_cannot_truncate_final_dwell();
 	test_event_sequence_fails_closed();

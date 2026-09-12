@@ -619,8 +619,11 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (ctx->hop_enabled) {
 		pthread_mutex_lock(&ctx->hop_lock);
-		ret = ctx->hop_adaptive ? spf_hop_session_v2_start(&ctx->adaptive_session) :
-			spf_hop_session_v1_start(&ctx->hop_session);
+		/* Buffer allocation is not evidence that the first DMA samples and
+		 * their observation coverage are ready. Do not start a valid visit
+		 * that an initial uncovered/discarded frame can truncate. */
+		ret = ctx->hop_adaptive ? spf_hop_session_v2_arm(&ctx->adaptive_session) :
+			spf_hop_session_v1_arm(&ctx->hop_session);
 		pthread_mutex_unlock(&ctx->hop_lock);
 		if (ret)
 			return ret;
@@ -807,6 +810,8 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	frame_decision = spf_gain_frame_decide(ctx->frames_emitted,
 		observation_count, ctx->startup_frames_discarded);
 	if (frame_decision == SPF_GAIN_FRAME_DISCARD_STARTUP) {
+		fprintf(stderr, "SPF metadata startup discard: first=%llu samples=%u\n",
+			(unsigned long long)first_sample_sequence, ctx->samples_per_channel);
 		ctx->startup_frames_discarded++;
 		return -EAGAIN;
 	}
@@ -924,6 +929,20 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		int sidecar_bytes;
 
 		pthread_mutex_lock(&ctx->hop_lock);
+		if (hop_status_state(ctx)->state == SPF_HOP_STATE_ARMED) {
+			/* This frame's IQ, timestamp, gain and RSSI have all passed
+			 * validation. Start the device-local scheduler only now; its
+			 * real transition counter remains the scan's time authority. */
+			ret = ctx->hop_adaptive ? spf_hop_session_v2_start(&ctx->adaptive_session) :
+				spf_hop_session_v1_start(&ctx->hop_session);
+			fprintf(stderr, "SPF persistent-hop DMA-ready start: first=%llu "
+				"discarded=%u error=%d\n", (unsigned long long)first_sample_sequence,
+				ctx->startup_frames_discarded, ret);
+			if (ret) {
+				pthread_mutex_unlock(&ctx->hop_lock);
+				return ret;
+			}
+		}
 		if (ctx->hop_adaptive) {
 			ret = spf_hop_session_v2_on_block(&ctx->adaptive_session,
 				sequence.buffer_sequence, first_sample_sequence,
