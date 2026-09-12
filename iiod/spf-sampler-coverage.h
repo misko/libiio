@@ -9,6 +9,13 @@ struct spf_sampler_coverage_plan {
 	uint64_t maximum_observations;
 };
 
+/* A dequeue fence brackets the refill call, not the acquisition of an older
+ * queued DMA block. Keep at least two periodic observations per block for hop
+ * capture so normal polling jitter cannot consume the entire sampling margin.
+ * This does not fabricate coverage or permit accepting an uncovered frame. */
+int spf_sampler_queued_observation_interval(uint32_t samples_per_frame,
+	uint32_t requested_interval, uint32_t *interval);
+
 /*
  * Bound sampler work to every block which may still be captured by the
  * kernel DMA queue, plus one arm-safety window.  The returned observation

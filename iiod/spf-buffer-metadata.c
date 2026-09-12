@@ -458,6 +458,11 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	ctx->samples_per_channel = (uint32_t)samples_count;
 	ret = spf_tandem_request_observation_interval(&ctx->tandem.request,
 		(uint32_t)samples_count, &ctx->observation_interval_samples);
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (!ret && ctx->hop_enabled)
+		ret = spf_sampler_queued_observation_interval((uint32_t)samples_count,
+			ctx->observation_interval_samples, &ctx->observation_interval_samples);
+#endif
 	if (ret) {
 		(void)iio_device_reg_write(ctx->rx, SPF_ADC_TIMESTAMP_CONTROL_REG,
 			ctx->timestamp_control_previous);
