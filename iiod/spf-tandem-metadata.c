@@ -119,15 +119,17 @@ bool spf_radio_frame_v6_build(void *destination, size_t destination_bytes,
 	size_t variable_bytes;
 	uint32_t *crc;
 
-	if (!destination || !args || !args->tandem_status)
+	if (!destination || !args)
 		return false;
 	status = args->tandem_status;
-	if (status->version != ADI_TANDEM_AGC_ABI_VERSION ||
+	if (status && (status->version != ADI_TANDEM_AGC_ABI_VERSION ||
 		status->size != sizeof(*status) || !status->ownership_epoch ||
 		status->fault_flags ||
 		(status->state != ADI_TANDEM_AGC_STATE_ARMED_HOLD &&
 		 status->state != ADI_TANDEM_AGC_STATE_ARMED_AUTO) ||
-		!status->gain_table_id)
+		!status->gain_table_id))
+		return false;
+	if (!status && (args->frame.gain_event_count || args->frame.gain_event_capacity))
 		return false;
 	base_bytes = spf_radio_frame_v3_header_bytes(
 		args->frame.gain_observation_capacity,
@@ -136,8 +138,8 @@ bool spf_radio_frame_v6_build(void *destination, size_t destination_bytes,
 		args->frame.gain_observation_capacity,
 		args->frame.gain_event_capacity);
 	if (!base_bytes || !v6_bytes || destination_bytes < v6_bytes ||
-		(args->frame.metadata_features & SPF_META_REQUIRED_FEATURES_V6) !=
-			SPF_META_REQUIRED_FEATURES_V6)
+		args->frame.metadata_features != (status ?
+			SPF_META_REQUIRED_FEATURES_V6 : SPF_META_LEGACY_FEATURES_V6))
 		return false;
 	if (!spf_radio_frame_v6_base_build(destination, destination_bytes,
 			&args->frame, args->missing_samples_before))
@@ -150,26 +152,27 @@ bool spf_radio_frame_v6_build(void *destination, size_t destination_bytes,
 	extension = (spf_radio_meta_v5_extension_t *)
 		((uint8_t *)destination + SPF_RADIO_META_V3_PREFIX_BYTES);
 	memset(extension, 0, sizeof(*extension));
-	extension->ownership_epoch = status->ownership_epoch;
-	extension->tandem_state = status->state;
-	extension->tandem_fault_flags = status->fault_flags;
-	extension->tandem_transition_count = status->transition_count;
-	extension->gain_table_id = status->gain_table_id;
-	extension->threshold_provenance = status->threshold_provenance;
-	extension->minimum_gain_db = status->minimum_gain_db;
-	extension->maximum_gain_db = status->maximum_gain_db;
-	extension->initial_gain_db = status->initial_gain_db;
-	extension->minimum_gain_index = status->minimum_gain_index;
-	extension->maximum_gain_index = status->maximum_gain_index;
-	extension->rx1_gain_index = status->rx1_gain_index;
-	extension->rx2_gain_index = status->rx2_gain_index;
+	if (status) {
+		extension->ownership_epoch = status->ownership_epoch;
+		extension->tandem_state = status->state;
+		extension->tandem_fault_flags = status->fault_flags;
+		extension->tandem_transition_count = status->transition_count;
+		extension->gain_table_id = status->gain_table_id;
+		extension->threshold_provenance = status->threshold_provenance;
+		extension->minimum_gain_db = status->minimum_gain_db;
+		extension->maximum_gain_db = status->maximum_gain_db;
+		extension->initial_gain_db = status->initial_gain_db;
+		extension->minimum_gain_index = status->minimum_gain_index;
+		extension->maximum_gain_index = status->maximum_gain_index;
+		extension->rx1_gain_index = status->rx1_gain_index;
+		extension->rx2_gain_index = status->rx2_gain_index;
+	}
 	extension->ad9361_temperature_mdeg_c =
 		args->ad9361_temperature_mdeg_c;
 
 	prefix->header_bytes = (uint16_t)v6_bytes;
-	prefix->features |= SPF_META_FEATURE_TANDEM_AGC_SESSION |
-		SPF_META_FEATURE_AD9361_TEMPERATURE;
-	prefix->flags |= SPF_META_TANDEM_VALID;
+	if (status)
+		prefix->flags |= SPF_META_TANDEM_VALID;
 	crc = (uint32_t *)((uint8_t *)destination + v6_bytes - sizeof(*crc));
 	*crc = 0;
 	*crc = spf_gain_meta_crc32(destination, v6_bytes);

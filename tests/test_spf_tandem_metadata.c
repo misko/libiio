@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "spf-tandem-metadata.h"
+#include "spf-legacy-metadata.h"
 
 #ifdef NDEBUG
 #undef NDEBUG
@@ -249,12 +250,48 @@ static void test_v6_single_rx_and_exact_gap(void)
 	args.frame.enabled_scan_mask = UINT32_C(0x0f);
 	args.frame.iq_payload_bytes = 8192;
 	assert(spf_radio_frame_v6_build(output, sizeof(output), &args));
+	/* Legacy metadata preserves unequal RX gains and cannot claim a lease. */
+	args.tandem_status = NULL;
+	assert(!spf_radio_frame_v6_build(output, sizeof(output), &args));
+	args.frame.metadata_features = SPF_META_LEGACY_FEATURES_V6;
+	observation.rx2_gain_index = 31;
+	observation.rx2_gain_db = 17;
+	assert(spf_radio_frame_v6_build(output, sizeof(output), &args));
+	assert(!(prefix->flags & SPF_META_TANDEM_VALID));
+	assert(!(prefix->features & SPF_META_FEATURE_FPGA_GAIN_EVENTS));
+	assert(prefix->rx1_gain_db_start != prefix->rx2_gain_db_start);
+	spf_radio_meta_v5_extension_t *ext =
+		(void *)(output + SPF_RADIO_META_V3_PREFIX_BYTES);
+	assert(ext->ownership_epoch == 0 && ext->tandem_state == 0);
+	assert(ext->ad9361_temperature_mdeg_c == 42000);
+	args.frame.gain_event_capacity = 1;
+	assert(!spf_radio_frame_v6_build(output, sizeof(output), &args));
+	args.frame.gain_event_capacity = 0;
 	args.frame.enabled_scan_mask = UINT32_C(0x05);
 	assert(!spf_radio_frame_v6_build(output, sizeof(output), &args));
 }
 
+static void test_legacy_request(void)
+{
+	uint8_t request[16] = {'S', 'P', 'F', 'L', 1, 0, 16, 0, 0, 4, 0, 0, 64, 0, 0, 0};
+	uint32_t interval;
+	uint16_t capacity;
+	assert(spf_legacy_metadata_decode(request, 16, &interval, &capacity) == 0);
+	assert(interval == 1024 && capacity == 64);
+	assert(spf_legacy_metadata_decode(request, 15, &interval, &capacity) != 0);
+	request[14] = 1;
+	assert(spf_legacy_metadata_decode(request, 16, &interval, &capacity) != 0);
+	request[14] = 0;
+	request[9] = 0;
+	assert(spf_legacy_metadata_decode(request, 16, &interval, &capacity) != 0);
+	request[9] = 4;
+	request[12] = 65;
+	assert(spf_legacy_metadata_decode(request, 16, &interval, &capacity) != 0);
+}
+
 int main(void)
 {
+	test_legacy_request();
 	test_golden_layout_and_crc();
 	test_invalid_temperature_is_serialized_without_header_growth();
 	test_auto_observations_drop_torn_pair();
