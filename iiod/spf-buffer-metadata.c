@@ -336,7 +336,8 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		return ret;
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (hop_enabled) {
-		if (layout.receiver_count != 2U)
+		if (spf_buffer_hop_receiver_rate_validate(layout.receiver_count,
+			hop_request.sample_rate_hz))
 			return -EINVAL;
 	} else
 #endif

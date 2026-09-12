@@ -32,6 +32,8 @@ struct spf_buffer_sequence_result {
 
 int spf_buffer_layout_resolve(size_t samples_count, const uint32_t *mask,
 	size_t words, size_t scan_bytes, struct spf_buffer_layout *layout);
+int spf_buffer_hop_receiver_rate_validate(uint8_t receiver_count,
+	uint64_t sample_rate_hz);
 int spf_buffer_sequence_resolve(const struct spf_buffer_sequence_state *state,
 	uint64_t first_sample_sequence, uint32_t samples_per_channel,
 	struct spf_buffer_sequence_result *result);
