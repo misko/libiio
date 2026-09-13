@@ -3652,6 +3652,36 @@ int cancel_buffer_metadata(struct parser_pdata *pdata,
 	return ret;
 }
 
+int submit_metadata_feedback(struct parser_pdata *pdata, struct iio_device *dev,
+	const char *hex)
+{
+	uint8_t bytes[IIO_BUFFER_METADATA_FEEDBACK_MAX];
+	struct ThdEntry *thd;
+	int ret=-EINVAL;
+	size_t n=hex ? strlen(hex) : 0;
+	if (!n || n>2*sizeof(bytes) || n%2) goto done;
+	for (size_t i=0;i<n;++i) {
+		unsigned char c=hex[i];
+		int digit=c>='0' && c<='9' ? c-'0' : c>='a' && c<='f' ? c-'a'+10 : -1;
+		if (digit<0) goto done;
+		if (!(i%2)) bytes[i/2]=(uint8_t)(digit<<4);
+		else bytes[i/2]|=(uint8_t)digit;
+	}
+	if (!dev) ret=-ENODEV;
+	else if (!(thd=parser_lookup_thd_entry(pdata,dev))) ret=-EBADF;
+	else {
+		struct DevEntry *entry=thd->entry;
+		pthread_mutex_lock(&entry->thdlist_lock);
+		if (!entry->metadata_enabled || !entry->metadata_provider_context ||
+			!entry->burst_plan.submit_feedback) ret=-ENODATA;
+		else ret=entry->burst_plan.submit_feedback(entry->metadata_provider_context,bytes,n/2);
+		pthread_mutex_unlock(&entry->thdlist_lock);
+	}
+done:
+	print_value(pdata,ret);
+	return ret;
+}
+
 ssize_t read_dev_attr(struct parser_pdata *pdata, struct iio_device *dev,
 		const char *attr, enum iio_attr_type type)
 {

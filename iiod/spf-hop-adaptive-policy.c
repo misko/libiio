@@ -14,18 +14,20 @@ struct spf_hop_adaptive_policy {
 	struct spf_hop_request_v2 request;
 	leo_adaptive_scan *scan;
 	atomic_uint write, read, fault;
+	atomic_uint visible_committed;
 	leo_adaptive_observation_v1 feedback[FEEDBACK_CAPACITY];
 	struct committed_visit *visits;
 	uint64_t source_epoch_offset;
 	uint32_t committed;
 	int have_source_epoch;
+	uint64_t next_host_visit;
 };
 
 int spf_hop_adaptive_policy_validate_pinned(const struct spf_hop_request_v2 *r)
 {
 	const struct spf_hop_policy_v2 *p;
-	uint8_t wire[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
-	int ret = spf_hop_request_v2_encode(wire, sizeof(wire), r);
+	uint8_t wire[SPF_HOP_HOST_REQUEST_BYTES];
+	int ret = spf_hop_adaptive_configuration(wire, sizeof(wire), r);
 	if (ret) return ret;
 	p = &r->policy;
 	return p->warmup_visits == 3 && p->missed_dwells == 3 &&
@@ -48,14 +50,15 @@ int spf_hop_adaptive_policy_create(struct spf_hop_adaptive_policy **out,
 	struct spf_hop_adaptive_policy *p;
 	const struct spf_hop_policy_v2 *c;
 	leo_adaptive_config_v1 config = {0};
-	uint8_t wire[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
+	uint8_t wire[SPF_HOP_HOST_REQUEST_BYTES];
 	int ret;
 	if (!out || !request) return -EINVAL;
-	ret = spf_hop_request_v2_encode(wire, sizeof(wire), request);
+	ret = spf_hop_adaptive_configuration(wire, sizeof(wire), request);
 	if (ret) return ret;
 	p = calloc(1, sizeof(*p));
 	if (!p) return -ENOMEM;
 	atomic_init(&p->write, 0); atomic_init(&p->read, 0); atomic_init(&p->fault, 0);
+	atomic_init(&p->visible_committed, 0);
 	if (!atomic_is_lock_free(&p->write) || !atomic_is_lock_free(&p->read) ||
 		!atomic_is_lock_free(&p->fault)) { free(p); return -ENOTSUP; }
 	p->request = *request;
@@ -76,7 +79,10 @@ int spf_hop_adaptive_policy_create(struct spf_hop_adaptive_policy **out,
 	config.hop_budget_ms = c->hop_budget_ms;
 	config.maximum_result_age_ms = c->maximum_result_age_ms;
 	config.unhealthy_limit = c->unhealthy_limit;
-	ret = leo_adaptive_create(&p->scan, &config);
+	if (request->host.enabled) {
+		leo_adaptive_config_v2 single = {config, request->host.rx, 0};
+		ret = leo_adaptive_create_v2(&p->scan, &single);
+	} else ret = leo_adaptive_create(&p->scan, &config);
 	if (ret) { spf_hop_adaptive_policy_destroy(p); return ret; }
 	*out = p;
 	return 0;
@@ -91,7 +97,8 @@ int spf_hop_adaptive_policy_offer(struct spf_hop_adaptive_policy *p,
 	unsigned w, r;
 	if (!p) return -EINVAL;
 	if (!o || o->session != p->request.geometry.session_id ||
-		o->generation != p->request.policy.generation || o->rx != 1 ||
+		o->generation != p->request.policy.generation ||
+		o->rx != (p->request.host.enabled ? p->request.host.rx : 1) ||
 		o->rate_hz != p->request.geometry.sample_rate_hz ||
 		o->visit >= p->request.geometry.dwell_count || o->target >= SPF_HOP_PROFILE_COUNT ||
 		o->outcome > LEO_ADAPTIVE_NOT_DETECTED || o->healthy > 1 ||
@@ -130,6 +137,33 @@ static int bind_observation(struct spf_hop_adaptive_policy *p,
 	p->source_epoch_offset = offset; p->have_source_epoch = 1;
 	o->valid_start = v->start; o->valid_end = v->end;
 	return 0;
+}
+
+int spf_hop_adaptive_policy_offer_host(struct spf_hop_adaptive_policy *p,
+	const struct spf_hop_host_feedback_v1 *f, uint64_t stream_id, uint64_t now)
+{
+	uint8_t wire[SPF_HOP_HOST_FEEDBACK_BYTES];
+	const struct committed_visit *v;
+	uint64_t offset;
+	int ret;
+	if (!p || !p->request.host.enabled) return -ENOTSUP;
+	if (!f || spf_hop_host_feedback_v1_encode(wire,sizeof(wire),f)) return -EINVAL;
+	if (f->session!=p->request.geometry.session_id || f->generation!=p->request.policy.generation ||
+		f->stream_id!=stream_id || f->rx!=p->request.host.rx ||
+		memcmp(f->configuration_sha256,p->request.host.configuration_sha256,32)) return -ESTALE;
+	if (f->visit<p->next_host_visit) return -EALREADY;
+	if (f->visit!=p->next_host_visit ||
+		f->visit>=atomic_load_explicit(&p->visible_committed,memory_order_acquire)) return -ERANGE;
+	v=&p->visits[f->visit];
+	if (f->target!=v->target || f->valid_start<v->start || f->valid_end<v->end) return -EINVAL;
+	offset=f->valid_start-v->start;
+	if ((offset & UINT64_C(0xffffffff)) || f->valid_end-v->end!=offset) return -EINVAL;
+	if (now<f->valid_end || now-f->valid_end>p->request.geometry.sample_rate_hz) return -ESTALE;
+	leo_adaptive_observation_v1 o={f->session,f->generation,f->visit,f->valid_start,f->valid_end,
+		f->source_rate_hz,f->rx,f->target,f->outcome,f->healthy};
+	ret=spf_hop_adaptive_policy_offer(p,&o);
+	if (!ret) ++p->next_host_visit;
+	return ret;
 }
 
 static int choose(void *opaque, uint64_t visit, uint64_t now, struct spf_hop_choice_v2 *out)
@@ -177,6 +211,7 @@ static int commit(void *opaque, const struct spf_hop_device_event_v2 *e,
 	ret = leo_adaptive_commit_actual(p->scan, e->device.to_profile, start, end);
 	if (ret) return ret;
 	p->visits[p->committed++] = (struct committed_visit){start, end, e->device.to_profile};
+	atomic_store_explicit(&p->visible_committed,p->committed,memory_order_release);
 	return 0;
 }
 

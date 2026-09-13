@@ -526,10 +526,10 @@ int spf_hop_device_userspace_v2_open(const struct iio_device *rx, const struct i
 	void *policy_context, void **device_context, const struct spf_hop_device_ops_v2 **ops)
 {
 	struct spf_userspace_hop_io *io;
-	uint8_t wire[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
+	uint8_t wire[SPF_HOP_HOST_REQUEST_BYTES];
 	int ret;
 	if (!device_context || !ops || !policy || !policy->choose || !policy->commit) return -EINVAL;
-	ret = spf_hop_request_v2_encode(wire, sizeof(wire), request);
+	ret = spf_hop_adaptive_configuration(wire, sizeof(wire), request);
 	if (ret) return ret;
 	ret = prepare_userspace_io(rx, phy, tandem, tandem_lock, &request->geometry, &io);
 	if (ret) return ret;

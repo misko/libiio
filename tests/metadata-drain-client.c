@@ -76,3 +76,10 @@ ssize_t drain_test_client_run(struct drain_test_client *client,
 	return iiod_client_drain_buffer_metadata_unlocked(client->client,
 		(void *)client, device, result, capacity, stream_valid);
 }
+
+int feedback_test_client_run(struct drain_test_client *client, const struct iio_device *dev,
+	const void *feedback, size_t bytes, bool *valid)
+{
+	return iiod_client_submit_metadata_feedback_unlocked(client->client,(void *)client,
+		dev,feedback,bytes,valid);
+}

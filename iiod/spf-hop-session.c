@@ -432,11 +432,11 @@ static const struct spf_hop_device_ops_v1 adaptive_core_ops = {
 int spf_hop_session_v2_init(struct spf_hop_session_v2 *s, const struct spf_hop_request_v2 *r,
 	const struct spf_hop_device_ops_v2 *ops, void *context)
 {
-	uint8_t wire[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
+	uint8_t wire[SPF_HOP_HOST_REQUEST_BYTES];
 	int ret;
 	if (!s || !r || !ops || !ops->submit_plan || !ops->drain_events || !ops->cancel_restore)
 		return -EINVAL;
-	ret = spf_hop_request_v2_encode(wire, sizeof(wire), r);
+	ret = spf_hop_adaptive_configuration(wire, sizeof(wire), r);
 	if (ret) return ret;
 	memset(s, 0, sizeof(*s));
 	s->request = *r;

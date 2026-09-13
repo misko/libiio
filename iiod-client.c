@@ -1042,6 +1042,39 @@ int iiod_client_cancel_buffer_metadata_unlocked(
 	return iiod_client_exec_command(client, desc, command);
 }
 
+int iiod_client_submit_metadata_feedback_unlocked(struct iiod_client *client,
+	struct iiod_client_pdata *desc, const struct iio_device *dev,
+	const void *feedback, size_t bytes, bool *stream_valid)
+{
+	static const char hex[]="0123456789abcdef";
+	char payload[2*IIO_BUFFER_METADATA_FEEDBACK_MAX+1], command[1024], line[64], *end;
+	const uint8_t *input=feedback;
+	ssize_t ret;
+	long response;
+	if (!stream_valid) return -EINVAL;
+	*stream_valid=true;
+	if (!client || !desc || !dev || !feedback || !bytes || bytes>IIO_BUFFER_METADATA_FEEDBACK_MAX)
+		return -EINVAL;
+	for (size_t i=0;i<bytes;++i) { payload[2*i]=hex[input[i]>>4]; payload[2*i+1]=hex[input[i]&15]; }
+	payload[2*bytes]=0;
+	iio_snprintf(command,sizeof(command),"FEEDBACKBUFM %s %s\r\n",iio_device_get_id(dev),payload);
+	*stream_valid=false;
+	ret=iiod_client_write_all(client,desc,command,strlen(command));
+	if (ret<0) return (int)ret;
+	ret=client->ops->read_line(client->pdata,desc,line,sizeof(line)-1U);
+	if (ret<0) return (int)ret;
+	if (!ret || ret>=(ssize_t)sizeof(line) || line[ret-1]!='\n') return -EPROTO;
+	line[ret]=0;
+	if (line[0]!='0' && line[0]!='-') return -EPROTO;
+	errno=0;
+	response=strtol(line,&end,10);
+	if (line==end || end!=line+ret-1 || errno==ERANGE || response < -4095 || response>0)
+		return -EPROTO;
+	if (!response && (ret!=2 || line[0]!='0')) return -EPROTO;
+	*stream_valid=true;
+	return (int)response;
+}
+
 ssize_t iiod_client_write_unlocked(struct iiod_client *client,
 				   struct iiod_client_pdata *desc,
 				   const struct iio_device *dev,

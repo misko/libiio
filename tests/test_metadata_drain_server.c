@@ -25,7 +25,19 @@ struct fixture {
 	unsigned int calls, produced;
 	bool pending, active;
 	ssize_t invalid_size;
+	unsigned feedback_calls;
+	int feedback_error;
 };
+
+static int provider_feedback(void *opaque, const void *bytes, size_t count)
+{
+	struct fixture *f=opaque;
+	const uint8_t *p=bytes;
+	assert(count==160);
+	for (unsigned i=0;i<160;++i) assert(p[i]==(uint8_t)i);
+	++f->feedback_calls;
+	return f->feedback_error;
+}
 
 static ssize_t provider_drain(void *opaque, void *output, size_t capacity)
 {
@@ -183,6 +195,31 @@ int main(void)
 	assert(drain(&fixture, result, sizeof(result)) == -EOVERFLOW);
 	fixture.invalid_size = 0;
 	assert(fixture.entry.buf == NULL); /* Never creates an acquisition buffer. */
+	{
+		uint8_t packet[160];
+		bool valid;
+		for (unsigned i=0;i<sizeof(packet);++i) packet[i]=(uint8_t)i;
+		assert(feedback_test_client_run(fixture.client,fixture.entry.dev,packet,sizeof(packet),&valid)==-ENODATA);
+		assert(valid && !fixture.feedback_calls);
+		fixture.entry.burst_plan.submit_feedback=provider_feedback;
+		assert(!feedback_test_client_run(fixture.client,fixture.entry.dev,packet,sizeof(packet),&valid));
+		assert(valid && fixture.feedback_calls==1);
+		fixture.feedback_error=-ESTALE;
+		assert(feedback_test_client_run(fixture.client,fixture.entry.dev,packet,sizeof(packet),&valid)==-ESTALE);
+		assert(valid && fixture.feedback_calls==2);
+		SLIST_REMOVE_HEAD(&fixture.parser.thdlist_head,parser_list_entry);
+		assert(feedback_test_client_run(fixture.client,fixture.entry.dev,packet,sizeof(packet),&valid)==-EBADF);
+		assert(valid && fixture.feedback_calls==2);
+		SLIST_INSERT_HEAD(&fixture.parser.thdlist_head,&fixture.thread,parser_list_entry);
+		const char *bad[]={"FEEDBACKBUFM dev0 0\r\n","FEEDBACKBUFM dev0 +01\r\n",
+			"FEEDBACKBUFM dev0 0g\r\n","FEEDBACKBUFM dev0 01-\r\n"};
+		for (unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);++i) {
+			client_write(&fixture,bad[i],strlen(bad[i]));
+			assert(fixture.output_bytes==4 && !memcmp(fixture.output,"-22\n",4));
+			fixture.output_offset=fixture.output_bytes;
+		}
+		assert(fixture.feedback_calls==2 && fixture.entry.buf==NULL);
+	}
 	drain_test_client_destroy(fixture.client);
 	pthread_mutex_destroy(&fixture.entry.thdlist_lock);
 	iio_context_destroy(fixture.parser.ctx);

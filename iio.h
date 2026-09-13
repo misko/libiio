@@ -1494,6 +1494,13 @@ __api __check_ret struct iio_buffer * iio_device_create_buffer(const struct iio_
 
 /** Maximum opaque metadata-session request accepted by libiio and iiOD. */
 #define IIO_BUFFER_METADATA_REQUEST_MAX 4096U
+#define IIO_BUFFER_METADATA_FEEDBACK_MAX 256U
+
+/** Submit bounded provider feedback between completed metadata refills.
+ * Requires explicit provider capability/admission. No new connection or capture
+ * is opened. Returns zero on acceptance, negative errno on rejection. */
+__api __check_ret int iio_buffer_submit_metadata_feedback(struct iio_buffer *buffer,
+	const void *feedback, size_t bytes);
 
 /** Maximum number of ordinary metadata reads that may be prequeued. */
 #define IIO_BUFFER_METADATA_BATCH_MAX 64U

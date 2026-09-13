@@ -181,6 +181,54 @@ static void threaded_feedback(unsigned rate)
 	spf_hop_adaptive_policy_destroy(h.policy);
 }
 
+static void host_feedback(void)
+{
+	for (unsigned rx=0;rx<2;++rx) {
+		struct spf_hop_request_v2 r=request(10000000,SPF_HOP_ADAPTIVE);
+		struct spf_hop_adaptive_policy *p;
+		struct spf_hop_choice_v2 c;
+		uint64_t now=UINT64_C(0xfffffff0);
+		r.host.enabled=1; r.host.rx=rx; r.host.decision_rate_hz=2500000;
+		r.host.factor=4; r.host.delay=80; r.host.supported_start=40; r.host.supported_end=300000;
+		memset(r.host.configuration_sha256,0x17,32);
+		assert(!spf_hop_adaptive_policy_create(&p,&r));
+		for (unsigned index=0;index<80;++index) {
+			leo_adaptive_observation_v1 o=visit(p,&r,index,&now,&c);
+			struct spf_hop_host_feedback_v1 f={.session=o.session,.generation=o.generation,
+				.stream_id=94,.visit=index,.event_sequence=index,.valid_start=o.valid_start,
+				.valid_end=o.valid_end,.source_rate_hz=10000000,.decision_rate_hz=2500000,
+				.rx=rx,.target=o.target,.outcome=o.target==0 ? 1 : 2,.healthy=1,
+				.screen_mask=63,.confirmation_mask=1,.supported_start=40,.supported_end=300000,
+				.factor=4,.delay=80}, bad;
+			memcpy(f.configuration_sha256,r.host.configuration_sha256,32);
+			assert(c.reason!=SPF_HOP_CHOICE_FAULT_FALLBACK);
+			if (index>=48) assert(c.active_mask==1 && c.quiet_mask==254);
+			if (!index) {
+				bad=f; bad.rx=1-rx;
+				assert(spf_hop_adaptive_policy_offer_host(p,&bad,94,o.valid_end)==-ESTALE);
+				bad=f; ++bad.generation;
+				assert(spf_hop_adaptive_policy_offer_host(p,&bad,94,o.valid_end)==-ESTALE);
+				bad=f; ++bad.session;
+				assert(spf_hop_adaptive_policy_offer_host(p,&bad,94,o.valid_end)==-ESTALE);
+				bad=f; bad.configuration_sha256[0]^=1;
+				assert(spf_hop_adaptive_policy_offer_host(p,&bad,94,o.valid_end)==-ESTALE);
+				bad=f; ++bad.visit; ++bad.event_sequence;
+				assert(spf_hop_adaptive_policy_offer_host(p,&bad,94,o.valid_end)==-ERANGE);
+				bad=f; bad.target=(bad.target+1)%8;
+				assert(spf_hop_adaptive_policy_offer_host(p,&bad,94,o.valid_end)==-EINVAL);
+				bad=f; bad.valid_start+=4; bad.valid_end+=4;
+				assert(spf_hop_adaptive_policy_offer_host(p,&bad,94,o.valid_end+4)==-EINVAL);
+				assert(spf_hop_adaptive_policy_offer_host(p,&f,95,o.valid_end)==-ESTALE);
+				assert(spf_hop_adaptive_policy_offer_host(p,&f,94,o.valid_end-1)==-ESTALE);
+				assert(spf_hop_adaptive_policy_offer_host(p,&f,94,o.valid_end+10000001)==-ESTALE);
+			}
+			assert(!spf_hop_adaptive_policy_offer_host(p,&f,94,o.valid_end));
+			assert(spf_hop_adaptive_policy_offer_host(p,&f,94,o.valid_end)==-EALREADY);
+		}
+		spf_hop_adaptive_policy_destroy(p);
+	}
+}
+
 int main(void)
 {
 	all_masks(2500000, SPF_HOP_ADAPTIVE);
@@ -190,6 +238,7 @@ int main(void)
 	fault_cases();
 	threaded_feedback(2500000);
 	threaded_feedback(5000000);
+	host_feedback();
 	puts("native feedback/policy: 458752 mask decisions + 4000 threaded decisions + fault cases PASS; synthetic, no RF");
 	return 0;
 }

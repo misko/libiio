@@ -626,6 +626,26 @@ static int network_cancel_buffer_metadata_session(const struct iio_device *dev)
 	return ret;
 }
 
+static int network_submit_metadata_feedback(const struct iio_device *dev,
+	const void *feedback, size_t bytes)
+{
+	struct iio_context_pdata *ctx_pdata=iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *pdata=dev->pdata;
+	const char *cap=iio_context_get_attr_value(dev->ctx,"iio,buffer-metadata-feedback");
+	bool stream_valid;
+	int ret;
+	if (!cap || strcmp(cap,"1")) return -ENOSYS;
+	iio_mutex_lock(pdata->lock);
+	if (pdata->io_ctx.fd<0 || pdata->io_ctx.cancelled) ret=-EBADF;
+	else {
+		ret=iiod_client_submit_metadata_feedback_unlocked(ctx_pdata->iiod_client,
+			&pdata->io_ctx,dev,feedback,bytes,&stream_valid);
+		if (!stream_valid) network_cancel(dev);
+	}
+	iio_mutex_unlock(pdata->lock);
+	return ret;
+}
+
 static int network_prequeue_metadata_reads_async(const struct iio_device *dev,
 		size_t len, size_t metadata_capacity, unsigned int frames)
 {
@@ -1202,6 +1222,7 @@ static const struct iio_backend_ops network_ops = {
 	.read_with_metadata_batch = network_read_with_metadata_batch,
 	.get_buffer_metadata_status = network_get_buffer_metadata_status,
 	.drain_buffer_metadata = network_drain_buffer_metadata,
+	.submit_metadata_feedback = network_submit_metadata_feedback,
 	.cancel_buffer_metadata_session = network_cancel_buffer_metadata_session,
 	.prequeue_metadata_reads_async = network_prequeue_metadata_reads_async,
 	.prequeue_metadata_reads_async_policy =
@@ -1535,7 +1556,7 @@ struct iio_context * network_create_context(const char *hostname)
 	 * with those corresponding to the network context */
 	ctx->name = "network";
 	ctx->ops = &network_ops;
-	ctx->backend_api_version = IIO_BACKEND_API_V10;
+	ctx->backend_api_version = IIO_BACKEND_API_V11;
 	ctx->pdata = pdata;
 
 	uri_len = strlen(description);

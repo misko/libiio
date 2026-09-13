@@ -23,6 +23,8 @@ struct iiod_buffer_burst_plan {
 	 * Zero-initialized by iiOD; existing providers need not implement a hook. */
 	ssize_t (*drain_metadata)(void *provider_context,
 			void *metadata, size_t metadata_capacity);
+	/* Explicit opt-in. Called only on the owning buffer connection. */
+	int (*submit_feedback)(void *provider_context, const void *feedback, size_t bytes);
 };
 
 struct iiod_buffer_metadata_frame_info {
@@ -68,6 +70,7 @@ ssize_t iiod_buffer_metadata_status(void *provider_context,
  * buffer.  This lets the client read a terminal provider receipt before CLOSE.
  * Providers without an independently cancellable session return -ENODATA. */
 int iiod_buffer_metadata_cancel(void *provider_context);
+int iiod_buffer_metadata_feedback(void *provider_context, const void *feedback, size_t bytes);
 /* A provider returns -ESTALE when a valid IQ block has fallen outside its
  * retained observation window.  Preserve-backlog treats that as terminal;
  * drop-backlog may retire the uncovered block and continue with fresh data.

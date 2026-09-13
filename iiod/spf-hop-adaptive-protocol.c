@@ -18,12 +18,13 @@ static void put(uint8_t *p, uint64_t v, unsigned n)
 	for (i = 0; i < n; ++i) p[i] = (uint8_t)(v >> (8 * i));
 }
 
-static int valid_policy(const struct spf_hop_request_v2 *r)
+static int valid_policy(const struct spf_hop_request_v2 *r, int host)
 {
 	const struct spf_hop_policy_v2 *p = &r->policy;
 	const struct spf_hop_request_v1 *g = &r->geometry;
 	if (!p->generation || (p->mode != SPF_HOP_SHADOW && p->mode != SPF_HOP_ADAPTIVE) ||
-		(g->sample_rate_hz != 2500000 && g->sample_rate_hz != 5000000) ||
+		(host ? g->sample_rate_hz != 10000000 :
+		 (g->sample_rate_hz != 2500000 && g->sample_rate_hz != 5000000)) ||
 		g->dwell_samples != g->sample_rate_hz * 120 / 1000 ||
 		g->dwell_count > 2500 || !p->warmup_visits || p->warmup_visits > 16 ||
 		g->dwell_count < p->warmup_visits * SPF_HOP_PROFILE_COUNT ||
@@ -74,7 +75,9 @@ int spf_hop_request_v2_encode(void *wire, size_t size, const struct spf_hop_requ
 	int ret;
 	if (!wire || !r) return -EINVAL;
 	if (size < sizeof(p)) return -ENOSPC;
-	if (valid_policy(r)) return -EINVAL;
+	if (valid_policy(r, 0)) return -EINVAL;
+	const unsigned char empty_host[sizeof(r->host)] = {0};
+	if (memcmp(&r->host, empty_host, sizeof(r->host))) return -EINVAL;
 	ret = spf_hop_request_v1_encode(p, SPF_HOP_REQUEST_BYTES, &r->geometry);
 	if (ret) return ret;
 	put(p + 4, SPF_HOP_ADAPTIVE_VERSION, 2);
@@ -109,7 +112,7 @@ int spf_hop_request_v2_decode(struct spf_hop_request_v2 *r, const void *wire, si
 	ret = spf_hop_request_v1_decode(&out.geometry, geometry, sizeof(geometry));
 	if (ret) return ret;
 	policy_decode(&out.policy, p + SPF_HOP_REQUEST_BYTES);
-	if (valid_policy(&out)) return -EBADMSG;
+	if (valid_policy(&out, 0)) return -EBADMSG;
 	*r = out;
 	return 0;
 }
@@ -248,5 +251,159 @@ int spf_hop_status_v2_decode(struct spf_hop_status_v1 *s, const void *wire, size
 	ret = spf_hop_status_v1_decode(&out, old, sizeof(old));
 	if (ret) return ret;
 	*s = out;
+	return 0;
+}
+
+static int digest_present(const uint8_t *p)
+{
+	unsigned any=0;
+	for (unsigned i=0; i<32; ++i) any |= p[i];
+	return any != 0;
+}
+
+int spf_hop_sidecar_v3_encode(void *wire, size_t size, const struct spf_hop_sidecar_v2 *s)
+{
+	int ret=spf_hop_sidecar_v2_encode(wire,size,s);
+	if (ret>=0) { put((uint8_t *)wire+4,3,2); put((uint8_t *)wire+12,0x7f,4); }
+	return ret;
+}
+
+int spf_hop_sidecar_v3_decode(struct spf_hop_sidecar_v2 *s, const void *wire, size_t size)
+{
+	uint8_t copy[SPF_HOP_ADAPTIVE_SIDECAR_MAX_BYTES];
+	if (!s || !wire) return -EINVAL;
+	if (size<SPF_HOP_SIDECAR_HEADER_BYTES || size>sizeof(copy)) return -EMSGSIZE;
+	if (get((const uint8_t *)wire+4,2)!=3 || get((const uint8_t *)wire+12,4)!=0x7f)
+		return -EPROTONOSUPPORT;
+	memcpy(copy,wire,size); put(copy+4,2,2); put(copy+12,SPF_HOP_ADAPTIVE_FEATURES,4);
+	return spf_hop_sidecar_v2_decode(s,copy,size);
+}
+
+int spf_hop_status_v3_encode(void *wire, size_t size, const struct spf_hop_status_v1 *s)
+{
+	int ret=spf_hop_status_v2_encode(wire,size,s);
+	if (!ret) { put((uint8_t *)wire+4,3,2); put((uint8_t *)wire+8,0x7f,4); }
+	return ret;
+}
+
+int spf_hop_request_v3_encode(void *wire, size_t size, const struct spf_hop_request_v2 *r)
+{
+	uint8_t p[SPF_HOP_HOST_REQUEST_BYTES]={0};
+	int ret;
+	if (!wire || !r) return -EINVAL;
+	if (size<sizeof(p)) return -ENOSPC;
+	if (valid_policy(r,1) || r->host.enabled!=1 || r->host.rx>1 ||
+		r->host.decision_rate_hz!=2500000 || r->host.factor!=4 || r->host.phase ||
+		r->host.delay!=80 || r->host.supported_start!=40 || r->host.supported_end!=300000 ||
+		!digest_present(r->host.configuration_sha256)) return -EINVAL;
+	ret=spf_hop_request_v1_encode(p,SPF_HOP_REQUEST_BYTES,&r->geometry);
+	if (ret) return ret;
+	put(p+4,3,2); put(p+6,sizeof(p),2); put(p+8,0x7f,4);
+	put(p+76,SPF_HOP_ADAPTIVE_EVENT_BYTES,2);
+	policy_encode(p+SPF_HOP_REQUEST_BYTES,&r->policy);
+	put(p+352,r->host.enabled,4); put(p+356,r->host.rx,4);
+	put(p+360,r->host.decision_rate_hz,4); put(p+364,r->host.factor,4);
+	put(p+368,r->host.phase,4); put(p+372,r->host.delay,4);
+	put(p+376,r->host.supported_start,4); put(p+380,r->host.supported_end,4);
+	memcpy(p+384,r->host.configuration_sha256,32);
+	memcpy(wire,p,sizeof(p));
+	return 0;
+}
+
+int spf_hop_request_v3_decode(struct spf_hop_request_v2 *r, const void *wire, size_t size)
+{
+	const uint8_t *p=wire;
+	uint8_t geometry[SPF_HOP_REQUEST_BYTES], validated[SPF_HOP_HOST_REQUEST_BYTES];
+	struct spf_hop_request_v2 out={0};
+	int ret;
+	if (!r || !wire) return -EINVAL;
+	if (size!=SPF_HOP_HOST_REQUEST_BYTES) return -EMSGSIZE;
+	if (get(p,4)!=SPF_HOP_REQUEST_MAGIC || get(p+4,2)!=3 || get(p+6,2)!=size)
+		return -EPROTONOSUPPORT;
+	if (get(p+8,4)!=0x7f || get(p+76,2)!=SPF_HOP_ADAPTIVE_EVENT_BYTES ||
+		get(p+336,8) || get(p+344,8)) return -EBADMSG;
+	memcpy(geometry,p,sizeof(geometry));
+	put(geometry+4,1,2); put(geometry+6,sizeof(geometry),2);
+	put(geometry+8,SPF_HOP_REQUIRED_FEATURES_V1,4); put(geometry+76,SPF_HOP_EVENT_BYTES,2);
+	ret=spf_hop_request_v1_decode(&out.geometry,geometry,sizeof(geometry));
+	if (ret) return ret;
+	policy_decode(&out.policy,p+288);
+	out.host.enabled=get(p+352,4); out.host.rx=get(p+356,4);
+	out.host.decision_rate_hz=get(p+360,4); out.host.factor=get(p+364,4);
+	out.host.phase=get(p+368,4); out.host.delay=get(p+372,4);
+	out.host.supported_start=get(p+376,4); out.host.supported_end=get(p+380,4);
+	memcpy(out.host.configuration_sha256,p+384,32);
+	ret=spf_hop_request_v3_encode(validated,sizeof(validated),&out);
+	if (ret) return ret;
+	*r=out;
+	return 0;
+}
+
+int spf_hop_adaptive_configuration(void *out, size_t size, const struct spf_hop_request_v2 *r)
+{
+	uint8_t bytes[SPF_HOP_HOST_REQUEST_BYTES]={0};
+	int ret;
+	if (!out || !r) return -EINVAL;
+	if (size<sizeof(bytes)) return -ENOSPC;
+	ret=r->host.enabled ? spf_hop_request_v3_encode(bytes,sizeof(bytes),r) :
+		spf_hop_request_v2_encode(bytes,sizeof(bytes),r);
+	if (!ret) memcpy(out,bytes,sizeof(bytes));
+	return ret;
+}
+
+static int feedback_valid(const struct spf_hop_host_feedback_v1 *f)
+{
+	return f && f->session && f->generation && f->stream_id && f->visit<2500 &&
+		f->event_sequence==f->visit && f->valid_end>f->valid_start &&
+		f->valid_end-f->valid_start==1200000 && f->source_rate_hz==10000000 &&
+		f->decision_rate_hz==2500000 && f->rx<=1 && f->target<8 && f->outcome<=2 &&
+		f->healthy<=1 && (f->healthy || !f->outcome) && f->screen_mask<=63 &&
+		(!f->healthy || f->screen_mask==63) && f->confirmation_mask<=32 &&
+		!(f->confirmation_mask & (f->confirmation_mask-1)) &&
+		(f->outcome!=1 || f->confirmation_mask) && f->supported_start==40 &&
+		f->supported_end==300000 && f->factor==4 && !f->phase && f->delay==80 &&
+		digest_present(f->configuration_sha256);
+}
+
+int spf_hop_host_feedback_v1_encode(void *wire, size_t size,
+	const struct spf_hop_host_feedback_v1 *f)
+{
+	uint8_t p[SPF_HOP_HOST_FEEDBACK_BYTES]={0};
+	if (!wire || !feedback_valid(f)) return -EINVAL;
+	if (size<sizeof(p)) return -ENOSPC;
+	memcpy(p,"HFB1",4); put(p+4,1,2); put(p+6,sizeof(p),2);
+	put(p+8,f->session,8); put(p+16,f->generation,8); put(p+24,f->stream_id,8);
+	put(p+32,f->visit,8); put(p+40,f->event_sequence,8);
+	put(p+48,f->valid_start,8); put(p+56,f->valid_end,8);
+	put(p+64,f->source_rate_hz,4); put(p+68,f->decision_rate_hz,4);
+	put(p+72,f->rx,4); put(p+76,f->target,4); put(p+80,f->outcome,4); put(p+84,f->healthy,4);
+	put(p+88,f->screen_mask,4); put(p+92,f->confirmation_mask,4);
+	put(p+96,f->supported_start,4); put(p+100,f->supported_end,4);
+	put(p+104,f->factor,4); put(p+108,f->phase,4); put(p+112,f->delay,4);
+	memcpy(p+120,f->configuration_sha256,32);
+	memcpy(wire,p,sizeof(p));
+	return 0;
+}
+
+int spf_hop_host_feedback_v1_decode(struct spf_hop_host_feedback_v1 *f,
+	const void *wire, size_t size)
+{
+	const uint8_t *p=wire;
+	struct spf_hop_host_feedback_v1 out={0};
+	if (!f || !wire) return -EINVAL;
+	if (size!=SPF_HOP_HOST_FEEDBACK_BYTES) return -EMSGSIZE;
+	if (memcmp(p,"HFB1",4) || get(p+4,2)!=1 || get(p+6,2)!=size) return -EPROTONOSUPPORT;
+	if (get(p+116,4) || get(p+152,8)) return -EBADMSG;
+	out.session=get(p+8,8); out.generation=get(p+16,8); out.stream_id=get(p+24,8);
+	out.visit=get(p+32,8); out.event_sequence=get(p+40,8);
+	out.valid_start=get(p+48,8); out.valid_end=get(p+56,8);
+	out.source_rate_hz=get(p+64,4); out.decision_rate_hz=get(p+68,4);
+	out.rx=get(p+72,4); out.target=get(p+76,4); out.outcome=get(p+80,4); out.healthy=get(p+84,4);
+	out.screen_mask=get(p+88,4); out.confirmation_mask=get(p+92,4);
+	out.supported_start=get(p+96,4); out.supported_end=get(p+100,4);
+	out.factor=get(p+104,4); out.phase=get(p+108,4); out.delay=get(p+112,4);
+	memcpy(out.configuration_sha256,p+120,32);
+	if (!feedback_valid(&out)) return -EBADMSG;
+	*f=out;
 	return 0;
 }

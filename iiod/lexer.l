@@ -24,6 +24,8 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 %s WANT_VALUE
 %s WANT_DRAIN_DEVICE
 %s WANT_DRAIN_CAPACITY
+%s WANT_FEEDBACK_DEVICE
+%s WANT_FEEDBACK_PAYLOAD
 %%
 
 <INITIAL>VERSION|version {
@@ -103,6 +105,23 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 <INITIAL>WRITEBUF|writebuf {
 	BEGIN(WANT_DEVICE);
 	return WRITEBUF;
+}
+
+<INITIAL>FEEDBACKBUFM|feedbackbufm {
+	BEGIN(WANT_FEEDBACK_DEVICE);
+	return FEEDBACKBUFM;
+}
+
+<WANT_FEEDBACK_DEVICE>[^ \t\r\n]+ {
+	struct parser_pdata *pdata=yyget_extra(yyscanner);
+	yylval->dev=iio_context_find_device(pdata->ctx,yytext);
+	BEGIN(WANT_FEEDBACK_PAYLOAD);
+	return DEVICE;
+}
+
+<WANT_FEEDBACK_PAYLOAD>[^ \t\r\n]+ {
+	yylval->word=strdup(yyleng<=512 && strlen(yytext)==(size_t)yyleng ? yytext : "");
+	return WORD;
 }
 
 <INITIAL>WRITE|write {

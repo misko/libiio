@@ -107,3 +107,6 @@ int iiod_buffer_metadata_rebase_frame(void *provider_context,
 	(void)previous_frame_end;
 	return -ENOSYS;
 }
+
+int iiod_buffer_metadata_feedback(void *context, const void *feedback, size_t bytes)
+{ (void)context; (void)feedback; (void)bytes; return -ENOSYS; }

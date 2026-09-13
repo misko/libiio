@@ -392,10 +392,10 @@ void spf_hop_scheduler_v1_destroy(void *device_context)
 static int scheduler_submit_v2(void *opaque, const struct spf_hop_request_v2 *request)
 {
 	struct spf_hop_scheduler_v1 *s = opaque;
-	uint8_t actual[SPF_HOP_ADAPTIVE_REQUEST_BYTES], expected[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
+	uint8_t actual[SPF_HOP_HOST_REQUEST_BYTES], expected[SPF_HOP_HOST_REQUEST_BYTES];
 	if (!s || !s->adaptive || !request ||
-		spf_hop_request_v2_encode(actual, sizeof(actual), request) ||
-		spf_hop_request_v2_encode(expected, sizeof(expected), &s->adaptive_request) ||
+		spf_hop_adaptive_configuration(actual, sizeof(actual), request) ||
+		spf_hop_adaptive_configuration(expected, sizeof(expected), &s->adaptive_request) ||
 		memcmp(actual, expected, sizeof(actual))) return -EINVAL;
 	return scheduler_submit(s, &request->geometry);
 }
@@ -430,14 +430,14 @@ int spf_hop_scheduler_v2_create(const struct spf_hop_request_v2 *request,
 	const struct spf_hop_scheduler_policy_v2 *policy, void *policy_context,
 	void **context, const struct spf_hop_device_ops_v2 **ops)
 {
-	uint8_t wire[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
+	uint8_t wire[SPF_HOP_HOST_REQUEST_BYTES];
 	const struct spf_hop_device_ops_v1 *unused;
 	struct spf_hop_scheduler_v1 *s;
 	void *created;
 	int ret;
 	if (!request || !policy || !policy->choose || !policy->commit || !context || !ops)
 		return -EINVAL;
-	ret = spf_hop_request_v2_encode(wire, sizeof(wire), request);
+	ret = spf_hop_adaptive_configuration(wire, sizeof(wire), request);
 	if (ret) return ret;
 	ret = spf_hop_scheduler_v1_create(&request->geometry, io, io_context, &created, &unused);
 	if (ret) return ret;

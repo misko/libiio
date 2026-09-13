@@ -19,6 +19,10 @@ void spf_hop_adaptive_policy_destroy(struct spf_hop_adaptive_policy *);
  * Overflow/invalid feedback latches uniform scanning, not an RF failure. */
 int spf_hop_adaptive_policy_offer(struct spf_hop_adaptive_policy *,
 	const leo_adaptive_observation_v1 *);
+/* Host command producer only; scheduler publishes immutable committed visits.
+ * now is the last transported full-width device counter, never host time. */
+int spf_hop_adaptive_policy_offer_host(struct spf_hop_adaptive_policy *,
+	const struct spf_hop_host_feedback_v1 *, uint64_t stream_id, uint64_t now);
 void spf_hop_adaptive_policy_fault(struct spf_hop_adaptive_policy *);
 /* Single hop-thread consumer; at most eight queued results per choice. */
 const struct spf_hop_scheduler_policy_v2 *spf_hop_adaptive_policy_ports(void);

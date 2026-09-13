@@ -123,6 +123,8 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t status_capacity);
 ssize_t drain_buffer_metadata(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t metadata_capacity);
+int submit_metadata_feedback(struct parser_pdata *pdata, struct iio_device *dev,
+	const char *hex);
 int cancel_buffer_metadata(struct parser_pdata *pdata,
 		struct iio_device *dev);
 

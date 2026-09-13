@@ -696,6 +696,15 @@ else:
     _buffer_drain_metadata.argtypes = (_BufferPtr, c_void_p, c_size_t)
     _buffer_drain_metadata.errcheck = _check_negative
 
+try:
+    _buffer_submit_metadata_feedback = _lib.iio_buffer_submit_metadata_feedback
+except AttributeError:
+    _buffer_submit_metadata_feedback = None
+else:
+    _buffer_submit_metadata_feedback.restype = c_int
+    _buffer_submit_metadata_feedback.argtypes = (_BufferPtr, c_void_p, c_size_t)
+    _buffer_submit_metadata_feedback.errcheck = _check_negative
+
 _buffer_push_partial = _lib.iio_buffer_push_partial
 _buffer_push_partial.restype = c_ssize_t
 _buffer_push_partial.argtypes = (
@@ -1490,6 +1499,17 @@ class MetadataBuffer(Buffer):
         if not 0 < count <= capacity:
             raise OSError("IIO server returned an invalid metadata drain size")
         return storage.raw[:count]
+
+    def submit_metadata_feedback(self, feedback):
+        """Submit an explicitly negotiated feedback packet on this buffer's connection."""
+        if not self._buffer:
+            raise ValueError("buffer is closed")
+        if not isinstance(feedback, bytes) or not 1 <= len(feedback) <= 256:
+            raise ValueError("metadata feedback must contain 1..256 bytes")
+        if _buffer_submit_metadata_feedback is None:
+            raise OSError(_ENOSYS, "installed libiio does not support metadata feedback")
+        packet = create_string_buffer(feedback)
+        return _buffer_submit_metadata_feedback(self._buffer, packet, len(feedback))
 
     @property
     def metadata(self):

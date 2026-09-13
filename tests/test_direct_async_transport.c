@@ -248,6 +248,16 @@ static int fake_get_allocated_kernel_buffers_count(
 	return 0;
 }
 
+static int fake_feedback(const struct iio_device *dev, const void *packet, size_t bytes)
+{
+	struct transport_state *s=device_state(dev);
+	bool valid;
+	int ret=iiod_client_submit_metadata_feedback_unlocked(s->client,
+		(struct iiod_client_pdata *)(void *)s,dev,packet,bytes,&valid);
+	if (!valid) fake_cancel(dev);
+	return ret;
+}
+
 static const struct iio_backend_ops backend_ops = {
 	.close = fake_close,
 	.cancel = fake_cancel,
@@ -255,6 +265,7 @@ static const struct iio_backend_ops backend_ops = {
 	.get_buffer_metadata_status = fake_status,
 	.cancel_buffer_metadata_session = fake_inband_cancel,
 	.drain_buffer_metadata = fake_drain,
+	.submit_metadata_feedback = fake_feedback,
 	.prequeue_metadata_reads_async = fake_prequeue_async,
 	.prequeue_metadata_reads_async_policy = fake_prequeue_async_policy,
 	.get_allocated_kernel_buffers_count =
@@ -647,6 +658,44 @@ int main(void)
 	test_metadata_only_drain_gates();
 	test_metadata_only_drain_rejects_malformed();
 	test_ordinary_refill_still_rejects_zero_iq();
+	{
+		struct fixture f={0};
+		struct iio_buffer *b=fixture_buffer(&f);
+		uint8_t packet[2]={0x01,0xaf};
+		assert(iio_buffer_submit_metadata_feedback(NULL,packet,2)==-EINVAL);
+		assert(iio_buffer_submit_metadata_feedback(b,NULL,2)==-EINVAL);
+		assert(iio_buffer_submit_metadata_feedback(b,packet,257)==-EINVAL);
+		f.context.backend_api_version=IIO_BACKEND_API_V10;
+		assert(iio_buffer_submit_metadata_feedback(b,packet,2)==-ENOSYS);
+		f.context.backend_api_version=IIO_BACKEND_API_CURRENT;
+		b->metadata_batch_cached_frames=2; b->metadata_batch_next_frame=1;
+		assert(iio_buffer_submit_metadata_feedback(b,packet,2)==-EBUSY);
+		b->metadata_batch_cached_frames=0;
+		b->metadata_direct_pending=1;
+		assert(iio_buffer_submit_metadata_feedback(b,packet,2)==-EBUSY);
+		b->metadata_direct_pending=0;
+		assert(!f.state.write_calls);
+		f.state.response_bytes=f.state.response_offset=0;
+		append_bytes(&f.state,"0\n-116\n",7);
+		assert(!iio_buffer_submit_metadata_feedback(b,packet,2));
+		assert(iio_buffer_submit_metadata_feedback(b,packet,2)==-ESTALE);
+		assert(!f.state.cancel_calls);
+		f.state.writes[f.state.write_bytes]=0;
+		assert(!strcmp(f.state.writes,"FEEDBACKBUFM dev0 01af\r\nFEEDBACKBUFM dev0 01af\r\n"));
+		destroy_fixture_buffer(&f,b);
+	}
+	{
+		const char *bad[]={"1\n","0junk\n","+0\n","-0\n"," 0\n","-999999999999999999999\n","0"};
+		for (unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);++i) {
+			struct fixture f={0};
+			struct iio_buffer *b=fixture_buffer(&f);
+			f.state.response_bytes=f.state.response_offset=0;
+			append_bytes(&f.state,bad[i],strlen(bad[i]));
+			assert(iio_buffer_submit_metadata_feedback(b,"x",1)<0);
+			assert(f.state.cancel_calls==1);
+			destroy_fixture_buffer(&f,b);
+		}
+	}
 	puts("direct async transport: PASS");
 	return 0;
 }

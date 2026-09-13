@@ -75,6 +75,7 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token READBUFMSTAT
 %token CANCELBUFM
 %token DRAINBUFM
+%token FEEDBACKBUFM
 %token WRITEBUF
 %token WRITE
 %token SETTRIG
@@ -415,6 +416,13 @@ Line:
 			YYABORT;
 		else
 			YYACCEPT;
+	}
+	| FEEDBACKBUFM SPACE DEVICE SPACE WORD END {
+		struct parser_pdata *pdata=yyget_extra(scanner);
+		int ret=submit_metadata_feedback(pdata,$3,$5);
+		free($5);
+		if (ret<0) YYABORT;
+		else YYACCEPT;
 	}
 	| WRITEBUF SPACE DEVICE SPACE WORD END {
 		char *len = $5;

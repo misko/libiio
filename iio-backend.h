@@ -25,9 +25,10 @@ enum iio_backend_api_ver {
 	IIO_BACKEND_API_V8 = 8,
 	IIO_BACKEND_API_V9 = 9,
 	IIO_BACKEND_API_V10 = 10,
+	IIO_BACKEND_API_V11 = 11,
 };
 
-#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V10
+#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V11
 
 static inline bool iio_backend_api_version_supported(unsigned int version)
 {
@@ -147,6 +148,9 @@ struct iio_backend_ops {
 	 * stream is drained. Never initiates acquisition or refills an IQ buffer. */
 	ssize_t (*drain_buffer_metadata)(const struct iio_device *dev,
 			void *metadata, size_t metadata_capacity);
+	/* API v11: bounded provider feedback on the owning buffer connection. */
+	int (*submit_metadata_feedback)(const struct iio_device *dev,
+			const void *feedback, size_t bytes);
 };
 
 /**

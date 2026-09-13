@@ -151,6 +151,10 @@ ssize_t iiod_client_write_unlocked(struct iiod_client *client,
 				   const struct iio_device *dev,
 				   const void *src, size_t len);
 
+int iiod_client_submit_metadata_feedback_unlocked(struct iiod_client *client,
+	struct iiod_client_pdata *desc, const struct iio_device *dev,
+	const void *feedback, size_t bytes, bool *stream_valid);
+
 struct iio_context * iiod_client_create_context(struct iiod_client *client,
 						struct iiod_client_pdata *desc);
 

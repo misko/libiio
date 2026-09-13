@@ -273,6 +273,21 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 #endif
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
+			SPF_HOP_HOST_REQUEST_BYTES) {
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+		if (glrt_enabled) return -ENOTSUP;
+		ret=spf_hop_request_v3_decode(&adaptive_request,
+			(const uint8_t *)request+sizeof(struct adi_tandem_agc_request_v1),SPF_HOP_HOST_REQUEST_BYTES);
+		if (ret) return ret;
+		ret=spf_hop_adaptive_policy_validate_pinned(&adaptive_request);
+		if (ret) return ret;
+		hop_request=adaptive_request.geometry;
+		hop_enabled=hop_adaptive=true;
+		tandem_request_bytes=sizeof(struct adi_tandem_agc_request_v1);
+#else
+		return -ENOTSUP;
+#endif
+	} else if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
 			SPF_HOP_ADAPTIVE_REQUEST_BYTES) {
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
 		if (!glrt_enabled) return -ENOTSUP;
@@ -339,6 +354,11 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		if (spf_buffer_hop_receiver_rate_validate(layout.receiver_count,
 			hop_request.sample_rate_hz))
 			return -EINVAL;
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+		if (hop_adaptive && adaptive_request.host.enabled &&
+			(layout.receiver_count!=1 ||
+			layout.enabled_scan_mask!=(3U<<(2*adaptive_request.host.rx)))) return -EINVAL;
+#endif
 	} else
 #endif
 	if (tandem_request_bytes != request_bytes && layout.receiver_count != 1U) {
@@ -524,6 +544,10 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 #endif
 
 	*provider_context = ctx;
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+	if (ctx->hop_adaptive && ctx->adaptive_request.host.enabled)
+		burst_plan->submit_feedback=iiod_buffer_metadata_feedback;
+#endif
 	*extra_samples = ctx->layout.extra_samples;
 	if (ctx->burst_enabled || ctx->ring_enabled) {
 		if (ctx->burst_enabled) {
@@ -955,7 +979,8 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 			actual = &sidecar;
 		}
 		if (!ret && ctx->hop_adaptive)
-			sidecar_bytes = spf_hop_sidecar_v2_encode(
+			sidecar_bytes = (ctx->adaptive_request.host.enabled ?
+				spf_hop_sidecar_v3_encode : spf_hop_sidecar_v2_encode)(
 				(uint8_t *)metadata + header_bytes,
 				metadata_capacity - header_bytes, &adaptive_sidecar);
 		else if (!ret)
@@ -1036,7 +1061,8 @@ ssize_t iiod_buffer_metadata_status(void *provider_context,
 		return -ENOSPC;
 	pthread_mutex_lock(&ctx->hop_lock);
 	hop_status = *hop_status_state(ctx);
-	ret = ctx->hop_adaptive ? spf_hop_status_v2_encode(status, status_capacity, &hop_status) :
+	ret = ctx->hop_adaptive ? (ctx->adaptive_request.host.enabled ?
+		spf_hop_status_v3_encode : spf_hop_status_v2_encode)(status, status_capacity, &hop_status) :
 		spf_hop_status_v1_encode(status, status_capacity, &hop_status);
 	pthread_mutex_unlock(&ctx->hop_lock);
 	return ret ? ret : SPF_HOP_STATUS_BYTES;
@@ -1109,7 +1135,8 @@ static int spf_exact_gap_header(
 		if (record->header_bytes == metadata_bytes)
 			return -EBADMSG;
 		if (ctx->hop_adaptive) {
-			ret = spf_hop_sidecar_v2_decode(&adaptive_sidecar,
+			ret = (ctx->adaptive_request.host.enabled ?
+				spf_hop_sidecar_v3_decode : spf_hop_sidecar_v2_decode)(&adaptive_sidecar,
 				(const uint8_t *)metadata + record->header_bytes,
 				metadata_bytes - record->header_bytes);
 			if (!ret) {
@@ -1174,4 +1201,25 @@ int iiod_buffer_metadata_rebase_frame(void *provider_context,
 		return ret;
 	return spf_radio_frame_v6_rebase_gap((void *)const_header, const_header->header_bytes,
 		previous_frame_end) ? 0 : -ERANGE;
+}
+
+int iiod_buffer_metadata_feedback(void *provider_context, const void *feedback, size_t bytes)
+{
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+	struct spf_iiod_metadata_context *ctx=provider_context;
+	struct spf_hop_host_feedback_v1 f;
+	int ret;
+	if (!ctx || !ctx->hop_adaptive || !ctx->adaptive_request.host.enabled) return -ENOTSUP;
+	ret=spf_hop_host_feedback_v1_decode(&f,feedback,bytes);
+	if (ret) return ret;
+	pthread_mutex_lock(&ctx->hop_lock);
+	const struct spf_hop_status_v1 *status=hop_status_state(ctx);
+	if (status->state!=SPF_HOP_STATE_RUNNING) ret=-ESHUTDOWN;
+	else ret=spf_hop_adaptive_policy_offer_host(ctx->policy,&f,ctx->stream_id,status->last_block_end);
+	pthread_mutex_unlock(&ctx->hop_lock);
+	return ret;
+#else
+	(void)provider_context; (void)feedback; (void)bytes;
+	return -ENOTSUP;
+#endif
 }

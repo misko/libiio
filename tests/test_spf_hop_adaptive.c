@@ -310,6 +310,43 @@ static void test_scheduler(uint64_t rate, uint32_t mode)
 int main(void)
 {
 	test_request();
+	{
+		struct spf_hop_request_v2 r=request(10000000,SPF_HOP_ADAPTIVE), decoded;
+		uint8_t wire[SPF_HOP_HOST_REQUEST_BYTES], again[sizeof(wire)];
+		r.host.enabled=1; r.host.rx=0; r.host.decision_rate_hz=2500000;
+		r.host.factor=4; r.host.delay=80; r.host.supported_start=40; r.host.supported_end=300000;
+		memset(r.host.configuration_sha256,0x91,32);
+		assert(spf_hop_request_v2_encode(wire,sizeof(wire),&r)<0);
+		assert(!spf_hop_request_v3_encode(wire,sizeof(wire),&r));
+		assert(!spf_hop_request_v3_decode(&decoded,wire,sizeof(wire)));
+		assert(!spf_hop_request_v3_encode(again,sizeof(again),&decoded));
+		assert(!memcmp(wire,again,sizeof(wire)));
+		assert(spf_hop_request_v2_decode(&decoded,wire,sizeof(wire))<0);
+		for (size_t n=0;n<sizeof(wire);++n) assert(spf_hop_request_v3_decode(&decoded,wire,n)<0);
+		wire[336]=1;
+		assert(spf_hop_request_v3_decode(&decoded,wire,sizeof(wire))<0);
+		r.host.rx=1;
+		assert(!spf_hop_request_v3_encode(wire,sizeof(wire),&r));
+		r.host.rx=2;
+		assert(spf_hop_request_v3_encode(wire,sizeof(wire),&r)<0);
+		struct spf_hop_host_feedback_v1 f={.session=1,.generation=2,.stream_id=3,
+			.valid_start=UINT64_C(0xffffffff),.valid_end=UINT64_C(0xffffffff)+1200000,
+			.source_rate_hz=10000000,.decision_rate_hz=2500000,.rx=1,.outcome=1,.healthy=1,
+			.screen_mask=63,.confirmation_mask=32,.supported_start=40,.supported_end=300000,
+			.factor=4,.delay=80}, got;
+		memset(f.configuration_sha256,0x92,32);
+		assert(!spf_hop_host_feedback_v1_encode(wire,sizeof(wire),&f));
+		assert(!spf_hop_host_feedback_v1_decode(&got,wire,SPF_HOP_HOST_FEEDBACK_BYTES));
+		assert(got.valid_end==f.valid_end && got.rx==1 && got.outcome==1);
+		for (size_t n=0;n<SPF_HOP_HOST_FEEDBACK_BYTES;++n)
+			assert(spf_hop_host_feedback_v1_decode(&got,wire,n)<0);
+		wire[152]=1;
+		assert(spf_hop_host_feedback_v1_decode(&got,wire,SPF_HOP_HOST_FEEDBACK_BYTES)<0);
+		f.healthy=0;
+		assert(spf_hop_host_feedback_v1_encode(wire,sizeof(wire),&f)<0);
+		f.outcome=0; f.screen_mask=0; f.confirmation_mask=0;
+		assert(!spf_hop_host_feedback_v1_encode(wire,sizeof(wire),&f));
+	}
 	test_scheduler(2500000, SPF_HOP_ADAPTIVE);
 	test_scheduler(5000000, SPF_HOP_ADAPTIVE);
 	test_scheduler(2500000, SPF_HOP_SHADOW);

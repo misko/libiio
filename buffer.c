@@ -469,6 +469,20 @@ ssize_t iio_buffer_drain_metadata(struct iio_buffer *buffer,
 	return ops->drain_buffer_metadata(buffer->dev, metadata, metadata_capacity);
 }
 
+int iio_buffer_submit_metadata_feedback(struct iio_buffer *buffer,
+	const void *feedback, size_t bytes)
+{
+	const struct iio_backend_ops *ops;
+	if (!buffer || !buffer->metadata_enabled || !feedback || !bytes ||
+		bytes>IIO_BUFFER_METADATA_FEEDBACK_MAX) return -EINVAL;
+	if (buffer->metadata_direct_pending || metadata_batch_is_failed(buffer) ||
+		buffer->metadata_batch_next_frame<buffer->metadata_batch_cached_frames) return -EBUSY;
+	ops=buffer->dev->ctx->ops;
+	if (buffer->dev->ctx->backend_api_version<IIO_BACKEND_API_V11 ||
+		!ops->submit_metadata_feedback) return -ENOSYS;
+	return ops->submit_metadata_feedback(buffer->dev,feedback,bytes);
+}
+
 void iio_buffer_destroy(struct iio_buffer *buffer)
 {
 	if (buffer->metadata_direct_pending &&
