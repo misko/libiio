@@ -281,9 +281,16 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		ret=host_wire[4]==4 ?
 			spf_hop_request_v4_decode(&adaptive_request,host_wire,SPF_HOP_HOST_REQUEST_BYTES) :
 			spf_hop_request_v3_decode(&adaptive_request,host_wire,SPF_HOP_HOST_REQUEST_BYTES);
-		if (ret) return ret;
+		if (ret) {
+			fprintf(stderr, "SPF host adaptive OPEN rejected: stage=request_decode version=%u error=%d\n",
+				host_wire[4], ret);
+			return ret;
+		}
 		ret=spf_hop_adaptive_policy_validate_pinned(&adaptive_request);
-		if (ret) return ret;
+		if (ret) {
+			fprintf(stderr, "SPF host adaptive OPEN rejected: stage=policy error=%d\n", ret);
+			return ret;
+		}
 		hop_request=adaptive_request.geometry;
 		hop_enabled=hop_adaptive=true;
 		tandem_request_bytes=sizeof(struct adi_tandem_agc_request_v1);
@@ -350,23 +357,35 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 #endif
 	ret = spf_buffer_layout_resolve(samples_count, mask, words, scan_bytes,
 		&layout);
-	if (ret)
+	if (ret) {
+		fprintf(stderr, "SPF metadata OPEN rejected: stage=buffer_layout error=%d\n", ret);
 		return ret;
+	}
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (hop_enabled) {
-		if (spf_buffer_hop_receiver_rate_validate(layout.receiver_count,
+		ret = spf_buffer_hop_receiver_rate_validate(layout.receiver_count,
 			hop_request.sample_rate_hz,
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
 			hop_adaptive && adaptive_request.host.enabled
 #else
 			false
 #endif
-			))
+			);
+		if (ret) {
+			fprintf(stderr,
+				"SPF persistent-hop OPEN rejected: stage=receiver_rate receivers=%u rate=%llu error=%d\n",
+				layout.receiver_count, (unsigned long long)hop_request.sample_rate_hz, ret);
 			return -EINVAL;
+		}
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
 		if (hop_adaptive && adaptive_request.host.enabled &&
 			(layout.receiver_count!=1 ||
-			layout.enabled_scan_mask!=(3U<<(2*adaptive_request.host.rx)))) return -EINVAL;
+			layout.enabled_scan_mask!=(3U<<(2*adaptive_request.host.rx)))) {
+			fprintf(stderr,
+				"SPF host adaptive OPEN rejected: stage=rx_layout receivers=%u mask=%08x rx=%u\n",
+				layout.receiver_count, layout.enabled_scan_mask, adaptive_request.host.rx);
+			return -EINVAL;
+		}
 #endif
 	} else
 #endif
@@ -379,6 +398,7 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	ret = spf_tandem_session_init(&ctx->tandem, request,
 		tandem_request_bytes, NULL);
 	if (ret) {
+		fprintf(stderr, "SPF metadata OPEN rejected: stage=tandem_init error=%d\n", ret);
 		free(ctx);
 		return ret;
 	}
@@ -536,6 +556,8 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 				&ctx->tandem_lock, &ctx->hop_request,
 				&ctx->hop_device_context, &ctx->hop_ops);
 		if (ret) {
+			fprintf(stderr, "SPF persistent-hop OPEN rejected: stage=%s error=%d\n",
+				ctx->hop_adaptive ? "adaptive_device" : "fixed_device", ret);
 			iiod_buffer_metadata_close(ctx);
 			return ret;
 		}
@@ -545,6 +567,7 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			spf_hop_session_v1_init(&ctx->hop_session,
 				&ctx->hop_request, ctx->hop_ops, ctx->hop_device_context);
 		if (ret) {
+			fprintf(stderr, "SPF persistent-hop OPEN rejected: stage=session_init error=%d\n", ret);
 			iiod_buffer_metadata_close(ctx);
 			return ret;
 		}
