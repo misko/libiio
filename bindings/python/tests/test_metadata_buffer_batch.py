@@ -350,6 +350,8 @@ def test_direct_async_can_preserve_backlog_explicitly(monkeypatch):
 
     assert configured == [(created, 2, 65536, 0)]
     assert buffer.drop_backlog_on_overrun is False
+    buffer.rearm_direct_async()
+    assert configured == [(created, 2, 65536, 0), (created, 1, 65536, 0)]
     buffer.close()
 
 

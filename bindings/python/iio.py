@@ -1476,6 +1476,21 @@ class MetadataBuffer(Buffer):
             raise OSError("IIO server returned an invalid metadata status size")
         return storage.raw[:count]
 
+    def rearm_direct_async(self, frames=1):
+        """Queue another finite direct segment after the prior one is drained."""
+        if not self._buffer:
+            raise ValueError("buffer is closed")
+        if not self._direct_async_frames:
+            raise ValueError("buffer was not opened for direct async capture")
+        if not isinstance(frames, int) or isinstance(frames, bool) or not 1 <= frames <= 8192:
+            raise ValueError("frames must be an integer in [1, 8192]")
+        _buffer_set_metadata_read_prequeue_async_policy(
+            self._buffer,
+            frames,
+            self._metadata_capacity,
+            1 if self._drop_backlog_on_overrun else 0,
+        )
+
     def drain_metadata(self, capacity=65536):
         """Retrieve one negotiated metadata-only result after IQ is drained.
 

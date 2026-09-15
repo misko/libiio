@@ -393,6 +393,29 @@ static void test_fifo_drain_single_command(void)
 	assert(fixture.state.close_calls == 1);
 }
 
+static void test_exhausted_direct_segment_can_be_rearmed(void)
+{
+	struct fixture fixture = {0};
+	struct iio_buffer *buffer = fixture_buffer(&fixture);
+	struct test_metadata metadata;
+	size_t metadata_bytes = 0;
+
+	assert(iio_buffer_set_metadata_read_prequeue_async_policy(buffer, 1,
+		TEST_METADATA_BYTES,
+		IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG) == 0);
+	assert(iio_buffer_refill_with_metadata(buffer, &metadata,
+		sizeof(metadata), &metadata_bytes) == TEST_IQ_BYTES);
+	assert(metadata.sequence == 0);
+	assert(iio_buffer_set_metadata_read_prequeue_async_policy(buffer, 1,
+		TEST_METADATA_BYTES,
+		IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG) == 0);
+	assert(iio_buffer_refill_with_metadata(buffer, &metadata,
+		sizeof(metadata), &metadata_bytes) == TEST_IQ_BYTES);
+	assert(metadata.sequence == 1);
+	destroy_fixture_buffer(&fixture, buffer);
+	assert(fixture.state.cancel_calls == 0);
+}
+
 static void test_gates_and_early_close(void)
 {
 	struct fixture missing = {0};
@@ -648,6 +671,7 @@ int main(void)
 	test_allocated_kernel_buffer_count_is_backend_authoritative();
 	test_exact_kernel_queue_capability_is_required();
 	test_fifo_drain_single_command();
+	test_exhausted_direct_segment_can_be_rearmed();
 	test_gates_and_early_close();
 	test_long_capture_is_one_command();
 	test_explicit_overrun_policy_commands();

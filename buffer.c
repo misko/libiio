@@ -296,10 +296,19 @@ int iio_buffer_set_metadata_read_prequeue_async(struct iio_buffer *buffer,
 		return -E2BIG;
 	if (metadata_batch_is_failed(buffer))
 		return -EBADF;
-	if (buffer->metadata_direct_frames || buffer->metadata_batch_size != 1 ||
+	if ((buffer->metadata_direct_frames && buffer->metadata_direct_pending) ||
+			buffer->metadata_batch_size != 1 ||
 		buffer->metadata_batch_cached_frames !=
 			buffer->metadata_batch_next_frame)
 		return -EBUSY;
+	/* An exhausted direct segment has no queued wire replies.  Permit the
+	 * owner to enqueue the next bounded segment after any in-band control
+	 * command, while retaining -ENODATA until it explicitly does so. */
+	if (buffer->metadata_direct_frames) {
+		free(buffer->metadata_direct_mask);
+		buffer->metadata_direct_mask = NULL;
+		buffer->metadata_direct_frames = 0;
+	}
 
 	ops = buffer->dev->ctx->ops;
 	capability = iio_context_get_attr_value(buffer->dev->ctx,
@@ -353,10 +362,19 @@ int iio_buffer_set_metadata_read_prequeue_async_policy(
 		return -E2BIG;
 	if (metadata_batch_is_failed(buffer))
 		return -EBADF;
-	if (buffer->metadata_direct_frames || buffer->metadata_batch_size != 1 ||
+	if ((buffer->metadata_direct_frames && buffer->metadata_direct_pending) ||
+			buffer->metadata_batch_size != 1 ||
 		buffer->metadata_batch_cached_frames !=
 			buffer->metadata_batch_next_frame)
 		return -EBUSY;
+	/* An exhausted direct segment has no queued wire replies.  Permit the
+	 * owner to enqueue the next bounded segment after any in-band control
+	 * command, while retaining -ENODATA until it explicitly does so. */
+	if (buffer->metadata_direct_frames) {
+		free(buffer->metadata_direct_mask);
+		buffer->metadata_direct_mask = NULL;
+		buffer->metadata_direct_frames = 0;
+	}
 
 	ops = buffer->dev->ctx->ops;
 	capability = iio_context_get_attr_value(buffer->dev->ctx,
