@@ -229,6 +229,29 @@ static void host_feedback(void)
 	}
 }
 
+static void wide_host_policy_creation(void)
+{
+	const unsigned rates[] = {15000000, 20000000};
+
+	for (unsigned i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
+		struct spf_hop_request_v2 r = request(rates[i], SPF_HOP_ADAPTIVE);
+		struct spf_hop_adaptive_policy *p = NULL;
+
+		r.host.enabled = 1;
+		r.host.rx = 0;
+		r.host.decision_rate_hz = 2500000;
+		r.host.factor = rates[i] / r.host.decision_rate_hz;
+		r.host.delay = rates[i] == 15000000 ? 100 : 128;
+		r.host.supported_start = rates[i] == 15000000 ? 34 : 32;
+		r.host.supported_end = 300000;
+		memset(r.host.configuration_sha256, 0x17,
+			sizeof(r.host.configuration_sha256));
+		assert(!spf_hop_adaptive_policy_create(&p, &r));
+		assert(p);
+		spf_hop_adaptive_policy_destroy(p);
+	}
+}
+
 int main(void)
 {
 	all_masks(2500000, SPF_HOP_ADAPTIVE);
@@ -239,6 +262,7 @@ int main(void)
 	threaded_feedback(2500000);
 	threaded_feedback(5000000);
 	host_feedback();
+	wide_host_policy_creation();
 	puts("native feedback/policy: 458752 mask decisions + 4000 threaded decisions + fault cases PASS; synthetic, no RF");
 	return 0;
 }
