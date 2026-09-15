@@ -51,11 +51,14 @@ int spf_buffer_layout_resolve(size_t samples_count, const uint32_t *mask,
 }
 
 int spf_buffer_hop_receiver_rate_validate(uint8_t receiver_count,
-	uint64_t sample_rate_hz)
+	uint64_t sample_rate_hz, bool multirate_host)
 {
-	/* Keep legacy dual-RX admission; the new geometry is separately advertised. */
+	/* Wide single-RX admission belongs only to the validated host V4 request. */
 	if (receiver_count == 2U ||
-		(receiver_count == 1U && sample_rate_hz == UINT64_C(10000000)))
+		(receiver_count == 1U && sample_rate_hz == UINT64_C(10000000)) ||
+		(multirate_host && receiver_count == 1U &&
+		 (sample_rate_hz == UINT64_C(15000000) ||
+		  sample_rate_hz == UINT64_C(20000000))))
 		return 0;
 	return -EINVAL;
 }

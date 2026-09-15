@@ -355,7 +355,13 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 	if (hop_enabled) {
 		if (spf_buffer_hop_receiver_rate_validate(layout.receiver_count,
-			hop_request.sample_rate_hz))
+			hop_request.sample_rate_hz,
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+			hop_adaptive && adaptive_request.host.enabled
+#else
+			false
+#endif
+			))
 			return -EINVAL;
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
 		if (hop_adaptive && adaptive_request.host.enabled &&
