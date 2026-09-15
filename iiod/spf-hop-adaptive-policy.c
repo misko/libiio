@@ -147,7 +147,7 @@ int spf_hop_adaptive_policy_offer_host(struct spf_hop_adaptive_policy *p,
 	uint64_t offset;
 	int ret;
 	if (!p || !p->request.host.enabled) return -ENOTSUP;
-	if (!f || spf_hop_host_feedback_v1_encode(wire,sizeof(wire),f)) return -EINVAL;
+	if (!f || spf_hop_host_feedback_encode(wire,sizeof(wire),f)) return -EINVAL;
 	if (f->session!=p->request.geometry.session_id || f->generation!=p->request.policy.generation ||
 		f->stream_id!=stream_id || f->rx!=p->request.host.rx ||
 		memcmp(f->configuration_sha256,p->request.host.configuration_sha256,32)) return -ESTALE;

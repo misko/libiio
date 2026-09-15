@@ -80,10 +80,15 @@ int spf_hop_request_v2_encode(void *, size_t, const struct spf_hop_request_v2 *)
 int spf_hop_request_v2_decode(struct spf_hop_request_v2 *, const void *, size_t);
 int spf_hop_request_v3_encode(void *, size_t, const struct spf_hop_request_v2 *);
 int spf_hop_request_v3_decode(struct spf_hop_request_v2 *, const void *, size_t);
+int spf_hop_request_v4_encode(void *, size_t, const struct spf_hop_request_v2 *);
+int spf_hop_request_v4_decode(struct spf_hop_request_v2 *, const void *, size_t);
 /* Canonical internal configuration, padded to 416 bytes. Never a wire record. */
 int spf_hop_adaptive_configuration(void *, size_t, const struct spf_hop_request_v2 *);
 int spf_hop_host_feedback_v1_decode(struct spf_hop_host_feedback_v1 *, const void *, size_t);
 int spf_hop_host_feedback_v1_encode(void *, size_t, const struct spf_hop_host_feedback_v1 *);
+int spf_hop_host_feedback_v2_decode(struct spf_hop_host_feedback_v1 *, const void *, size_t);
+int spf_hop_host_feedback_v2_encode(void *, size_t, const struct spf_hop_host_feedback_v1 *);
+int spf_hop_host_feedback_encode(void *, size_t, const struct spf_hop_host_feedback_v1 *);
 int spf_hop_sidecar_v2_encode(void *, size_t, const struct spf_hop_sidecar_v2 *);
 int spf_hop_sidecar_v2_decode(struct spf_hop_sidecar_v2 *, const void *, size_t);
 int spf_hop_sidecar_v3_encode(void *, size_t, const struct spf_hop_sidecar_v2 *);

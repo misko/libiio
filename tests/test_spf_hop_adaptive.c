@@ -347,6 +347,35 @@ int main(void)
 		f.outcome=0; f.screen_mask=0; f.confirmation_mask=0;
 		assert(!spf_hop_host_feedback_v1_encode(wire,sizeof(wire),&f));
 	}
+	{
+		const uint32_t rates[]={15000000,20000000};
+		const uint32_t factors[]={6,8}, delays[]={100,128}, starts[]={34,32};
+		for (size_t i=0;i<2;++i) {
+			struct spf_hop_request_v2 r=request(rates[i],SPF_HOP_ADAPTIVE), decoded;
+			uint8_t wire[SPF_HOP_HOST_REQUEST_BYTES], again[sizeof(wire)];
+			struct spf_hop_host_feedback_v1 f={.session=1,.generation=2,.stream_id=3,
+				.valid_start=UINT64_C(0xffffffff),
+				.valid_end=UINT64_C(0xffffffff)+rates[i]*120/1000,
+				.source_rate_hz=rates[i],.decision_rate_hz=2500000,
+				.outcome=1,.healthy=1,.screen_mask=63,.confirmation_mask=32,
+				.supported_start=starts[i],.supported_end=300000,
+				.factor=factors[i],.delay=delays[i]}, got;
+			r.host.enabled=1; r.host.decision_rate_hz=2500000;
+			r.host.factor=factors[i]; r.host.delay=delays[i];
+			r.host.supported_start=starts[i]; r.host.supported_end=300000;
+			memset(r.host.configuration_sha256,0x93,32);
+			assert(!spf_hop_request_v4_encode(wire,sizeof(wire),&r));
+			assert(!spf_hop_request_v4_decode(&decoded,wire,sizeof(wire)));
+			assert(!spf_hop_request_v4_encode(again,sizeof(again),&decoded));
+			assert(!memcmp(wire,again,sizeof(wire)));
+			assert(spf_hop_request_v3_decode(&decoded,wire,sizeof(wire))<0);
+			memset(f.configuration_sha256,0x94,32);
+			assert(!spf_hop_host_feedback_v2_encode(wire,sizeof(wire),&f));
+			assert(!spf_hop_host_feedback_v2_decode(&got,wire,SPF_HOP_HOST_FEEDBACK_BYTES));
+			assert(got.source_rate_hz==rates[i] && got.valid_end==f.valid_end);
+			assert(spf_hop_host_feedback_v1_decode(&got,wire,SPF_HOP_HOST_FEEDBACK_BYTES)<0);
+		}
+	}
 	test_scheduler(2500000, SPF_HOP_ADAPTIVE);
 	test_scheduler(5000000, SPF_HOP_ADAPTIVE);
 	test_scheduler(2500000, SPF_HOP_SHADOW);

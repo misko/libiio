@@ -276,8 +276,11 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 			SPF_HOP_HOST_REQUEST_BYTES) {
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
 		if (glrt_enabled) return -ENOTSUP;
-		ret=spf_hop_request_v3_decode(&adaptive_request,
-			(const uint8_t *)request+sizeof(struct adi_tandem_agc_request_v1),SPF_HOP_HOST_REQUEST_BYTES);
+		const uint8_t *host_wire=(const uint8_t *)request+
+			sizeof(struct adi_tandem_agc_request_v1);
+		ret=host_wire[4]==4 ?
+			spf_hop_request_v4_decode(&adaptive_request,host_wire,SPF_HOP_HOST_REQUEST_BYTES) :
+			spf_hop_request_v3_decode(&adaptive_request,host_wire,SPF_HOP_HOST_REQUEST_BYTES);
 		if (ret) return ret;
 		ret=spf_hop_adaptive_policy_validate_pinned(&adaptive_request);
 		if (ret) return ret;
@@ -1210,7 +1213,9 @@ int iiod_buffer_metadata_feedback(void *provider_context, const void *feedback, 
 	struct spf_hop_host_feedback_v1 f;
 	int ret;
 	if (!ctx || !ctx->hop_adaptive || !ctx->adaptive_request.host.enabled) return -ENOTSUP;
-	ret=spf_hop_host_feedback_v1_decode(&f,feedback,bytes);
+	ret=bytes>=4 && !memcmp(feedback,"HFB2",4) ?
+		spf_hop_host_feedback_v2_decode(&f,feedback,bytes) :
+		spf_hop_host_feedback_v1_decode(&f,feedback,bytes);
 	if (ret) return ret;
 	pthread_mutex_lock(&ctx->hop_lock);
 	const struct spf_hop_status_v1 *status=hop_status_state(ctx);
