@@ -375,12 +375,12 @@ def test_direct_async_frame_limit_is_independent_of_batch_limit(monkeypatch):
         "_create_buffer_with_metadata",
         lambda *args: pytest.fail("validation must happen before buffer creation"),
     )
-    with pytest.raises(ValueError, match=r"\[0, 4096\]"):
+    with pytest.raises(ValueError, match=r"\[0, 8192\]"):
         iio.MetadataBuffer(
             DirectAsyncFakeDevice(),
             1024,
             b"provider",
-            direct_async_frames=4097,
+            direct_async_frames=8193,
         )
 
 

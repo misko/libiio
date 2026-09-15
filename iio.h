@@ -1506,7 +1506,7 @@ __api __check_ret int iio_buffer_submit_metadata_feedback(struct iio_buffer *buf
 #define IIO_BUFFER_METADATA_BATCH_MAX 64U
 
 /** Maximum frame target for one finite direct-async capture session. */
-#define IIO_BUFFER_METADATA_DIRECT_MAX 4096U
+#define IIO_BUFFER_METADATA_DIRECT_MAX 8192U
 
 /** Maximum host memory retained by one metadata refill batch. */
 #define IIO_BUFFER_METADATA_BATCH_BYTES_MAX (64U * 1024U * 1024U)

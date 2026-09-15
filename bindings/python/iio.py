@@ -1223,8 +1223,8 @@ class MetadataBuffer(Buffer):
             direct_async_frames, int
         ):
             raise TypeError("direct_async_frames must be an integer")
-        if not 0 <= direct_async_frames <= 4096:
-            raise ValueError("direct_async_frames must be in [0, 4096]")
+        if not 0 <= direct_async_frames <= 8192:
+            raise ValueError("direct_async_frames must be in [0, 8192]")
         if direct_async_frames and batch_frames != 1:
             raise ValueError("direct async capture requires batch_frames=1")
         if not isinstance(drop_backlog_on_overrun, bool):

@@ -309,13 +309,18 @@ static int session_on_block(struct spf_hop_session_v1 *session,
 	size_t event_count = 0;
 	size_t i;
 	int ret;
+	bool sparse_wide_rate;
 
 	if (!session || !sidecar || session->status.state != SPF_HOP_STATE_RUNNING ||
 		first_sample >= block_end)
 		return -EINVAL;
+	sparse_wide_rate =
+		(session->request.sample_rate_hz == UINT64_C(15000000) ||
+		 session->request.sample_rate_hz == UINT64_C(20000000));
 	if (session->have_last_block &&
 		(buffer_sequence != session->status.last_block_sequence + 1 ||
-		 first_sample != session->status.last_block_end))
+		 first_sample < session->status.last_block_end ||
+		 (first_sample != session->status.last_block_end && !sparse_wide_rate)))
 		return fail(session, SPF_HOP_REASON_COUNTER_DISCONTINUITY, -EILSEQ);
 	ret = session->ops->drain_events(session->device_context, device_events,
 		SPF_HOP_EVENT_CAPACITY, &event_count, &dropped_events);
