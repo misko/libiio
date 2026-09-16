@@ -7,7 +7,10 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "spf-scan-session.h"
+
 struct iio_buffer;
+struct iio_buffer_block;
 struct iio_device;
 
 struct iiod_buffer_burst_plan {
@@ -65,5 +68,25 @@ int iiod_buffer_metadata_describe_frame(void *provider_context,
 int iiod_buffer_metadata_rebase_frame(void *provider_context,
 		void *metadata, size_t metadata_bytes,
 		uint64_t previous_frame_end);
+
+/* Feature-103 scan hooks. The scan provider retains each accepted DMA block
+ * until all visit slices that reference it are sent or explicitly cancelled. */
+bool iiod_buffer_metadata_scan_enabled(void *provider_context);
+int iiod_buffer_metadata_scan_start(void *provider_context);
+int iiod_buffer_metadata_scan_feed(void *provider_context,
+		struct iio_buffer_block *block, size_t raw_bytes);
+int iiod_buffer_metadata_scan_take(void *provider_context,
+		struct spf_scan_session_output *output);
+int iiod_buffer_metadata_scan_complete(void *provider_context, uint64_t visit);
+int iiod_buffer_metadata_scan_abort(void *provider_context, uint64_t visit,
+		int transport_error);
+enum spf_scan_feedback_result iiod_buffer_metadata_scan_feedback(
+		void *provider_context, const struct spf_scan_feedback *feedback);
+int iiod_buffer_metadata_scan_take_ack(void *provider_context,
+		struct spf_scan_ack *ack);
+int iiod_buffer_metadata_scan_terminal(void *provider_context,
+		struct spf_scan_terminal *terminal);
+int iiod_buffer_metadata_scan_cancel(void *provider_context);
+int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes);
 
 #endif

@@ -10,6 +10,7 @@
 #include "../iio.h"
 #include "../iio-config.h"
 #include "dns-sd.h"
+#include "buffer-metadata.h"
 #include "ops.h"
 #include "thread-pool.h"
 
@@ -655,6 +656,7 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 
 #ifdef IIOD_HAS_BUFFER_METADATA
 	char direct_max_frames[16];
+	uint8_t scan_caps[SPF_SCAN_CAPS_BYTES];
 
 	{
 		struct iio_device *counter_controller = iio_context_find_device(ctx, "tandem-agc");
@@ -783,6 +785,21 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 	if (ret < 0) {
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
+	}
+	if (!iiod_buffer_metadata_scan_capabilities(scan_caps,
+						    sizeof(scan_caps))) {
+		ret = iio_context_add_attr(ctx, "iio,adaptive-scan", "1");
+		if (ret >= 0)
+			ret = iio_context_add_attr(ctx,
+				"iio,adaptive-scan-protocol", "1");
+		if (ret >= 0)
+			ret = iio_context_add_attr(ctx,
+				"iio,adaptive-scan-rates-hz",
+				"10000000,15000000,20000000,30000000");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
 	}
 #endif
 

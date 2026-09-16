@@ -53,6 +53,7 @@ struct ThdEntry {
 	bool active, is_writer, new_client, wait_for_open;
 	bool metadata_enabled;
 	bool async_direct;
+	bool scan_reader;
 	unsigned int async_frames_remaining;
 };
 
@@ -154,6 +155,14 @@ struct iiod_direct_async {
 	bool cancelled;
 	bool consumer_active;
 	bool last_consumed_frame_valid;
+};
+
+struct iiod_adaptive_scan {
+	int error;
+	bool producer_started;
+	bool producer_exited;
+	bool cancelled;
+	bool terminal_sent;
 };
 
 enum iiod_timing_stage {
@@ -751,6 +760,7 @@ struct DevEntry {
 	struct iiod_burst_cache burst;
 	struct iiod_ddr_ring ring;
 	struct iiod_direct_async direct;
+	struct iiod_adaptive_scan scan;
 	bool update_mask;
 	bool cyclic;
 	bool closed;
@@ -1884,6 +1894,64 @@ complete:
 	return ret < 0 ? ret : (ssize_t)iq_bytes;
 }
 
+static ssize_t send_scan_data(struct DevEntry *entry, struct ThdEntry *thd)
+{
+	struct spf_scan_session_output output;
+	uint8_t wire[SPF_SCAN_VISIT_BYTES];
+	ssize_t ret;
+	unsigned int i;
+
+	ret = iiod_buffer_metadata_scan_take(entry->metadata_provider_context,
+					     &output);
+	if (ret == -EAGAIN) {
+		struct spf_scan_terminal terminal;
+		uint8_t terminal_wire[SPF_SCAN_TERMINAL_BYTES];
+
+		ret = iiod_buffer_metadata_scan_terminal(
+			entry->metadata_provider_context, &terminal);
+		if (ret)
+			return ret;
+		ret = spf_scan_terminal_encode(terminal_wire, sizeof(terminal_wire),
+					       &terminal);
+		if (ret)
+			return ret;
+		print_value(thd->pdata, sizeof(terminal_wire));
+		ret = write_all(thd->pdata, terminal_wire, sizeof(terminal_wire));
+		if (ret < 0)
+			return ret;
+		print_value(thd->pdata, 0);
+		entry->scan.terminal_sent = true;
+		return 0;
+	}
+	if (ret)
+		return ret;
+	ret = spf_scan_visit_encode(wire, sizeof(wire), &output.record);
+	if (ret)
+		goto abort;
+	print_value(thd->pdata, sizeof(wire));
+	ret = write_all(thd->pdata, wire, sizeof(wire));
+	if (ret < 0)
+		goto abort;
+	print_value(thd->pdata, output.record.iq_bytes);
+	for (i = 0; i < output.slice_count; i++) {
+		const struct spf_visit_slice *slice = &output.slices[i];
+
+		ret = write_all(thd->pdata,
+				(uint8_t *)slice->data + slice->offset, slice->bytes);
+		if (ret < 0)
+			goto abort;
+	}
+	ret = iiod_buffer_metadata_scan_complete(
+		entry->metadata_provider_context, output.record.visit);
+	return ret ? ret : (ssize_t)output.record.iq_bytes;
+
+abort:
+	(void)iiod_buffer_metadata_scan_abort(entry->metadata_provider_context,
+					      output.record.visit,
+					      ret < 0 ? (int)ret : -EIO);
+	return ret < 0 ? ret : -EIO;
+}
+
 static ssize_t receive_data(struct DevEntry *dev, struct ThdEntry *thd)
 {
 	struct parser_pdata *pdata = thd->pdata;
@@ -2159,6 +2227,93 @@ release_block:
 	dev_entry_put(entry);
 }
 
+static void scan_producer_thd(struct thread_pool *pool, void *data)
+{
+	struct DevEntry *entry = data;
+	int error = 0;
+
+	while (!thread_pool_is_stopped(pool)) {
+		struct iio_buffer_block *block = NULL;
+		ssize_t raw_bytes;
+		int ret;
+
+		pthread_mutex_lock(&entry->ring_lock);
+		if (entry->scan.cancelled) {
+			pthread_mutex_unlock(&entry->ring_lock);
+			break;
+		}
+		pthread_mutex_unlock(&entry->ring_lock);
+		ret = iiod_timed_metadata_before_refill(entry);
+		if (!ret) {
+			block = iiod_timed_buffer_block_acquire(entry);
+			ret = block ? iiod_timed_metadata_after_refill(entry) : -errno;
+		}
+		if (ret) {
+			error = ret;
+			goto release;
+		}
+		raw_bytes = (ssize_t)iio_buffer_block_bytes_used(block);
+		ret = iiod_buffer_metadata_scan_feed(
+			entry->metadata_provider_context, block, (size_t)raw_bytes);
+		if (!ret) {
+			block = NULL;
+			continue;
+		}
+		if (ret != -ESHUTDOWN)
+			error = ret;
+
+release:
+		if (block) {
+			int release_ret = iio_buffer_block_release(block);
+
+			if (release_ret && !error)
+				error = release_ret;
+		}
+		break;
+	}
+	if (error)
+		(void)iiod_buffer_metadata_scan_cancel(
+			entry->metadata_provider_context);
+	pthread_mutex_lock(&entry->ring_lock);
+	entry->scan.error = error;
+	entry->scan.producer_exited = true;
+	pthread_cond_broadcast(&entry->ring_ready_cond);
+	pthread_mutex_unlock(&entry->ring_lock);
+	pthread_mutex_lock(&entry->thdlist_lock);
+	pthread_cond_broadcast(&entry->rw_ready_cond);
+	pthread_mutex_unlock(&entry->thdlist_lock);
+	dev_entry_put(entry);
+}
+
+static int scan_start_producer(struct DevEntry *entry)
+{
+	int ret;
+
+	if (!iiod_buffer_metadata_scan_enabled(entry->metadata_provider_context))
+		return -EOPNOTSUPP;
+	ret = iiod_buffer_metadata_scan_start(entry->metadata_provider_context);
+	if (ret)
+		return ret;
+	pthread_mutex_lock(&entry->ring_lock);
+	entry->scan.producer_started = true;
+	entry->scan.producer_exited = false;
+	pthread_mutex_unlock(&entry->ring_lock);
+	entry->ref_count++;
+	ret = thread_pool_add_thread(main_thread_pool, scan_producer_thd, entry,
+				     "scan_dma");
+	if (ret) {
+		entry->ref_count--;
+		(void)iiod_buffer_metadata_scan_cancel(
+			entry->metadata_provider_context);
+		pthread_mutex_lock(&entry->ring_lock);
+		entry->scan.error = ret < 0 ? ret : -EIO;
+		entry->scan.producer_started = false;
+		entry->scan.producer_exited = true;
+		pthread_mutex_unlock(&entry->ring_lock);
+	}
+	return ret;
+}
+
 static int direct_async_start_producer(struct DevEntry *entry)
 {
 	int ret;
@@ -2403,13 +2558,16 @@ static void rw_thd(struct thread_pool *pool, void *d)
 
 		if (SLIST_EMPTY(&entry->thdlist_head) &&
 				(entry->ring.producer_started ||
-				 entry->direct.producer_started)) {
+				 entry->direct.producer_started ||
+				 entry->scan.producer_started)) {
 			pthread_mutex_unlock(&entry->thdlist_lock);
 			pthread_mutex_lock(&entry->ring_lock);
 			while ((entry->ring.producer_started &&
 					!entry->ring.producer_exited) ||
 				(entry->direct.producer_started &&
-					!entry->direct.producer_exited))
+					!entry->direct.producer_exited) ||
+				(entry->scan.producer_started &&
+					!entry->scan.producer_exited))
 				pthread_cond_wait(&entry->ring_ready_cond,
 					&entry->ring_lock);
 			pthread_mutex_unlock(&entry->ring_lock);
@@ -2594,6 +2752,27 @@ static void rw_thd(struct thread_pool *pool, void *d)
 
 		if (has_readers) {
 			ssize_t nb_bytes;
+
+			if (entry->scan.producer_started) {
+				struct timespec wait = { .tv_sec = 0, .tv_nsec = 1000000 };
+
+				pthread_mutex_lock(&entry->thdlist_lock);
+				for (thd = SLIST_FIRST(&entry->thdlist_head);
+						thd; thd = next_thd) {
+					next_thd = SLIST_NEXT(thd, dev_list_entry);
+					if (!thd->active || !thd->scan_reader)
+						continue;
+					ret = send_scan_data(entry, thd);
+					if (ret == -EAGAIN) {
+						(void)nanosleep(&wait, NULL);
+						continue;
+					}
+					if (ret < 0 || entry->scan.terminal_sent)
+						signal_thread(thd, ret < 0 ? ret : 0);
+				}
+				pthread_mutex_unlock(&entry->thdlist_lock);
+				continue;
+			}
 
 			if (entry->direct.producer_started) {
 				pthread_mutex_lock(&entry->ring_lock);
@@ -2866,6 +3045,22 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		pthread_mutex_unlock(&entry->ring_lock);
 		pthread_mutex_lock(&entry->thdlist_lock);
 	}
+	if (entry->scan.producer_started) {
+		pthread_mutex_lock(&entry->ring_lock);
+		entry->scan.cancelled = true;
+		pthread_mutex_unlock(&entry->ring_lock);
+		(void)iiod_buffer_metadata_scan_cancel(
+			entry->metadata_provider_context);
+		if (entry->buf)
+			iio_buffer_cancel(entry->buf);
+		pthread_mutex_unlock(&entry->thdlist_lock);
+		pthread_mutex_lock(&entry->ring_lock);
+		while (!entry->scan.producer_exited)
+			pthread_cond_wait(&entry->ring_ready_cond,
+				&entry->ring_lock);
+		pthread_mutex_unlock(&entry->ring_lock);
+		pthread_mutex_lock(&entry->thdlist_lock);
+	}
 
 	/* Signal all remaining threads */
 	for (thd = SLIST_FIRST(&entry->thdlist_head); thd; thd = next_thd) {
@@ -3041,6 +3236,50 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 		return nb - ret;
 }
 
+ssize_t read_adaptive_scan(struct parser_pdata *pdata,
+		struct iio_device *dev)
+{
+	struct ThdEntry *thd;
+	struct DevEntry *entry;
+	ssize_t ret = 0;
+
+	if (!dev)
+		return -ENODEV;
+	thd = parser_lookup_thd_entry(pdata, dev);
+	if (!thd)
+		return -EBADF;
+	entry = thd->entry;
+	if (!iiod_buffer_metadata_scan_enabled(entry->metadata_provider_context))
+		return -EOPNOTSUPP;
+	pthread_mutex_lock(&entry->thdlist_lock);
+	if (entry->closed || thd->nb || entry->scan.producer_started) {
+		pthread_mutex_unlock(&entry->thdlist_lock);
+		return -EBUSY;
+	}
+	ret = scan_start_producer(entry);
+	if (ret) {
+		pthread_mutex_unlock(&entry->thdlist_lock);
+		return ret;
+	}
+	thd->new_client = false;
+	thd->nb = UINT_MAX;
+	thd->err = 0;
+	thd->is_writer = false;
+	thd->metadata_enabled = true;
+	thd->scan_reader = true;
+	thd->active = true;
+	pthread_cond_signal(&entry->rw_ready_cond);
+	while (thd->active) {
+		ret = thd_entry_event_wait(thd, &entry->thdlist_lock, pdata->fd_in);
+		if (ret)
+			break;
+	}
+	if (!ret)
+		ret = thd->err;
+	pthread_mutex_unlock(&entry->thdlist_lock);
+	return ret;
+}
+
 static uint32_t *get_mask(const char *mask, size_t *len)
 {
 	size_t nb = (*len + 7) / 8;
@@ -3096,6 +3335,13 @@ static void remove_thd_entry(struct ThdEntry *t)
 						SPF_DDR_RING_REASON_CLIENT_DISCONNECTED);
 				pthread_cond_broadcast(&entry->ring_ready_cond);
 				pthread_mutex_unlock(&entry->ring_lock);
+			}
+			if (entry->scan.producer_started) {
+				pthread_mutex_lock(&entry->ring_lock);
+				entry->scan.cancelled = true;
+				pthread_mutex_unlock(&entry->ring_lock);
+				(void)iiod_buffer_metadata_scan_cancel(
+					entry->metadata_provider_context);
 			}
 			iio_buffer_cancel(entry->buf); /* Wakeup the rw thread */
 		}
@@ -3579,6 +3825,102 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 	if (ret < 0)
 		print_value(pdata, ret);
 	return ret;
+}
+
+static struct DevEntry *scan_control_entry_get(struct iio_device *dev)
+{
+	struct DevEntry *entry, *candidate;
+
+	if (!dev)
+		return NULL;
+	pthread_mutex_lock(&devlist_lock);
+	candidate = iio_device_get_data(dev);
+	entry = candidate;
+	if (candidate) {
+		pthread_mutex_lock(&candidate->thdlist_lock);
+		if (candidate->closed ||
+		    !iiod_buffer_metadata_scan_enabled(
+			    candidate->metadata_provider_context))
+			entry = NULL;
+		else
+			candidate->ref_count++;
+		pthread_mutex_unlock(&candidate->thdlist_lock);
+	}
+	pthread_mutex_unlock(&devlist_lock);
+	return entry;
+}
+
+ssize_t read_adaptive_scan_capabilities(struct parser_pdata *pdata,
+		size_t capacity)
+{
+	uint8_t wire[SPF_SCAN_CAPS_BYTES];
+	ssize_t ret;
+
+	if (capacity < sizeof(wire))
+		ret = -ENOSPC;
+	else
+		ret = iiod_buffer_metadata_scan_capabilities(wire, sizeof(wire));
+	if (ret) {
+		print_value(pdata, ret);
+		return ret;
+	}
+	print_value(pdata, sizeof(wire));
+	ret = write_all(pdata, wire, sizeof(wire));
+	return ret < 0 ? ret : (ssize_t)sizeof(wire);
+}
+
+ssize_t submit_adaptive_scan_feedback(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t bytes)
+{
+	uint8_t wire[SPF_SCAN_FEEDBACK_BYTES];
+	struct spf_scan_feedback feedback;
+	struct DevEntry *entry;
+	ssize_t ret;
+
+	if (bytes != sizeof(wire))
+		ret = -EINVAL;
+	else if ((ret = read_all(pdata, wire, sizeof(wire))) < 0)
+		;
+	else if ((ret = spf_scan_feedback_decode(&feedback, wire,
+						 sizeof(wire))))
+		;
+	else if (!(entry = scan_control_entry_get(dev)))
+		ret = -ENODATA;
+	else {
+		ret = iiod_buffer_metadata_scan_feedback(
+			entry->metadata_provider_context, &feedback);
+		dev_entry_put(entry);
+	}
+	print_value(pdata, ret);
+	return ret;
+}
+
+ssize_t read_adaptive_scan_ack(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t capacity)
+{
+	uint8_t wire[SPF_SCAN_ACK_BYTES];
+	struct spf_scan_ack ack;
+	struct DevEntry *entry;
+	ssize_t ret;
+
+	if (capacity < sizeof(wire))
+		ret = -ENOSPC;
+	else if (!(entry = scan_control_entry_get(dev)))
+		ret = -ENODATA;
+	else {
+		ret = iiod_buffer_metadata_scan_take_ack(
+			entry->metadata_provider_context, &ack);
+		if (!ret)
+			ret = spf_scan_ack_encode(wire, sizeof(wire), &ack);
+		dev_entry_put(entry);
+	}
+	if (ret) {
+		print_value(pdata, ret);
+		return ret;
+	}
+	print_value(pdata, sizeof(wire));
+	ret = write_all(pdata, wire, sizeof(wire));
+	return ret < 0 ? ret : (ssize_t)sizeof(wire);
 }
 
 ssize_t read_dev_attr(struct parser_pdata *pdata, struct iio_device *dev,

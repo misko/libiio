@@ -64,6 +64,12 @@ static int mock_ioctl(int fd, unsigned long request, void *argument)
 		release->counter_after = (uint32_t)(mock_now + 20);
 		return 0;
 	}
+	if (request == ADI_RX_COUNTER_IOC_SCAN_SNAPSHOT) {
+		struct adi_rx_counter_scan_snapshot *snapshot = argument;
+
+		snapshot->counter = (uint32_t)mock_now;
+		return 0;
+	}
 	assert(!"unexpected ioctl");
 	return -1;
 }
@@ -148,8 +154,8 @@ static void test_three_visits_feedback_and_early_restore(void)
 
 	memset(configured_frequency, 0, sizeof(configured_frequency));
 	assert(spf_scan_radio_init(&radio, 29, mock_ioctl) == 0);
-	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
 	mock_now = base;
+	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
 	assert(spf_scan_session_schedule(session, base, base, &choice[0]) == 0);
 	{
 		uint64_t boundary;
@@ -205,8 +211,8 @@ static void test_recall_failure_cancels_and_restores(void)
 	struct spf_scan_setup request = setup();
 
 	assert(spf_scan_radio_init(&radio, 29, mock_ioctl) == 0);
-	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
 	mock_now = base;
+	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
 	fail_recall = 1;
 	assert(spf_scan_session_schedule(session, base, base, &choice) == -EIO);
 	fail_recall = 0;
@@ -236,8 +242,8 @@ static void test_transport_failure_cancels_current_and_remainder(void)
 	uintptr_t token = 100;
 
 	assert(spf_scan_radio_init(&radio, 29, mock_ioctl) == 0);
-	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
 	mock_now = base;
+	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
 	assert(spf_scan_session_schedule(session, base, base, &choice) == 0);
 	feed_three(session, base, &token);
 	mock_now = base + 300000;
@@ -271,8 +277,8 @@ static void test_graceful_cancel_restores_and_accounts(void)
 	struct spf_scan_setup request = setup();
 
 	assert(spf_scan_radio_init(&radio, 29, mock_ioctl) == 0);
-	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
 	mock_now = base;
+	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
 	assert(spf_scan_session_schedule(session, base, base, &choice) == 0);
 	mock_now = base + 1000;
 	assert(spf_scan_session_cancel(session, mock_now) == 0);

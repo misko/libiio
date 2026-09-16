@@ -32,6 +32,9 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 	uint64_t now, uint64_t counter_anchor, struct spf_scan_choice *choice);
 int spf_scan_session_next_boundary(const struct spf_scan_session *session,
 	uint64_t *counter);
+int spf_scan_session_counter(const struct spf_scan_session *session,
+	uint64_t *counter);
+bool spf_scan_session_capture_complete(const struct spf_scan_session *session);
 int spf_scan_session_feed(struct spf_scan_session *session, uintptr_t token,
 	const void *data, uint64_t first, uint32_t samples);
 enum spf_scan_feedback_result spf_scan_session_feedback(
@@ -49,6 +52,8 @@ int spf_scan_session_stop(struct spf_scan_session *session,
 	uint64_t final_counter);
 int spf_scan_session_cancel(struct spf_scan_session *session,
 	uint64_t final_counter);
+int spf_scan_session_fail(struct spf_scan_session *session,
+	uint64_t final_counter, int error);
 int spf_scan_session_terminal(struct spf_scan_session *session,
 	struct spf_scan_terminal *terminal);
 int spf_scan_session_destroy(struct spf_scan_session *session);

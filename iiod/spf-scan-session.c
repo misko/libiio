@@ -112,6 +112,7 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	struct spf_scan_radio_release_receipt ignored;
 	size_t capacity;
 	unsigned i;
+	uint64_t actual_start;
 	int ret;
 
 	if (!out || !setup || !runtime || !radio || !runtime->release_block)
@@ -147,8 +148,12 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	ret = spf_scan_radio_configure(radio, profiles, setup->target_count);
 	if (ret)
 		goto restore;
+	ret = spf_scan_radio_snapshot(radio, start_counter, &actual_start);
+	if (ret)
+		goto restore;
+	session->latest_counter = actual_start;
 	spf_scan_setup_policy(setup, &policy_config);
-	ret = spf_scan_policy_create(&session->policy, &policy_config, start_counter);
+	ret = spf_scan_policy_create(&session->policy, &policy_config, actual_start);
 	if (ret)
 		goto restore;
 	queue_config = (struct spf_visit_queue_config) {
@@ -171,7 +176,7 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	return 0;
 
 restore:
-	(void)spf_scan_radio_release(radio, start_counter, &ignored);
+	(void)spf_scan_radio_release(radio, session->latest_counter, &ignored);
 	spf_scan_policy_destroy(session->policy);
 	free(session->ledger);
 	free(session);
@@ -255,6 +260,20 @@ int spf_scan_session_next_boundary(const struct spf_scan_session *session,
 		return -EAGAIN;
 	*counter = session->ledger[session->active].valid_end;
 	return 0;
+}
+
+int spf_scan_session_counter(const struct spf_scan_session *session,
+	uint64_t *counter)
+{
+	if (!session || !counter)
+		return -EINVAL;
+	*counter = session->latest_counter;
+	return 0;
+}
+
+bool spf_scan_session_capture_complete(const struct spf_scan_session *session)
+{
+	return session && spf_visit_queue_capture_complete(session->queue);
 }
 
 int spf_scan_session_feed(struct spf_scan_session *session, uintptr_t token,
@@ -465,6 +484,14 @@ int spf_scan_session_cancel(struct spf_scan_session *session,
 	if (final_counter > session->latest_counter)
 		session->latest_counter = final_counter;
 	return maybe_release(session);
+}
+
+int spf_scan_session_fail(struct spf_scan_session *session,
+	uint64_t final_counter, int error)
+{
+	if (!session || session->stopping || !error)
+		return -EINVAL;
+	return fail_session(session, error, final_counter);
 }
 
 int spf_scan_session_terminal(struct spf_scan_session *session,

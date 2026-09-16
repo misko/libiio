@@ -120,7 +120,7 @@ int main(int argc, char **argv)
 		.restore_after = UINT64_C(0x300000101),
 		.planned = 10, .delivered = 8, .skipped = 1, .invalid = 1,
 		.iq_bytes = 123456, .state = SPF_SCAN_TERMINAL_COMPLETED,
-		.reason = 1,
+		.reason = 1, .flags = SPF_SCAN_TERMINAL_FLAGS,
 	}, terminal_out;
 	FILE *golden;
 

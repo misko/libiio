@@ -564,6 +564,7 @@ static int terminal_validate(const struct spf_scan_terminal *terminal)
 	    (terminal->state == SPF_SCAN_TERMINAL_COMPLETED &&
 	     terminal->restore_before < terminal->final_counter) ||
 	    (terminal->state == SPF_SCAN_TERMINAL_FAILED && terminal->error >= 0) ||
+	    terminal->flags != SPF_SCAN_TERMINAL_FLAGS ||
 	    terminal->delivered > terminal->planned)
 		return -EINVAL;
 	remaining = terminal->planned - terminal->delivered;

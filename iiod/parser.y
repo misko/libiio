@@ -73,6 +73,10 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token READBUFM
 %token READBUFMA
 %token READBUFMSTAT
+%token READSCAN
+%token SCANCAPS
+%token SCANFEEDBACK
+%token SCANACK
 %token WRITEBUF
 %token WRITE
 %token SETTRIG
@@ -132,6 +136,11 @@ Line:
 		"\tREADBUF <device> <bytes_count>\n"
 		"\t\tRead raw data from the specified device\n"
 		"\tREADBUFM <device> <bytes_count> <metadata_capacity>\n"
+		"\tREADSCAN <device>\n"
+		"\t\tStream feature-103 visit records and complete IQ visits\n"
+		"\tSCANCAPS <capacity>\n"
+		"\tSCANFEEDBACK <device> <bytes>\n"
+		"\tSCANACK <device> <capacity>\n"
 		"\tREADBUFMA <device> <bytes_count> <metadata_capacity> <frames> "
 		"[overrun_policy]\n"
 		"\t\tRead raw data and its capture-associated metadata\n"
@@ -380,6 +389,47 @@ Line:
 		struct parser_pdata *pdata = yyget_extra(scanner);
 		ssize_t ret = read_buffer_metadata_status(pdata, $3, cap);
 		free(status_capacity);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| READSCAN SPACE DEVICE END {
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = read_adaptive_scan(pdata, $3);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| SCANCAPS SPACE WORD END {
+		char *capacity = $3;
+		size_t cap = strtoul(capacity, NULL, 10);
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = read_adaptive_scan_capabilities(pdata, cap);
+		free(capacity);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| SCANFEEDBACK SPACE DEVICE SPACE WORD END {
+		char *size = $5;
+		size_t bytes = strtoul(size, NULL, 10);
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = submit_adaptive_scan_feedback(pdata, $3, bytes);
+		free(size);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| SCANACK SPACE DEVICE SPACE WORD END {
+		char *capacity = $5;
+		size_t cap = strtoul(capacity, NULL, 10);
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = read_adaptive_scan_ack(pdata, $3, cap);
+		free(capacity);
 		if (ret < 0)
 			YYABORT;
 		else
