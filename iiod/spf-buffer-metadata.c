@@ -734,14 +734,15 @@ enum spf_scan_feedback_result iiod_buffer_metadata_scan_feedback(
 	if (!ctx || !ctx->scan_enabled)
 		return SPF_SCAN_REJECTED;
 	pthread_mutex_lock(&ctx->scan_lock);
-	ret = spf_scan_radio_snapshot(&ctx->scan_radio,
-				      ctx->scan_counter_anchor, &now);
-	if (!ret) {
-		ctx->scan_counter_anchor = now;
+	/* The scheduler and DMA feed already advance the session's coherent
+	 * source-time watermark under this mutex. A second owner ioctl from the
+	 * feedback TCP path races the active producer without adding temporal
+	 * information: delivered feedback necessarily follows its closed dwell. */
+	ret = spf_scan_session_counter(ctx->scan_session, &now);
+	if (!ret)
 		result = spf_scan_session_feedback(ctx->scan_session, feedback, now);
-	} else {
+	else
 		result = SPF_SCAN_REJECTED;
-	}
 	pthread_mutex_unlock(&ctx->scan_lock);
 	return result;
 }
