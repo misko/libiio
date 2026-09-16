@@ -264,7 +264,35 @@ static void test_counter_gap_and_overflow_fail_closed(void)
 	assert(session.status.flags & SPF_HOP_STATUS_DEVICE_EVENT_OVERFLOW);
 }
 
+static void assert_rx0_wide_rate_counter_gap_is_accounted(uint64_t sample_rate_hz)
+{
+	struct spf_hop_request_v1 request = make_request();
+	struct spf_hop_session_v1 session;
+	struct spf_hop_sidecar_v1 sidecar;
+	struct fake_device device = {0};
+
+	request.sample_rate_hz = sample_rate_hz;
+	request.rf_bandwidth_hz = sample_rate_hz;
+	device.events[0] = make_event(&request, 0, 1000, 1002);
+	device.event_count = 1;
+	init_receipt(&device, 1200);
+	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
+	assert(spf_hop_session_v1_start(&session) == 0);
+	assert(spf_hop_session_v1_on_block(&session, 0, 900, 1050, &sidecar) == 0);
+	assert(spf_hop_session_v1_on_block(&session, 2, 1200, 1300, &sidecar) == 0);
+	assert(sidecar.buffer_sequence == 2);
+	assert(sidecar.block_first_sample == 1200);
+	assert(session.status.state == SPF_HOP_STATE_RUNNING);
+	assert(spf_hop_session_v1_cancel(&session, SPF_HOP_REASON_CLIENT_CLOSE) == 0);
+}
+
 static void test_rx0_wide_rate_counter_gap_is_accounted(void)
+{
+	assert_rx0_wide_rate_counter_gap_is_accounted(UINT64_C(15000000));
+	assert_rx0_wide_rate_counter_gap_is_accounted(UINT64_C(20000000));
+}
+
+static void test_rx0_wide_rate_unexplained_sequence_jump_fails_closed(void)
 {
 	struct spf_hop_request_v1 request = make_request();
 	struct spf_hop_session_v1 session;
@@ -275,14 +303,13 @@ static void test_rx0_wide_rate_counter_gap_is_accounted(void)
 	request.rf_bandwidth_hz = UINT64_C(20000000);
 	device.events[0] = make_event(&request, 0, 1000, 1002);
 	device.event_count = 1;
-	init_receipt(&device, 1200);
+	init_receipt(&device, 1300);
 	assert(spf_hop_session_v1_init(&session, &request, &fake_ops, &device) == 0);
 	assert(spf_hop_session_v1_start(&session) == 0);
 	assert(spf_hop_session_v1_on_block(&session, 0, 900, 1050, &sidecar) == 0);
-	assert(spf_hop_session_v1_on_block(&session, 1, 1051, 1150, &sidecar) == 0);
-	assert(sidecar.block_first_sample == 1051);
-	assert(session.status.state == SPF_HOP_STATE_RUNNING);
-	assert(spf_hop_session_v1_cancel(&session, SPF_HOP_REASON_CLIENT_CLOSE) == 0);
+	assert(spf_hop_session_v1_on_block(&session, 3, 1200, 1300, &sidecar) == -EILSEQ);
+	assert(session.status.terminal_reason ==
+		SPF_HOP_REASON_COUNTER_DISCONTINUITY);
 }
 
 static void test_cancel_and_restore_once(void)
@@ -412,6 +439,7 @@ int main(void)
 	test_bad_valid_dwell_fails_closed();
 	test_counter_gap_and_overflow_fail_closed();
 	test_rx0_wide_rate_counter_gap_is_accounted();
+	test_rx0_wide_rate_unexplained_sequence_jump_fails_closed();
 	test_cancel_and_restore_once();
 	test_userspace_low_counter_is_anchored_across_wrap();
 	return 0;

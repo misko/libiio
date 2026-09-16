@@ -310,6 +310,10 @@ static int session_on_block(struct spf_hop_session_v1 *session,
 	size_t i;
 	int ret;
 	bool sparse_wide_rate;
+	uint64_t block_samples;
+	uint64_t missing_samples;
+	uint64_t skipped_blocks;
+	uint64_t expected_sequence;
 
 	if (!session || !sidecar || session->status.state != SPF_HOP_STATE_RUNNING ||
 		first_sample >= block_end)
@@ -317,11 +321,21 @@ static int session_on_block(struct spf_hop_session_v1 *session,
 	sparse_wide_rate =
 		(session->request.sample_rate_hz == UINT64_C(15000000) ||
 		 session->request.sample_rate_hz == UINT64_C(20000000));
-	if (session->have_last_block &&
-		(buffer_sequence != session->status.last_block_sequence + 1 ||
-		 first_sample < session->status.last_block_end ||
-		 (first_sample != session->status.last_block_end && !sparse_wide_rate)))
-		return fail(session, SPF_HOP_REASON_COUNTER_DISCONTINUITY, -EILSEQ);
+	if (session->have_last_block) {
+		if (first_sample < session->status.last_block_end)
+			return fail(session, SPF_HOP_REASON_COUNTER_DISCONTINUITY, -EILSEQ);
+		block_samples = block_end - first_sample;
+		missing_samples = first_sample - session->status.last_block_end;
+		skipped_blocks = sparse_wide_rate ? missing_samples / block_samples : 0;
+		if (session->status.last_block_sequence >
+				UINT64_MAX - UINT64_C(1) - skipped_blocks)
+			return fail(session, SPF_HOP_REASON_COUNTER_DISCONTINUITY, -EILSEQ);
+		expected_sequence = session->status.last_block_sequence +
+			UINT64_C(1) + skipped_blocks;
+		if (buffer_sequence != expected_sequence ||
+			(!sparse_wide_rate && missing_samples != 0))
+			return fail(session, SPF_HOP_REASON_COUNTER_DISCONTINUITY, -EILSEQ);
+	}
 	ret = session->ops->drain_events(session->device_context, device_events,
 		SPF_HOP_EVENT_CAPACITY, &event_count, &dropped_events);
 	ret = normalize_error(ret);
