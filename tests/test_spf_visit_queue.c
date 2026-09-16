@@ -108,6 +108,10 @@ static void test_gap_and_early_retune(void)
 	struct spf_visit_queue_stats stats;
 	admit(q, 1, 120, 0, 25); admit(q, 2, 120, 145, 160);
 	feed(&f, q, 1, 0); feed(&f, q, 2, 200);
+	/* Gap detection terminally closes both windows before their scheduler
+	 * boundaries; those later boundary acknowledgements are idempotent. */
+	assert(!spf_visit_queue_close_window(q, 1, 145));
+	assert(!spf_visit_queue_close_window(q, 2, 290));
 	assert(!spf_visit_queue_take(q, &v));
 	assert(v.id == 1 && v.result == SPF_VISIT_INVALID_GAP && !v.slice_count);
 	assert(!spf_visit_queue_complete_send(q, 1));

@@ -207,7 +207,14 @@ int spf_visit_queue_close_window(struct spf_visit_queue *q, uint64_t id, uint64_
 	for (i = 0; i < q->stats.visits; i++) {
 		struct visit *v = at(q, i);
 		if (v->id != id) continue;
-		if (!v->bound || v->closed || v->sending) return -EINVAL;
+		if (!v->bound) return -EINVAL;
+		/* A source gap may terminally close the window before its nominal
+		 * retune boundary. The scheduler still owns that boundary and must be
+		 * able to acknowledge it without turning an explicit INVALID_GAP into
+		 * a fatal session error. This is also safe while the terminal view is
+		 * pinned for transport: there is no state left to mutate here. */
+		if (v->closed) return 0;
+		if (v->sending) return -EINVAL;
 		v->closed = true;
 		if (invalid < v->end) discard(q, v, SPF_VISIT_INVALID_GAP);
 		else if (v->next == v->end) v->result = SPF_VISIT_COMPLETE;
