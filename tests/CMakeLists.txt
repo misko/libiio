@@ -79,6 +79,8 @@ set(IIO_TESTS_TARGETS iio_genxml iio_info iio_attr iio_readdev iio_reg
 
 add_executable(test_spf_hop_protocol test_spf_hop_protocol.c
 	../iiod/spf-hop-protocol.c)
+add_executable(test_direct_async_lifecycle test_direct_async_lifecycle.c)
+target_include_directories(test_direct_async_lifecycle PRIVATE ../iiod)
 add_executable(test_spf_hop_session test_spf_hop_session.c
 	../iiod/spf-hop-protocol.c ../iiod/spf-hop-adaptive-protocol.c ../iiod/spf-hop-session.c)
 add_executable(test_spf_hop_scheduler test_spf_hop_scheduler.c
@@ -92,8 +94,9 @@ target_include_directories(test_spf_hop_protocol PRIVATE ../iiod)
 target_include_directories(test_spf_hop_session PRIVATE ../iiod)
 target_include_directories(test_spf_hop_scheduler PRIVATE ../iiod)
 target_link_libraries(test_spf_hop_scheduler ${PTHREAD_LIBRARIES})
-list(APPEND IIO_TESTS_TARGETS test_spf_hop_protocol test_spf_hop_session
-	test_spf_hop_scheduler test_spf_hop_adaptive)
+list(APPEND IIO_TESTS_TARGETS test_direct_async_lifecycle
+	test_spf_hop_protocol test_spf_hop_session test_spf_hop_scheduler
+	test_spf_hop_adaptive)
 if(IIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER MATCHES
 		"spf-hop-device-userspace\\.c$")
 	add_executable(test_spf_hop_device_userspace
