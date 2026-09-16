@@ -1498,8 +1498,8 @@ __api __check_ret struct iio_buffer * iio_device_create_buffer(const struct iio_
 /** Maximum number of ordinary metadata reads that may be prequeued. */
 #define IIO_BUFFER_METADATA_BATCH_MAX 64U
 
-/** Maximum frame target for one finite direct-async capture session. */
-#define IIO_BUFFER_METADATA_DIRECT_MAX 4096U
+/** Host maximum frame target; the peer's advertised limit may be smaller. */
+#define IIO_BUFFER_METADATA_DIRECT_MAX 8192U
 
 /** Maximum host memory retained by one metadata refill batch. */
 #define IIO_BUFFER_METADATA_BATCH_BYTES_MAX (64U * 1024U * 1024U)
@@ -1552,8 +1552,13 @@ __api __check_ret int iio_buffer_set_metadata_batch_size(
  * batching, sealed DDR burst, and standalone DDR ring capture. An admitted
  * direct-async RAM extension adds its slots to the DMA queue. Each subsequent
  * iio_buffer_refill_with_metadata() consumes one response. The finite target
- * is bounded by IIO_BUFFER_METADATA_DIRECT_MAX; unlike an ordinary metadata
- * batch, it does not retain the complete capture in host memory. */
+ * is bounded by IIO_BUFFER_METADATA_DIRECT_MAX and the peer context attribute
+ * iio,buffer-direct-async-max-frames (a positive unsigned decimal count).
+ * A peer without this attribute is limited to the legacy 4096 frames. Invalid
+ * advertisements return -EINVAL; oversized requests return -E2BIG before
+ * sending a command or changing direct-capture state, permitting a smaller
+ * retry. Unlike an ordinary metadata batch, this mode does not retain the
+ * complete capture in host memory. */
 __api __check_ret int iio_buffer_set_metadata_read_prequeue_async(
 		struct iio_buffer *buf, unsigned int frames,
 		size_t metadata_capacity);
@@ -1577,7 +1582,8 @@ enum iio_buffer_metadata_overrun_policy {
  * discards only queued frames, rebases the next exact-gap metadata record over
  * the discarded interval, and acquires replacements until @p frames have been
  * delivered. The server advertises supported values through
- * iio,buffer-direct-async-overrun-policies. */
+ * iio,buffer-direct-async-overrun-policies. The peer frame-limit admission and
+ * errors are the same as iio_buffer_set_metadata_read_prequeue_async(). */
 __api __check_ret int iio_buffer_set_metadata_read_prequeue_async_policy(
 		struct iio_buffer *buf, unsigned int frames,
 		size_t metadata_capacity,

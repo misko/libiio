@@ -48,8 +48,8 @@ struct fixture {
 	struct iio_channel channel;
 	struct iio_channel *channels[1];
 	uint32_t device_mask[1];
-	char *context_attrs[3];
-	char *context_values[3];
+	char *context_attrs[4];
+	char *context_values[4];
 	struct transport_state state;
 };
 
@@ -432,6 +432,63 @@ static void test_direct_capture_limit(void)
 	destroy_fixture_buffer(&fixture, buffer);
 }
 
+static int arm_direct(struct iio_buffer *buffer, unsigned int frames, int mode)
+{
+	if (!mode)
+		return iio_buffer_set_metadata_read_prequeue_async(buffer, frames,
+			TEST_METADATA_BYTES);
+	return iio_buffer_set_metadata_read_prequeue_async_policy(buffer, frames,
+		TEST_METADATA_BYTES, mode == 1 ?
+		IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG :
+		IIO_BUFFER_METADATA_OVERRUN_DROP_BACKLOG);
+}
+
+static void test_peer_direct_capture_limits(void)
+{
+	static const struct {
+		const char *advertised;
+		unsigned int frames;
+		int expected;
+	} cases[] = {
+		{ NULL, 4096, 0 }, { NULL, 4097, -E2BIG },
+		{ NULL, 6000, -E2BIG }, { NULL, 8192, -E2BIG },
+		{ "4096", 4096, 0 }, { "4096", 4097, -E2BIG },
+		{ "4096", 6000, -E2BIG }, { "8192", 4097, 0 },
+		{ "8192", 6000, 0 }, { "8192", 8192, 0 },
+		{ "8192", 8193, -E2BIG }, { "16384", 8192, 0 },
+		{ "16384", 8193, -E2BIG }, { "1", 2, -E2BIG },
+		{ "", 2, -EINVAL }, { "0", 2, -EINVAL },
+		{ "-1", 2, -EINVAL }, { "+8192", 2, -EINVAL },
+		{ " 8192", 2, -EINVAL }, { "8192 ", 2, -EINVAL },
+		{ "8192junk", 2, -EINVAL }, { "8192\n", 2, -EINVAL },
+		{ "999999999999999999999999999999", 2, -EINVAL },
+	};
+	unsigned int i;
+	int mode;
+	for (mode = 0; mode < 3; mode++) {
+		for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			struct fixture f = {0};
+			struct iio_buffer *b = fixture_buffer(&f);
+			if (cases[i].advertised) {
+				f.context.nb_attrs = 4;
+				f.context_attrs[3] = "iio,buffer-direct-async-max-frames";
+				f.context_values[3] = (char *)cases[i].advertised;
+			}
+			assert(arm_direct(b, cases[i].frames, mode) == cases[i].expected);
+			if (cases[i].expected) {
+				assert(f.state.write_calls == 0);
+				assert(f.state.cancel_calls == 0);
+				assert(b->metadata_direct_frames == 0);
+				/* Admission failure must not poison a smaller retry. */
+				f.context.nb_attrs = 3;
+				assert(arm_direct(b, 1, mode) == 0);
+			}
+			assert(f.state.write_calls == 1);
+			destroy_fixture_buffer(&f, b);
+		}
+	}
+}
+
 static void test_terminal_status_survives_early_direct_failure(void)
 {
 	struct fixture fixture = {0};
@@ -471,6 +528,7 @@ int main(void)
 	test_long_capture_is_one_command();
 	test_explicit_overrun_policy_commands();
 	test_direct_capture_limit();
+	test_peer_direct_capture_limits();
 	test_terminal_status_survives_early_direct_failure();
 	puts("direct async transport: PASS");
 	return 0;
