@@ -471,6 +471,38 @@ static ssize_t usb_get_buffer_metadata_status(const struct iio_device *dev,
 	return ret;
 }
 
+static int usb_prequeue_metadata_reads_async(const struct iio_device *dev,
+		size_t len, size_t metadata_capacity, unsigned int frames)
+{
+	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *pdata = dev->pdata;
+	int ret;
+
+	iio_mutex_lock(pdata->lock);
+	ret = iiod_client_prequeue_metadata_reads_async_unlocked(
+		ctx_pdata->iiod_client, &pdata->io_ctx, dev, len,
+		metadata_capacity, frames);
+	iio_mutex_unlock(pdata->lock);
+	return ret;
+}
+
+static int usb_prequeue_metadata_reads_async_policy(
+		const struct iio_device *dev, size_t len,
+		size_t metadata_capacity, unsigned int frames,
+		unsigned int overrun_policy)
+{
+	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
+	struct iio_device_pdata *pdata = dev->pdata;
+	int ret;
+
+	iio_mutex_lock(pdata->lock);
+	ret = iiod_client_prequeue_metadata_reads_async_policy_unlocked(
+		ctx_pdata->iiod_client, &pdata->io_ctx, dev, len,
+		metadata_capacity, frames, overrun_policy);
+	iio_mutex_unlock(pdata->lock);
+	return ret;
+}
+
 static int usb_cancel_buffer_metadata_session(const struct iio_device *dev)
 {
 	struct iio_context_pdata *ctx_pdata = iio_context_get_pdata(dev->ctx);
@@ -701,6 +733,9 @@ static const struct iio_backend_ops usb_ops = {
 	.read_with_metadata = usb_read_with_metadata,
 	.read_with_metadata_batch = usb_read_with_metadata_batch,
 	.get_buffer_metadata_status = usb_get_buffer_metadata_status,
+	.prequeue_metadata_reads_async = usb_prequeue_metadata_reads_async,
+	.prequeue_metadata_reads_async_policy =
+		usb_prequeue_metadata_reads_async_policy,
 	.cancel_buffer_metadata_session = usb_cancel_buffer_metadata_session,
 	.write = usb_write,
 	.read_device_attr = usb_read_dev_attr,

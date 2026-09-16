@@ -130,6 +130,19 @@ if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	if(NOT SPF_THREAD_JOIN_SOURCE)
 		message(FATAL_ERROR "SPF temperature tests require spf_thread_join.c")
 	endif()
+	add_executable(test_spf_counter_metadata test_spf_counter_metadata.c
+		../iiod/spf-counter-metadata.c ../iiod/spf-buffer-metadata.c
+		../iiod/spf-buffer-layout.c ../iiod/spf-sampler-coverage.c
+		../iiod/spf-temperature-cache.c ../iiod/spf-ddr-burst-request.c
+		../iiod/spf-ddr-ring-request.c
+		${IIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES})
+	target_include_directories(test_spf_counter_metadata PRIVATE ../iiod ..
+		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+	target_link_libraries(test_spf_counter_metadata iio ${PTHREAD_LIBRARIES})
+	target_link_options(test_spf_counter_metadata PRIVATE
+		-Wl,--wrap=open -Wl,--wrap=close -Wl,--wrap=ioctl
+		-Wl,--wrap=iio_device_get_name -Wl,--wrap=iio_buffer_start -Wl,--wrap=spf_tandem_session_acquire
+		-Wl,--wrap=spf_gain_sampler_start)
 	add_executable(test_spf_tandem_session test_spf_tandem_session.c
 		../iiod/spf-tandem-session.c)
 	add_executable(test_spf_tandem_metadata test_spf_tandem_metadata.c
