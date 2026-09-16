@@ -9,6 +9,7 @@
 #include "ops.h"
 #include "parser.h"
 #include "thread-pool.h"
+#include "direct-async-lifecycle.h"
 #include "buffer-metadata.h"
 #include "ddr-ring-core.h"
 #include "spf-ddr-ring-request.h"
@@ -2966,6 +2967,22 @@ static ssize_t rw_buffer(struct parser_pdata *pdata,
 		return -EBUSY;
 	}
 	if (async_frames) {
+		pthread_mutex_lock(&entry->ring_lock);
+		if (iiod_direct_async_segment_is_complete(
+				entry->direct.requested,
+				entry->direct.producer_started,
+				entry->direct.producer_exited,
+				entry->direct.consumer_active,
+				entry->direct.cancelled,
+				entry->direct.count,
+				entry->direct.consumed_frames,
+				entry->direct.target_frames,
+				entry->direct.error)) {
+			pthread_mutex_unlock(&entry->ring_lock);
+			direct_async_release_storage(&entry->direct);
+		} else {
+			pthread_mutex_unlock(&entry->ring_lock);
+		}
 		if (!entry->allocated_kernel_buffers ||
 				entry->allocated_kernel_buffers !=
 				entry->requested_kernel_buffers) {

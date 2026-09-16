@@ -77,6 +77,10 @@ target_link_libraries(iio_writedev iio iio_tests_helper)
 set(IIO_TESTS_TARGETS iio_genxml iio_info iio_attr iio_readdev iio_reg
 	iio_writedev)
 
+add_executable(test_direct_async_lifecycle test_direct_async_lifecycle.c)
+target_include_directories(test_direct_async_lifecycle PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_direct_async_lifecycle)
+
 if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	set(SPF_RADIO_FRAME_V3_SOURCE "")
 	set(SPF_THREAD_JOIN_SOURCE "")
