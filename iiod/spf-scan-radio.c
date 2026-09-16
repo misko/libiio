@@ -103,6 +103,7 @@ int spf_scan_radio_recall(struct spf_scan_radio *radio, uint32_t profile,
 	int ret;
 
 	if (!radio || !receipt || !radio->configured || radio->faulted ||
+	    radio->released ||
 	    profile >= SPF_SCAN_RADIO_MAX_PROFILES ||
 	    !(radio->profile_mask & (1U << profile)))
 		return -EINVAL;
@@ -133,5 +134,36 @@ int spf_scan_radio_recall(struct spf_scan_radio *radio, uint32_t profile,
 	receipt->profile_crc32 = recall.profile_crc32;
 	receipt->counter_before = before;
 	receipt->counter_after = after;
+	return 0;
+}
+
+int spf_scan_radio_release(struct spf_scan_radio *radio, uint64_t counter_anchor,
+			   struct spf_scan_radio_release_receipt *receipt)
+{
+	struct adi_rx_counter_scan_release release = { 0 };
+	uint64_t before, after;
+	int ret;
+
+	if (!radio || !receipt || !radio->configured || radio->released)
+		return -EINVAL;
+	release.magic = ADI_RX_COUNTER_MAGIC;
+	release.version = ADI_RX_COUNTER_SCAN_VERSION;
+	release.size = sizeof(release);
+	if (radio->call_ioctl(radio->fd, ADI_RX_COUNTER_IOC_RELEASE_SCAN,
+			      &release) < 0) {
+		radio->faulted = true;
+		return -errno;
+	}
+	ret = extend_counter(counter_anchor, release.counter_before, &before);
+	if (!ret)
+		ret = extend_counter(before, release.counter_after, &after);
+	if (ret || !release.frequency_hz) {
+		radio->faulted = true;
+		return ret ? ret : -EPROTO;
+	}
+	receipt->frequency_hz = release.frequency_hz;
+	receipt->counter_before = before;
+	receipt->counter_after = after;
+	radio->released = true;
 	return 0;
 }

@@ -16,6 +16,7 @@ _Static_assert(sizeof(struct adi_rx_counter_scan_profile) == 16, "profile ABI");
 _Static_assert(sizeof(struct adi_rx_counter_scan_config) == 144, "config ABI");
 _Static_assert(sizeof(struct adi_rx_counter_scan_recall) == 48, "recall ABI");
 _Static_assert(sizeof(struct adi_rx_counter_scan_caps) == 32, "caps ABI");
+_Static_assert(sizeof(struct adi_rx_counter_scan_release) == 48, "release ABI");
 _Static_assert(offsetof(struct adi_rx_counter_scan_recall, frequency_hz) == 16,
 	       "recall alignment");
 
@@ -67,6 +68,20 @@ static int mock_ioctl(int fd, unsigned long request, void *argument)
 		recall->counter_after = result_after;
 		return 0;
 	}
+	if (request == ADI_RX_COUNTER_IOC_RELEASE_SCAN) {
+		struct adi_rx_counter_scan_release *release = argument;
+
+		assert(release->magic == ADI_RX_COUNTER_MAGIC);
+		assert(release->version == ADI_RX_COUNTER_SCAN_VERSION);
+		assert(release->size == sizeof(*release));
+		assert(!release->flags && !release->reserved0 &&
+		       !release->frequency_hz && !release->counter_before &&
+		       !release->counter_after);
+		release->frequency_hz = UINT64_C(915000000);
+		release->counter_before = UINT32_C(0xfffffff0);
+		release->counter_after = UINT32_C(0x30);
+		return 0;
+	}
 	assert(!"unexpected ioctl");
 	return -1;
 }
@@ -80,6 +95,7 @@ int main(void)
 		  .crc32 = UINT32_C(0x50607080) },
 	};
 	struct spf_scan_radio_receipt receipt;
+	struct spf_scan_radio_release_receipt release_receipt;
 	struct spf_scan_radio radio;
 	struct spf_scan_radio_profile duplicate[2] = { profiles[0], profiles[0] };
 
@@ -98,7 +114,16 @@ int main(void)
 	assert(receipt.counter_after == UINT64_C(0x200000020));
 	assert(receipt.frequency_hz == UINT64_C(2400000000));
 	assert(receipt.profile_crc32 == result_crc);
+	assert(spf_scan_radio_release(&radio, receipt.counter_after,
+				      &release_receipt) == 0);
+	assert(release_receipt.frequency_hz == UINT64_C(915000000));
+	assert(release_receipt.counter_before == UINT64_C(0x2fffffff0));
+	assert(release_receipt.counter_after == UINT64_C(0x300000030));
+	assert(spf_scan_radio_release(&radio, release_receipt.counter_after,
+				      &release_receipt) == -EINVAL);
 
+	assert(spf_scan_radio_init(&radio, 17, mock_ioctl) == 0);
+	assert(spf_scan_radio_configure(&radio, profiles, 2) == 0);
 	result_frequency += 10;
 	assert(spf_scan_radio_recall(&radio, 3, receipt.counter_after,
 				     &receipt) == -EPROTO);

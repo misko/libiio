@@ -21,6 +21,9 @@ struct spf_scan_radio_receipt {
 	uint64_t counter_before;
 	uint64_t counter_after;
 };
+struct spf_scan_radio_release_receipt {
+	uint64_t frequency_hz, counter_before, counter_after;
+};
 
 typedef int (*spf_scan_radio_ioctl_fn)(int fd, unsigned long request,
 					      void *argument);
@@ -34,6 +37,7 @@ struct spf_scan_radio {
 	uint32_t features;
 	bool configured;
 	bool faulted;
+	bool released;
 };
 
 int spf_scan_radio_init(struct spf_scan_radio *radio, int fd,
@@ -44,5 +48,7 @@ int spf_scan_radio_configure(struct spf_scan_radio *radio,
 int spf_scan_radio_recall(struct spf_scan_radio *radio, uint32_t profile,
 			  uint64_t counter_anchor,
 			  struct spf_scan_radio_receipt *receipt);
+int spf_scan_radio_release(struct spf_scan_radio *radio, uint64_t counter_anchor,
+			   struct spf_scan_radio_release_receipt *receipt);
 
 #endif
