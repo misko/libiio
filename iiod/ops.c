@@ -775,6 +775,11 @@ struct DevEntry {
 	pthread_mutex_t thdlist_lock;
 
 	pthread_cond_t rw_ready_cond;
+	/* Adaptive-scan feedback/ACK commands must not wait behind an IQ socket
+	 * write holding thdlist_lock.  This lock also pins the metadata provider
+	 * until a control operation has returned. */
+	pthread_mutex_t scan_control_lock;
+	bool scan_control_closed;
 	pthread_mutex_t ring_lock;
 	pthread_cond_t ring_ready_cond;
 	struct iiod_stage_timing timing;
@@ -1999,6 +2004,7 @@ static void dev_entry_put(struct DevEntry *entry)
 		iiod_timing_log(entry, false);
 		pthread_mutex_destroy(&entry->thdlist_lock);
 		pthread_cond_destroy(&entry->rw_ready_cond);
+		pthread_mutex_destroy(&entry->scan_control_lock);
 		pthread_mutex_destroy(&entry->ring_lock);
 		pthread_cond_destroy(&entry->ring_ready_cond);
 		pthread_mutex_destroy(&entry->timing.lock);
@@ -3069,15 +3075,20 @@ static void rw_thd(struct thread_pool *pool, void *d)
 		thd->wait_for_open = false;
 		signal_thread(thd, ret);
 	}
-	/* Direct frames lease entry->buf storage and must be returned first. */
+	/* Direct frames and the scan provider lease entry->buf storage.  Return
+	 * every lease before destroying the parent buffer: libiio block release
+	 * dereferences that buffer to reach its backend operations. */
 	direct_async_release_storage(&entry->direct);
-	if (entry->buf) {
-		iio_buffer_destroy(entry->buf);
-		entry->buf = NULL;
-	}
+	pthread_mutex_lock(&entry->scan_control_lock);
+	entry->scan_control_closed = true;
 	if (entry->metadata_provider_context) {
 		iiod_buffer_metadata_close(entry->metadata_provider_context);
 		entry->metadata_provider_context = NULL;
+	}
+	pthread_mutex_unlock(&entry->scan_control_lock);
+	if (entry->buf) {
+		iio_buffer_destroy(entry->buf);
+		entry->buf = NULL;
 	}
 	burst_release_storage(&entry->burst);
 	ring_release_storage(&entry->ring);
@@ -3563,6 +3574,7 @@ retry:
 
 	pthread_mutex_init(&entry->thdlist_lock, NULL);
 	pthread_cond_init(&entry->rw_ready_cond, NULL);
+	pthread_mutex_init(&entry->scan_control_lock, NULL);
 	pthread_mutex_init(&entry->ring_lock, NULL);
 	pthread_cond_init(&entry->ring_ready_cond, NULL);
 	pthread_mutex_init(&entry->timing.lock, NULL);
@@ -3579,6 +3591,7 @@ retry:
 		pthread_mutex_destroy(&entry->timing.lock);
 		pthread_cond_destroy(&entry->ring_ready_cond);
 		pthread_mutex_destroy(&entry->ring_lock);
+		pthread_mutex_destroy(&entry->scan_control_lock);
 		pthread_cond_destroy(&entry->rw_ready_cond);
 		pthread_mutex_destroy(&entry->thdlist_lock);
 		goto err_free_entry_mask;
@@ -3837,17 +3850,21 @@ static struct DevEntry *scan_control_entry_get(struct iio_device *dev)
 	candidate = iio_device_get_data(dev);
 	entry = candidate;
 	if (candidate) {
-		pthread_mutex_lock(&candidate->thdlist_lock);
-		if (candidate->closed ||
+		pthread_mutex_lock(&candidate->scan_control_lock);
+		if (candidate->scan_control_closed ||
 		    !iiod_buffer_metadata_scan_enabled(
-			    candidate->metadata_provider_context))
+			    candidate->metadata_provider_context)) {
 			entry = NULL;
-		else
-			candidate->ref_count++;
-		pthread_mutex_unlock(&candidate->thdlist_lock);
+			pthread_mutex_unlock(&candidate->scan_control_lock);
+		}
 	}
 	pthread_mutex_unlock(&devlist_lock);
 	return entry;
+}
+
+static void scan_control_entry_put(struct DevEntry *entry)
+{
+	pthread_mutex_unlock(&entry->scan_control_lock);
 }
 
 ssize_t read_adaptive_scan_capabilities(struct parser_pdata *pdata,
@@ -3889,7 +3906,7 @@ ssize_t submit_adaptive_scan_feedback(struct parser_pdata *pdata,
 	else {
 		ret = iiod_buffer_metadata_scan_feedback(
 			entry->metadata_provider_context, &feedback);
-		dev_entry_put(entry);
+		scan_control_entry_put(entry);
 	}
 	print_value(pdata, ret);
 	return ret;
@@ -3912,7 +3929,7 @@ ssize_t read_adaptive_scan_ack(struct parser_pdata *pdata,
 			entry->metadata_provider_context, &ack);
 		if (!ret)
 			ret = spf_scan_ack_encode(wire, sizeof(wire), &ack);
-		dev_entry_put(entry);
+		scan_control_entry_put(entry);
 	}
 	if (ret) {
 		print_value(pdata, ret);
