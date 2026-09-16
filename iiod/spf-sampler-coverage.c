@@ -4,6 +4,19 @@
 #include <errno.h>
 #include <stddef.h>
 
+int spf_sampler_queued_observation_interval(uint32_t samples_per_frame,
+	uint32_t requested_interval, uint32_t *interval)
+{
+	uint32_t maximum;
+	if (!samples_per_frame || !requested_interval || !interval)
+		return -EINVAL;
+	maximum = samples_per_frame / 2U;
+	if (!maximum)
+		maximum = 1U;
+	*interval = requested_interval < maximum ? requested_interval : maximum;
+	return 0;
+}
+
 int spf_sampler_coverage_plan_compute(uint32_t samples_per_frame,
 	uint32_t observation_interval_samples,
 	unsigned int kernel_buffers_count,

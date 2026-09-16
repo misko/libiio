@@ -2,16 +2,121 @@
 
 from ctypes import c_size_t, memmove, sizeof
 import struct
+import errno
 from types import SimpleNamespace
 
 import pytest
 
 import iio
 
+@pytest.fixture
+def drain_buffer(monkeypatch):
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: object())
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+    buffer = iio.MetadataBuffer(FakeDevice(), 1, b"request")
+    yield buffer
+    buffer.close()
+
+
+def test_metadata_drain_does_not_refill_or_replace_last_metadata(monkeypatch, drain_buffer):
+    calls = []
+
+    def drain(buffer, destination, capacity):
+        calls.append((buffer, capacity))
+        memmove(destination, b"tail", 4)
+        return 4
+
+    def no_refill(*args):
+        pytest.fail("metadata drain must not refill IQ")
+
+    monkeypatch.setattr(iio, "_buffer_drain_metadata", drain)
+    monkeypatch.setattr(iio, "_buffer_refill_with_metadata", no_refill)
+    drain_buffer._metadata = b"original"
+    assert drain_buffer.drain_metadata(32) == b"tail"
+    assert drain_buffer.metadata == b"original"
+    assert calls == [(drain_buffer._buffer, 32)]
+
+
+@pytest.mark.parametrize("capacity", [0, -1, 65537, 2**64, 1.5, True, None])
+def test_metadata_drain_capacity_is_bounded(drain_buffer, capacity):
+    with pytest.raises(ValueError, match="capacity"):
+        drain_buffer.drain_metadata(capacity)
+
+
+def test_metadata_drain_missing_symbol_and_closed(monkeypatch, drain_buffer):
+    monkeypatch.setattr(iio, "_buffer_drain_metadata", None)
+    with pytest.raises(OSError) as error:
+        drain_buffer.drain_metadata()
+    assert error.value.errno == errno.ENOSYS
+    drain_buffer.close()
+    with pytest.raises(ValueError, match="closed"):
+        drain_buffer.drain_metadata()
+
+
+@pytest.mark.parametrize("code", [errno.EAGAIN, errno.ENODATA, errno.EBUSY, errno.ENOSYS])
+def test_metadata_drain_preserves_provider_errno(monkeypatch, drain_buffer, code):
+    def drain(*args):
+        raise OSError(code, "provider reply")
+
+    monkeypatch.setattr(iio, "_buffer_drain_metadata", drain)
+    with pytest.raises(OSError) as error:
+        drain_buffer.drain_metadata()
+    assert error.value.errno == code
+
+
+@pytest.mark.parametrize("count", [0, -1, 65537])
+def test_metadata_drain_invalid_count(monkeypatch, drain_buffer, count):
+    monkeypatch.setattr(iio, "_buffer_drain_metadata", lambda *args: count)
+    with pytest.raises(OSError, match="invalid metadata drain size"):
+        drain_buffer.drain_metadata()
+
 
 class FakeDevice:
     _device = object()
     sample_size = 8
+
+
+def test_raw_metadata_status_is_public_opaque_and_does_not_refill(monkeypatch, drain_buffer):
+    def status(buffer, destination, capacity):
+        assert capacity == 32
+        memmove(destination, b"status", 6)
+        return 6
+
+    def no_refill(*args):
+        pytest.fail("metadata status must not refill IQ")
+
+    monkeypatch.setattr(iio, "_buffer_get_metadata_status", status)
+    monkeypatch.setattr(iio, "_buffer_refill_with_metadata", no_refill)
+    drain_buffer._metadata = b"original"
+    assert drain_buffer.metadata_status_raw(32) == b"status"
+    assert drain_buffer.metadata == b"original"
+    drain_buffer.close()
+    with pytest.raises(ValueError, match="closed"):
+        drain_buffer.metadata_status_raw()
+
+
+@pytest.mark.parametrize("capacity", [0, -1, 65537, 2**64, 1.5, True, None])
+def test_raw_metadata_status_capacity_is_bounded(drain_buffer, capacity):
+    with pytest.raises(ValueError, match="capacity"):
+        drain_buffer.metadata_status_raw(capacity)
+
+
+@pytest.mark.parametrize("count", [0, -1, 65537])
+def test_raw_metadata_status_rejects_invalid_count(monkeypatch, drain_buffer, count):
+    monkeypatch.setattr(iio, "_buffer_get_metadata_status", lambda *args: count)
+    with pytest.raises(OSError, match="invalid metadata status size"):
+        drain_buffer.metadata_status_raw()
+
+
+def test_raw_metadata_status_preserves_provider_error(monkeypatch, drain_buffer):
+    def status(*args):
+        raise OSError(errno.EIO, "provider failure")
+
+    monkeypatch.setattr(iio, "_buffer_get_metadata_status", status)
+    with pytest.raises(OSError) as error:
+        drain_buffer.metadata_status_raw()
+    assert error.value.errno == errno.EIO
 
 
 class DirectAsyncFakeDevice(FakeDevice):
@@ -245,6 +350,8 @@ def test_direct_async_can_preserve_backlog_explicitly(monkeypatch):
 
     assert configured == [(created, 2, 65536, 0)]
     assert buffer.drop_backlog_on_overrun is False
+    buffer.rearm_direct_async()
+    assert configured == [(created, 2, 65536, 0), (created, 1, 65536, 0)]
     buffer.close()
 
 
@@ -471,6 +578,24 @@ def test_device_ddr_ring_status_decodes_atomic_snapshot(monkeypatch):
     assert status["wrap_count"] == 2
     assert status["last_contiguous_sample_sequence"] == 123456
     assert status["first_unavailable_sample_sequence"] is None
+    buffer.close()
+
+
+def test_inband_metadata_cancel_retains_buffer_for_status(monkeypatch):
+    created = object()
+    calls = []
+    monkeypatch.setattr(iio, "_create_buffer_with_metadata", lambda *args: created)
+    monkeypatch.setattr(iio, "_buffer_set_metadata_batch_size", lambda *args: None)
+    monkeypatch.setattr(iio, "_buffer_destroy", lambda *args: None)
+    monkeypatch.setattr(
+        iio,
+        "_buffer_cancel_metadata_session",
+        lambda target: calls.append(target),
+    )
+    buffer = iio.MetadataBuffer(FakeDevice(), 1, b"provider")
+    buffer.cancel_metadata_session()
+    assert calls == [created]
+    assert buffer._buffer is created
     buffer.close()
 
 

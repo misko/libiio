@@ -23,9 +23,12 @@ enum iio_backend_api_ver {
 	IIO_BACKEND_API_V6 = 6,
 	IIO_BACKEND_API_V7 = 7,
 	IIO_BACKEND_API_V8 = 8,
+	IIO_BACKEND_API_V9 = 9,
+	IIO_BACKEND_API_V10 = 10,
+	IIO_BACKEND_API_V11 = 11,
 };
 
-#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V8
+#define IIO_BACKEND_API_CURRENT IIO_BACKEND_API_V11
 
 static inline bool iio_backend_api_version_supported(unsigned int version)
 {
@@ -136,6 +139,18 @@ struct iio_backend_ops {
 	 * configuration because Linux may admit a smaller partial allocation. */
 	int (*get_allocated_kernel_buffers_count)(const struct iio_device *dev,
 			unsigned int *count);
+
+	/* API v9: cancel and restore only a provider-owned metadata session while
+	 * retaining the open buffer transport for terminal status and CLOSE. */
+	int (*cancel_buffer_metadata_session)(const struct iio_device *dev);
+
+	/* API v10: consume one provider-owned metadata-only result after the IQ
+	 * stream is drained. Never initiates acquisition or refills an IQ buffer. */
+	ssize_t (*drain_buffer_metadata)(const struct iio_device *dev,
+			void *metadata, size_t metadata_capacity);
+	/* API v11: bounded provider feedback on the owning buffer connection. */
+	int (*submit_metadata_feedback)(const struct iio_device *dev,
+			const void *feedback, size_t bytes);
 };
 
 /**

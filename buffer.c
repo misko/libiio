@@ -221,6 +221,15 @@ static void fail_metadata_batch(struct iio_buffer *buffer)
 		ops->cancel(buffer->dev);
 }
 
+static void reset_metadata_direct_segment(struct iio_buffer *buffer)
+{
+	free(buffer->metadata_direct_mask);
+	buffer->metadata_direct_mask = NULL;
+	buffer->metadata_direct_frames = 0;
+	buffer->metadata_direct_pending = 0;
+	buffer->metadata_direct_capacity = 0;
+}
+
 static void cache_terminal_metadata_status(struct iio_buffer *buffer)
 {
 	const struct iio_backend_ops *ops = buffer->dev->ctx->ops;
@@ -331,13 +340,22 @@ int iio_buffer_set_metadata_read_prequeue_async(struct iio_buffer *buffer,
 		return -E2BIG;
 	if (metadata_batch_is_failed(buffer))
 		return -EBADF;
-	if (buffer->metadata_direct_frames || buffer->metadata_batch_size != 1 ||
+	if ((buffer->metadata_direct_frames && buffer->metadata_direct_pending) ||
+			buffer->metadata_batch_size != 1 ||
 		buffer->metadata_batch_cached_frames !=
 			buffer->metadata_batch_next_frame)
 		return -EBUSY;
 	ret = validate_direct_peer_limit(buffer, frames);
 	if (ret < 0)
 		return ret;
+	/* An exhausted direct segment has no queued wire replies.  Permit the
+	 * owner to enqueue the next bounded segment after any in-band control
+	 * command, while retaining -ENODATA until it explicitly does so. */
+	if (buffer->metadata_direct_frames) {
+		free(buffer->metadata_direct_mask);
+		buffer->metadata_direct_mask = NULL;
+		buffer->metadata_direct_frames = 0;
+	}
 
 	ops = buffer->dev->ctx->ops;
 	capability = iio_context_get_attr_value(buffer->dev->ctx,
@@ -391,13 +409,22 @@ int iio_buffer_set_metadata_read_prequeue_async_policy(
 		return -E2BIG;
 	if (metadata_batch_is_failed(buffer))
 		return -EBADF;
-	if (buffer->metadata_direct_frames || buffer->metadata_batch_size != 1 ||
+	if ((buffer->metadata_direct_frames && buffer->metadata_direct_pending) ||
+			buffer->metadata_batch_size != 1 ||
 		buffer->metadata_batch_cached_frames !=
 			buffer->metadata_batch_next_frame)
 		return -EBUSY;
 	ret = validate_direct_peer_limit(buffer, frames);
 	if (ret < 0)
 		return ret;
+	/* An exhausted direct segment has no queued wire replies.  Permit the
+	 * owner to enqueue the next bounded segment after any in-band control
+	 * command, while retaining -ENODATA until it explicitly does so. */
+	if (buffer->metadata_direct_frames) {
+		free(buffer->metadata_direct_mask);
+		buffer->metadata_direct_mask = NULL;
+		buffer->metadata_direct_frames = 0;
+	}
 
 	ops = buffer->dev->ctx->ops;
 	capability = iio_context_get_attr_value(buffer->dev->ctx,
@@ -473,6 +500,55 @@ ssize_t iio_buffer_get_metadata_status(struct iio_buffer *buffer,
 		return -ENOSYS;
 	return ops->get_buffer_metadata_status(buffer->dev, status,
 		status_capacity);
+}
+
+int iio_buffer_cancel_metadata_session(struct iio_buffer *buffer)
+{
+	const struct iio_backend_ops *ops;
+
+	if (!buffer || !buffer->metadata_enabled)
+		return -EINVAL;
+	/* A command cannot be inserted ahead of already queued wire responses. */
+	if (buffer->metadata_direct_pending || metadata_batch_is_failed(buffer))
+		return -EBUSY;
+	ops = buffer->dev->ctx->ops;
+	if (buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V9 ||
+		!ops->cancel_buffer_metadata_session)
+		return -ENOSYS;
+	return ops->cancel_buffer_metadata_session(buffer->dev);
+}
+
+ssize_t iio_buffer_drain_metadata(struct iio_buffer *buffer,
+		void *metadata, size_t metadata_capacity)
+{
+	const struct iio_backend_ops *ops;
+
+	if (!buffer || !buffer->metadata_enabled || !metadata ||
+		!metadata_capacity || metadata_capacity > 65536U)
+		return -EINVAL;
+	/* Preserve both wire ordering and the order visible to cached readers. */
+	if (buffer->metadata_direct_pending || metadata_batch_is_failed(buffer) ||
+		buffer->metadata_batch_next_frame < buffer->metadata_batch_cached_frames)
+		return -EBUSY;
+	ops = buffer->dev->ctx->ops;
+	if (buffer->dev->ctx->backend_api_version < IIO_BACKEND_API_V10 ||
+		!ops->drain_buffer_metadata)
+		return -ENOSYS;
+	return ops->drain_buffer_metadata(buffer->dev, metadata, metadata_capacity);
+}
+
+int iio_buffer_submit_metadata_feedback(struct iio_buffer *buffer,
+	const void *feedback, size_t bytes)
+{
+	const struct iio_backend_ops *ops;
+	if (!buffer || !buffer->metadata_enabled || !feedback || !bytes ||
+		bytes>IIO_BUFFER_METADATA_FEEDBACK_MAX) return -EINVAL;
+	if (buffer->metadata_direct_pending || metadata_batch_is_failed(buffer) ||
+		buffer->metadata_batch_next_frame<buffer->metadata_batch_cached_frames) return -EBUSY;
+	ops=buffer->dev->ctx->ops;
+	if (buffer->dev->ctx->backend_api_version<IIO_BACKEND_API_V11 ||
+		!ops->submit_metadata_feedback) return -ENOSYS;
+	return ops->submit_metadata_feedback(buffer->dev,feedback,bytes);
 }
 
 void iio_buffer_destroy(struct iio_buffer *buffer)
@@ -639,6 +715,16 @@ ssize_t iio_buffer_refill_with_metadata(struct iio_buffer *buffer,
 				dev->words * sizeof(*buffer->mask))) {
 			ret = read < 0 ? read : -EIO;
 			*metadata_bytes = 0;
+			/* A newly rearmed command can be rejected while iiOD finishes
+			 * an immediately preceding in-band feedback command.  No frame
+			 * was admitted, and the command response has been consumed, so
+			 * leave the transport exhausted and explicitly rearmable. */
+			if (buffer->metadata_direct_pending ==
+					buffer->metadata_direct_frames &&
+					(ret == -EBUSY || ret == -ENODATA)) {
+				reset_metadata_direct_segment(buffer);
+				return ret;
+			}
 			cache_terminal_metadata_status(buffer);
 			fail_metadata_batch(buffer);
 			return ret;
