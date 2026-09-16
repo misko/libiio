@@ -30,7 +30,8 @@ struct spf_scan_session {
 	struct spf_scan_radio_release_receipt restoration;
 	enum spf_visit_result inflight_result;
 	int error;
-	bool stopping, failed, released, output_inflight, terminal_taken;
+	bool stopping, failed, cancelled_session, released, output_inflight;
+	bool terminal_taken;
 };
 
 static uint64_t ticks(const struct spf_scan_session *session, uint32_t ms)
@@ -243,6 +244,19 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 	return 0;
 }
 
+int spf_scan_session_next_boundary(const struct spf_scan_session *session,
+	uint64_t *counter)
+{
+	if (!session || !counter)
+		return -EINVAL;
+	if (session->stopping)
+		return -ESHUTDOWN;
+	if (session->active == NO_ACTIVE)
+		return -EAGAIN;
+	*counter = session->ledger[session->active].valid_end;
+	return 0;
+}
+
 int spf_scan_session_feed(struct spf_scan_session *session, uintptr_t token,
 	const void *data, uint64_t first, uint32_t samples)
 {
@@ -430,6 +444,29 @@ int spf_scan_session_stop(struct spf_scan_session *session,
 	return maybe_release(session);
 }
 
+int spf_scan_session_cancel(struct spf_scan_session *session,
+	uint64_t final_counter)
+{
+	int ret;
+
+	if (!session || session->stopping)
+		return -EINVAL;
+	ret = close_active(session, final_counter);
+	if (ret)
+		return fail_session(session, ret, final_counter);
+	spf_scan_policy_stop(session->policy, final_counter);
+	ret = spf_visit_queue_cancel(session->queue);
+	if (ret && ret != -EBUSY)
+		return fail_session(session, ret, final_counter);
+	session->stopping = true;
+	session->cancelled_session = true;
+	session->error = -ECANCELED;
+	session->final_counter = final_counter;
+	if (final_counter > session->latest_counter)
+		session->latest_counter = final_counter;
+	return maybe_release(session);
+}
+
 int spf_scan_session_terminal(struct spf_scan_session *session,
 	struct spf_scan_terminal *terminal)
 {
@@ -459,10 +496,13 @@ int spf_scan_session_terminal(struct spf_scan_session *session,
 		.cancelled = session->cancelled,
 		.iq_bytes = session->iq_bytes,
 		.state = session->failed ? SPF_SCAN_TERMINAL_FAILED :
-			SPF_SCAN_TERMINAL_COMPLETED,
+			(session->cancelled_session ? SPF_SCAN_TERMINAL_CANCELLED :
+			 SPF_SCAN_TERMINAL_COMPLETED),
 		.reason = session->failed ? TERMINAL_REASON_INTERNAL :
-			TERMINAL_REASON_COMPLETE,
-		.error = session->failed ? session->error : 0,
+			(session->cancelled_session ? UINT32_C(2) :
+			 TERMINAL_REASON_COMPLETE),
+		.error = session->failed || session->cancelled_session ?
+			session->error : 0,
 		.flags = TERMINAL_FLAG_RESTORED,
 	};
 	session->terminal_taken = true;

@@ -151,6 +151,12 @@ static void test_three_visits_feedback_and_early_restore(void)
 	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
 	mock_now = base;
 	assert(spf_scan_session_schedule(session, base, base, &choice[0]) == 0);
+	{
+		uint64_t boundary;
+
+		assert(spf_scan_session_next_boundary(session, &boundary) == 0);
+		assert(boundary == choice[0].selection_counter + 300000);
+	}
 	feed_three(session, base, &token);
 	mock_now = base + 300000;
 	assert(spf_scan_session_schedule(session, mock_now, mock_now, &choice[1]) == 0);
@@ -250,11 +256,42 @@ static void test_transport_failure_cancels_current_and_remainder(void)
 	assert(spf_scan_session_destroy(session) == 0);
 }
 
+static void test_graceful_cancel_restores_and_accounts(void)
+{
+	const uint64_t base = UINT64_C(0x4ffff0000);
+	struct spf_scan_session_runtime runtime = {
+		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.drain_bytes_per_second = 60000000, .release_block = release_block,
+	};
+	struct spf_scan_session_output output;
+	struct spf_scan_terminal terminal;
+	struct spf_scan_choice choice;
+	struct spf_scan_session *session;
+	struct spf_scan_radio radio;
+	struct spf_scan_setup request = setup();
+
+	assert(spf_scan_radio_init(&radio, 29, mock_ioctl) == 0);
+	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
+	mock_now = base;
+	assert(spf_scan_session_schedule(session, base, base, &choice) == 0);
+	mock_now = base + 1000;
+	assert(spf_scan_session_cancel(session, mock_now) == 0);
+	assert(radio.released);
+	assert(spf_scan_session_take_output(session, &output) == 0);
+	assert(output.record.result == SPF_VISIT_CANCELLED);
+	assert(spf_scan_session_complete_output(session, 0) == 0);
+	assert(spf_scan_session_terminal(session, &terminal) == 0);
+	assert(terminal.state == SPF_SCAN_TERMINAL_CANCELLED);
+	assert(terminal.error == -ECANCELED && terminal.cancelled == 1);
+	assert(spf_scan_session_destroy(session) == 0);
+}
+
 int main(void)
 {
 	test_three_visits_feedback_and_early_restore();
 	test_recall_failure_cancels_and_restores();
 	test_transport_failure_cancels_current_and_remainder();
+	test_graceful_cancel_restores_and_accounts();
 	puts("PASS: scan session joins scheduler, owner recall, DMA visits, feedback and restore");
 	return 0;
 }
