@@ -97,6 +97,10 @@ add_executable(test_spf_visit_capacity test_spf_visit_capacity.c
 	../iiod/spf-visit-queue.c)
 target_include_directories(test_spf_visit_capacity PRIVATE ../iiod)
 list(APPEND IIO_TESTS_TARGETS test_spf_visit_capacity)
+add_executable(test_spf_scan_protocol test_spf_scan_protocol.c
+	../iiod/spf-scan-protocol.c ../iiod/spf-scan-policy.c)
+target_include_directories(test_spf_scan_protocol PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_scan_protocol)
 
 if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	set(SPF_RADIO_FRAME_V3_SOURCE "")
