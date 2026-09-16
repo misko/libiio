@@ -745,6 +745,13 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		return EXIT_FAILURE;
 	}
 	ret = iio_context_add_attr(ctx,
+		"iio,buffer-direct-async-max-frames",
+		STRINGIFY(IIO_BUFFER_METADATA_DIRECT_MAX));
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	ret = iio_context_add_attr(ctx,
 		"iio,buffer-direct-async-exact-kernel-queue", "1");
 	if (ret < 0) {
 		iio_context_destroy(ctx);
