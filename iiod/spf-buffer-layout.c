@@ -50,6 +50,19 @@ int spf_buffer_layout_resolve(size_t samples_count, const uint32_t *mask,
 	return 0;
 }
 
+int spf_buffer_hop_receiver_rate_validate(uint8_t receiver_count,
+	uint64_t sample_rate_hz, bool multirate_host)
+{
+	/* Wide single-RX admission belongs only to the validated host V4 request. */
+	if (receiver_count == 2U ||
+		(receiver_count == 1U && sample_rate_hz == UINT64_C(10000000)) ||
+		(multirate_host && receiver_count == 1U &&
+		 (sample_rate_hz == UINT64_C(15000000) ||
+		  sample_rate_hz == UINT64_C(20000000))))
+		return 0;
+	return -EINVAL;
+}
+
 int spf_buffer_sequence_resolve(const struct spf_buffer_sequence_state *state,
 	uint64_t first_sample_sequence, uint32_t samples_per_channel,
 	struct spf_buffer_sequence_result *result)

@@ -37,6 +37,15 @@ int main(void)
 	expect_layout(UINT32_C(0x03), 1024, 4, 1, 2, 4096, 512);
 	expect_layout(UINT32_C(0x0c), 524288, 4, 1, 2, 2097152, 262144);
 	expect_layout(UINT32_C(0x0f), 1023, 8, 2, 1, 8184, 1023);
+	assert(spf_buffer_hop_receiver_rate_validate(1, UINT64_C(10000000), false) == 0);
+	assert(spf_buffer_hop_receiver_rate_validate(1, UINT64_C(5000000), false) == -EINVAL);
+	assert(spf_buffer_hop_receiver_rate_validate(0, UINT64_C(10000000), false) == -EINVAL);
+	assert(spf_buffer_hop_receiver_rate_validate(2, UINT64_C(2500000), false) == 0);
+	assert(spf_buffer_hop_receiver_rate_validate(2, UINT64_C(5000000), false) == 0);
+	assert(spf_buffer_hop_receiver_rate_validate(1, UINT64_C(15000000), false) == -EINVAL);
+	assert(spf_buffer_hop_receiver_rate_validate(1, UINT64_C(20000000), false) == -EINVAL);
+	assert(spf_buffer_hop_receiver_rate_validate(1, UINT64_C(15000000), true) == 0);
+	assert(spf_buffer_hop_receiver_rate_validate(1, UINT64_C(20000000), true) == 0);
 
 	mask = UINT32_C(0x03);
 	assert(spf_buffer_layout_resolve(1023, &mask, 1, 4, &layout) == -EINVAL);

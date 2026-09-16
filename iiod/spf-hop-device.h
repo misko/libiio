@@ -1,0 +1,34 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+#ifndef __SPF_HOP_DEVICE_H__
+#define __SPF_HOP_DEVICE_H__
+
+#include "spf-hop-session.h"
+
+#include <pthread.h>
+#include <stdbool.h>
+
+struct iio_device;
+struct spf_tandem_session;
+
+/* Platform code provides this narrow port only when it can atomically submit
+ * the complete plan and return genuine device-counter/tuning evidence.  A
+ * failing open owns and cleans up any partially constructed device context. */
+int spf_hop_device_v1_open(const struct iio_device *rx,
+	const struct iio_device *phy, struct spf_tandem_session *tandem,
+	pthread_mutex_t *tandem_lock,
+	const struct spf_hop_request_v1 *request,
+	void **device_context, const struct spf_hop_device_ops_v1 **ops);
+void spf_hop_device_v1_destroy(void *device_context);
+bool spf_hop_device_v1_capable(void);
+
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+struct spf_hop_scheduler_policy_v2;
+/* Userspace provider only. No kernel/FW implementation advertises V2. */
+int spf_hop_device_userspace_v2_open(const struct iio_device *, const struct iio_device *,
+	struct spf_tandem_session *, pthread_mutex_t *, const struct spf_hop_request_v2 *,
+	const struct spf_hop_scheduler_policy_v2 *, void *, void **,
+	const struct spf_hop_device_ops_v2 **);
+void spf_hop_device_userspace_v2_destroy(void *);
+#endif
+
+#endif

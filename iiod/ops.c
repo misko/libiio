@@ -14,6 +14,7 @@
 #include "ddr-ring-core.h"
 #include "spf-ddr-ring-request.h"
 #include "spf-ddr-ring-status.h"
+#include "spf-hop-protocol.h"
 #include "../debug.h"
 
 #include <errno.h>
@@ -3780,7 +3781,7 @@ ssize_t rw_dev_with_metadata_async(struct parser_pdata *pdata,
 ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t status_capacity)
 {
-	uint8_t wire_status[SPF_DDR_RING_STATUS_BYTES];
+	uint8_t wire_status[SPF_HOP_STATUS_BYTES];
 	struct spf_ddr_ring_status status = {0};
 	struct ThdEntry *thd;
 	struct DevEntry *entry;
@@ -3788,51 +3789,69 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 
 	if (!dev)
 		ret = -ENODEV;
-	else if (status_capacity < sizeof(wire_status))
-		ret = -ENOSPC;
 	else if (!(thd = parser_lookup_thd_entry(pdata, dev)))
 		ret = -EBADF;
 	else {
 		entry = thd->entry;
-		pthread_mutex_lock(&entry->ring_lock);
-		if (!entry->ring.producer_started && !entry->ring.direct_extension) {
-			ret = -ENODATA;
-		} else {
-			status.state = entry->ring.core.state;
-			status.terminal_reason = entry->ring.core.terminal_reason;
-			status.error_code = entry->ring.core.error_code;
-			status.requested_capacity_iq_bytes =
-				entry->ring.requested_iq_bytes;
-			status.admitted_capacity_iq_bytes =
-				entry->ring.admitted_iq_bytes;
-			status.target_frames = entry->ring.core.target_frames;
-			status.produced_frames = entry->ring.core.produced_frames;
-			status.consumed_frames = entry->ring.core.consumed_frames;
-			status.high_water_frames = entry->ring.core.high_water_frames;
-			status.wrap_count = entry->ring.core.wrap_count;
-			status.producer_position = entry->ring.core.producer_position;
-			status.consumer_position = entry->ring.core.consumer_position;
-			if (entry->ring.core.last_contiguous_valid) {
-				status.valid_fields |=
-					SPF_DDR_RING_STATUS_VALID_LAST_CONTIGUOUS;
-				status.last_contiguous_sample_sequence =
-					entry->ring.core.last_contiguous_sample_sequence;
+		ret = iiod_buffer_metadata_status(entry->metadata_provider_context,
+			wire_status, status_capacity < sizeof(wire_status) ?
+				status_capacity : sizeof(wire_status));
+		if (ret == -ENODATA) {
+			if (status_capacity < SPF_DDR_RING_STATUS_BYTES) {
+				ret = -ENOSPC;
+			} else {
+				pthread_mutex_lock(&entry->ring_lock);
+				if (!entry->ring.producer_started &&
+						!entry->ring.direct_extension) {
+					ret = -ENODATA;
+				} else {
+					status.state = entry->ring.core.state;
+					status.terminal_reason =
+						entry->ring.core.terminal_reason;
+					status.error_code = entry->ring.core.error_code;
+					status.requested_capacity_iq_bytes =
+						entry->ring.requested_iq_bytes;
+					status.admitted_capacity_iq_bytes =
+						entry->ring.admitted_iq_bytes;
+					status.target_frames = entry->ring.core.target_frames;
+					status.produced_frames =
+						entry->ring.core.produced_frames;
+					status.consumed_frames =
+						entry->ring.core.consumed_frames;
+					status.high_water_frames =
+						entry->ring.core.high_water_frames;
+					status.wrap_count = entry->ring.core.wrap_count;
+					status.producer_position =
+						entry->ring.core.producer_position;
+					status.consumer_position =
+						entry->ring.core.consumer_position;
+					if (entry->ring.core.last_contiguous_valid) {
+						status.valid_fields |=
+							SPF_DDR_RING_STATUS_VALID_LAST_CONTIGUOUS;
+						status.last_contiguous_sample_sequence =
+							entry->ring.core.last_contiguous_sample_sequence;
+					}
+					if (entry->ring.core.first_unavailable_valid) {
+						status.valid_fields |=
+							SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE;
+						status.first_unavailable_sample_sequence =
+							entry->ring.core.first_unavailable_sample_sequence;
+					}
+					ret = spf_ddr_ring_status_encode(wire_status,
+						SPF_DDR_RING_STATUS_BYTES, &status);
+					if (!ret)
+						ret = SPF_DDR_RING_STATUS_BYTES;
+				}
+				pthread_mutex_unlock(&entry->ring_lock);
 			}
-			if (entry->ring.core.first_unavailable_valid) {
-				status.valid_fields |=
-					SPF_DDR_RING_STATUS_VALID_FIRST_UNAVAILABLE;
-				status.first_unavailable_sample_sequence =
-					entry->ring.core.first_unavailable_sample_sequence;
-			}
-			ret = spf_ddr_ring_status_encode(wire_status,
-				sizeof(wire_status), &status);
 		}
-		pthread_mutex_unlock(&entry->ring_lock);
-		if (!ret) {
-			print_value(pdata, sizeof(wire_status));
-			ret = write_all(pdata, wire_status, sizeof(wire_status));
+		if (ret > 0) {
+			ssize_t status_bytes = ret;
+
+			print_value(pdata, status_bytes);
+			ret = write_all(pdata, wire_status, (size_t)status_bytes);
 			if (ret > 0)
-				ret = sizeof(wire_status);
+				ret = status_bytes;
 		}
 	}
 	if (ret < 0)
@@ -3912,6 +3931,76 @@ ssize_t submit_adaptive_scan_feedback(struct parser_pdata *pdata,
 	return ret;
 }
 
+ssize_t drain_buffer_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t metadata_capacity)
+{
+	struct ThdEntry *thd;
+	struct DevEntry *entry;
+	uint8_t *metadata = NULL;
+	ssize_t ret;
+
+	if (!metadata_capacity || metadata_capacity > 65536U) {
+		ret = -EINVAL;
+	} else if (!dev) {
+		ret = -ENODEV;
+	} else if (!(thd = parser_lookup_thd_entry(pdata, dev))) {
+		ret = -EBADF;
+	} else if (!(metadata = malloc(metadata_capacity))) {
+		ret = -ENOMEM;
+	} else {
+		entry = thd->entry;
+		/* Pin the same-session provider against producer-owned teardown. The
+		 * provider serializes its result consumer and enforces capture EOF. */
+		pthread_mutex_lock(&entry->thdlist_lock);
+		if (!entry->metadata_enabled || !entry->metadata_provider_context ||
+			!entry->burst_plan.drain_metadata)
+			ret = -ENODATA;
+		else
+			ret = entry->burst_plan.drain_metadata(
+				entry->metadata_provider_context, metadata, metadata_capacity);
+		pthread_mutex_unlock(&entry->thdlist_lock);
+		if (!ret || ret > (ssize_t)metadata_capacity)
+			ret = -EOVERFLOW;
+	}
+	print_value(pdata, ret);
+	if (ret > 0) {
+		ssize_t written = write_all(pdata, metadata, (size_t)ret);
+
+		/* A partial response is terminal, never followed by another errno. */
+		if (written < 0)
+			ret = written;
+	}
+	free(metadata);
+	return ret;
+}
+
+int cancel_buffer_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev)
+{
+	struct ThdEntry *thd;
+	struct DevEntry *entry;
+	int ret;
+
+	if (!dev) {
+		ret = -ENODEV;
+	} else if (!(thd = parser_lookup_thd_entry(pdata, dev))) {
+		ret = -EBADF;
+	} else {
+		entry = thd->entry;
+		/* A producer that owns teardown also takes thdlist_lock before removing
+		 * the provider context. Keep it pinned through the synchronous restore. */
+		pthread_mutex_lock(&entry->thdlist_lock);
+		if (!entry->metadata_enabled || !entry->metadata_provider_context)
+			ret = -ENODATA;
+		else
+			ret = iiod_buffer_metadata_cancel(
+				entry->metadata_provider_context);
+		pthread_mutex_unlock(&entry->thdlist_lock);
+	}
+	print_value(pdata, ret);
+	return ret;
+}
+
 ssize_t read_adaptive_scan_ack(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t capacity)
 {
@@ -3938,6 +4027,36 @@ ssize_t read_adaptive_scan_ack(struct parser_pdata *pdata,
 	print_value(pdata, sizeof(wire));
 	ret = write_all(pdata, wire, sizeof(wire));
 	return ret < 0 ? ret : (ssize_t)sizeof(wire);
+}
+
+int submit_metadata_feedback(struct parser_pdata *pdata, struct iio_device *dev,
+	const char *hex)
+{
+	uint8_t bytes[IIO_BUFFER_METADATA_FEEDBACK_MAX];
+	struct ThdEntry *thd;
+	int ret=-EINVAL;
+	size_t n=hex ? strlen(hex) : 0;
+	if (!n || n>2*sizeof(bytes) || n%2) goto done;
+	for (size_t i=0;i<n;++i) {
+		unsigned char c=hex[i];
+		int digit=c>='0' && c<='9' ? c-'0' : c>='a' && c<='f' ? c-'a'+10 : -1;
+		if (digit<0) goto done;
+		if (!(i%2)) bytes[i/2]=(uint8_t)(digit<<4);
+		else bytes[i/2]|=(uint8_t)digit;
+	}
+	if (!dev) ret=-ENODEV;
+	else if (!(thd=parser_lookup_thd_entry(pdata,dev))) ret=-EBADF;
+	else {
+		struct DevEntry *entry=thd->entry;
+		pthread_mutex_lock(&entry->thdlist_lock);
+		if (!entry->metadata_enabled || !entry->metadata_provider_context ||
+			!entry->burst_plan.submit_feedback) ret=-ENODATA;
+		else ret=entry->burst_plan.submit_feedback(entry->metadata_provider_context,bytes,n/2);
+		pthread_mutex_unlock(&entry->thdlist_lock);
+	}
+done:
+	print_value(pdata,ret);
+	return ret;
 }
 
 ssize_t read_dev_attr(struct parser_pdata *pdata, struct iio_device *dev,

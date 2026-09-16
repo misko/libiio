@@ -77,6 +77,9 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token SCANCAPS
 %token SCANFEEDBACK
 %token SCANACK
+%token CANCELBUFM
+%token DRAINBUFM
+%token FEEDBACKBUFM
 %token WRITEBUF
 %token WRITE
 %token SETTRIG
@@ -146,6 +149,8 @@ Line:
 		"\t\tRead raw data and its capture-associated metadata\n"
 		"\tREADBUFMSTAT <device> <status_capacity>\n"
 		"\t\tRead the open metadata buffer's provider status\n"
+		"\tCANCELBUFM <device>\n"
+		"\t\tCancel and restore the provider session without closing its buffer\n"
 		"\tWRITEBUF <device> <bytes_count>\n"
 		"\t\tWrite raw data to the specified device\n"
 		"\tGETTRIG <device>\n"
@@ -402,6 +407,14 @@ Line:
 		else
 			YYACCEPT;
 	}
+	| CANCELBUFM SPACE DEVICE END {
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		int ret = cancel_buffer_metadata(pdata, $3);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
 	| SCANCAPS SPACE WORD END {
 		char *capacity = $3;
 		size_t cap = strtoul(capacity, NULL, 10);
@@ -434,6 +447,32 @@ Line:
 			YYABORT;
 		else
 			YYACCEPT;
+	}
+	| DRAINBUFM SPACE DEVICE SPACE WORD END {
+		char *capacity = $5;
+		const char *digit = capacity;
+		size_t cap = 0;
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret;
+		/* Bound during parsing, including on 32-bit ARM. Reject signs,
+		 * suffixes and overflow without narrowing an unchecked strtoul. */
+		while (digit && *digit >= '0' && *digit <= '9' && cap <= 65536U)
+			cap = cap * 10U + (unsigned int)(*digit++ - '0');
+		if (!digit || *digit || !cap || cap > 65536U)
+			cap = 0;
+		ret = drain_buffer_metadata(pdata, $3, cap);
+		free(capacity);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| FEEDBACKBUFM SPACE DEVICE SPACE WORD END {
+		struct parser_pdata *pdata=yyget_extra(scanner);
+		int ret=submit_metadata_feedback(pdata,$3,$5);
+		free($5);
+		if (ret<0) YYABORT;
+		else YYACCEPT;
 	}
 	| WRITEBUF SPACE DEVICE SPACE WORD END {
 		char *len = $5;

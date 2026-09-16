@@ -129,6 +129,12 @@ ssize_t submit_adaptive_scan_feedback(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t bytes);
 ssize_t read_adaptive_scan_ack(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t capacity);
+ssize_t drain_buffer_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t metadata_capacity);
+int submit_metadata_feedback(struct parser_pdata *pdata, struct iio_device *dev,
+	const char *hex);
+int cancel_buffer_metadata(struct parser_pdata *pdata,
+		struct iio_device *dev);
 
 ssize_t read_dev_attr(struct parser_pdata *pdata, struct iio_device *dev,
 		const char *attr, enum iio_attr_type type);

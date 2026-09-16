@@ -1494,6 +1494,13 @@ __api __check_ret struct iio_buffer * iio_device_create_buffer(const struct iio_
 
 /** Maximum opaque metadata-session request accepted by libiio and iiOD. */
 #define IIO_BUFFER_METADATA_REQUEST_MAX 4096U
+#define IIO_BUFFER_METADATA_FEEDBACK_MAX 256U
+
+/** Submit bounded provider feedback between completed metadata refills.
+ * Requires explicit provider capability/admission. No new connection or capture
+ * is opened. Returns zero on acceptance, negative errno on rejection. */
+__api __check_ret int iio_buffer_submit_metadata_feedback(struct iio_buffer *buffer,
+	const void *feedback, size_t bytes);
 
 /** Maximum number of ordinary metadata reads that may be prequeued. */
 #define IIO_BUFFER_METADATA_BATCH_MAX 64U
@@ -1599,6 +1606,40 @@ __api __check_ret int iio_buffer_set_metadata_read_prequeue_async_policy(
  * without status support return -ENOSYS. */
 __api __check_ret ssize_t iio_buffer_get_metadata_status(
 		struct iio_buffer *buf, void *status, size_t status_capacity);
+
+/** @brief Cancel and restore a provider-owned metadata session in band.
+ * @param buf A metadata-enabled input buffer
+ * @return 0 on successful cancellation/restoration, a negative errno otherwise
+ *
+ * This operation preserves the buffer transport so callers can retrieve the
+ * terminal provider receipt with iio_buffer_get_metadata_status() before
+ * destroying the buffer. It is invalid while direct-async frame responses are
+ * still pending. Backends or servers without in-band cancellation return
+ * -ENOSYS. */
+__api __check_ret int iio_buffer_cancel_metadata_session(
+		struct iio_buffer *buf);
+
+/** @brief Retrieve one negotiated metadata-only result without requesting IQ.
+ * @param buf An open metadata-enabled input buffer
+ * @param metadata Destination for opaque provider-versioned result bytes
+ * @param metadata_capacity Destination size, between 1 and 65536 bytes
+ * @return Positive byte count, or a negative errno code
+ *
+ * Requires server capability iio,buffer-metadata-drain=1 and an opted-in
+ * provider request. -ENOSYS means unsupported transport; -ENODATA means the
+ * session does not support draining or has no remaining results. -EAGAIN means
+ * results are not ready; -EBUSY means queued IQ must be consumed first or the
+ * provider has not finished capture. The operation never waits for detector
+ * computation, but normal transport timeouts still apply.
+ *
+ * The caller must finish acquisition and consume all queued IQ before draining.
+ * This does not stop acquisition, create a buffer, refill, or change the last
+ * IQ/metadata refill result. Completion markers belong to the provider schema.
+ * Drain before destroying/cancelling the transport. Calls on one buffer must
+ * be serialized with its other operations. Malformed network replies invalidate
+ * that transport; provider error replies do not. */
+__api __check_ret ssize_t iio_buffer_drain_metadata(struct iio_buffer *buf,
+		void *metadata, size_t metadata_capacity);
 
 
 /** @brief Destroy the given buffer

@@ -13,6 +13,9 @@
 #include "buffer-metadata.h"
 #include "ops.h"
 #include "thread-pool.h"
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+#include "spf-hop-device.h"
+#endif
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -688,6 +691,11 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 			}
 		}
 	}
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-legacy-agc", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
 	ret = iio_context_add_attr(ctx, "iio,buffer-metadata", "3");
 	if (ret < 0) {
 		iio_context_destroy(ctx);
@@ -739,6 +747,12 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		return EXIT_FAILURE;
 	}
 	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-timing-log", "1");
+	if (ret < 0) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
+	/* Transport support only: the opaque OPENM request must also opt in. */
+	ret = iio_context_add_attr(ctx, "iio,buffer-metadata-drain", "1");
 	if (ret < 0) {
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
@@ -801,6 +815,74 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 			return EXIT_FAILURE;
 		}
 	}
+
+#ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
+	if (spf_hop_device_v1_capable()) {
+#ifdef IIOD_HAS_SCANNER_GLRT
+		static const char *const glrt_attrs[][2] = {
+			{"iio,buffer-scanner-glrt", "1"},
+			{"iio,buffer-scanner-glrt-mode", IIOD_SCANNER_GLRT_MODE},
+			{"iio,buffer-scanner-glrt-algorithm-sha256", IIOD_SCANNER_GLRT_ALGORITHM_SHA256},
+			{"iio,buffer-scanner-glrt-configuration-sha256", IIOD_SCANNER_GLRT_CONFIGURATION_SHA256},
+#ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+			{"iio,buffer-adaptive-hop-request", "2"},
+			{"iio,buffer-host-adaptive-hop-request", "3,4"},
+			{"iio,buffer-host-adaptive-hop-event", "3"},
+			{"iio,buffer-host-adaptive-hop-status", "3"},
+			{"iio,buffer-host-adaptive-hop-feedback", "1,2"},
+			{"iio,buffer-metadata-feedback", "1"},
+			{"iio,buffer-adaptive-hop-event", "2"},
+			{"iio,buffer-adaptive-hop-status", "2"},
+			{"iio,buffer-adaptive-hop-modes", "shadow,adaptive"},
+			{"iio,buffer-adaptive-hop-policy", "three-miss-two-second-v1"},
+#endif
+		};
+		unsigned int glrt_attr;
+		for (glrt_attr = 0; glrt_attr < sizeof(glrt_attrs) / sizeof(glrt_attrs[0]); glrt_attr++) {
+			ret = iio_context_add_attr(ctx, glrt_attrs[glrt_attr][0], glrt_attrs[glrt_attr][1]);
+			if (ret < 0) {
+				iio_context_destroy(ctx);
+				return EXIT_FAILURE;
+			}
+		}
+#endif
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-single-rx-10m", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx, "iio,buffer-persistent-hop", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-request", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-event", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-status", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+		ret = iio_context_add_attr(ctx,
+			"iio,buffer-persistent-hop-cancel", "1");
+		if (ret < 0) {
+			iio_context_destroy(ctx);
+			return EXIT_FAILURE;
+		}
+	}
+#endif
 #endif
 
 	xml_zstd = get_xml_zstd_data(ctx, &xml_zstd_len);

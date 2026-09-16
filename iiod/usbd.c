@@ -94,10 +94,9 @@ static int usb_open_pipe(struct usbd_pdata *pdata, unsigned int pipe_id)
 		return -ENOMEM;
 
 	/* Either we open this pipe for the first time, or it was closed before.
-	 * In that case we called thread_pool_stop() without waiting for all the
-	 * threads to finish. We do that here. Since the running thread might still
-	 * have a open handle to the endpoints make sure that they have exited
-	 * before opening the endpoints again. */
+	 * The close path already waits for the old worker to finish, but stopping
+	 * an unused pool here also resets its eventfd before the next worker starts.
+	 */
 	thread_pool_stop_and_wait(pdata->pool[pipe_id]);
 
 	snprintf(buf, sizeof(buf), "%s/ep%u", pdata->ffs, pipe_id * 2 + 1);
@@ -134,7 +133,11 @@ static int usb_close_pipe(struct usbd_pdata *pdata, unsigned int pipe_id)
 	if (pipe_id >= pdata->nb_pipes)
 		return -EINVAL;
 
-	thread_pool_stop(pdata->pool[pipe_id]);
+	/* A successful CLOSE_PIPE is the USB client's teardown barrier.  Do not
+	 * acknowledge it while the worker can still own an enabled IIO buffer: the
+	 * caller may immediately reconfigure or reopen the device after the control
+	 * transfer returns. */
+	thread_pool_stop_and_wait(pdata->pool[pipe_id]);
 	return 0;
 }
 

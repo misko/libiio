@@ -19,6 +19,15 @@ struct iiod_buffer_burst_plan {
 	uint64_t ring_capture_frames;
 	uint32_t ring_flags;
 	size_t metadata_capacity;
+	/* Optional, session-opted-in, nonblocking metadata-only drain. The provider
+	 * must reject active capture with -EBUSY, return -EAGAIN for pending work,
+	 * and -ENODATA after its final record. No IQ acquisition or buffer ownership
+	 * passes through this hook. Check capacity before consuming a result.
+	 * Zero-initialized by iiOD; existing providers need not implement a hook. */
+	ssize_t (*drain_metadata)(void *provider_context,
+			void *metadata, size_t metadata_capacity);
+	/* Explicit opt-in. Called only on the owning buffer connection. */
+	int (*submit_feedback)(void *provider_context, const void *feedback, size_t bytes);
 };
 
 struct iiod_buffer_metadata_frame_info {
@@ -56,6 +65,15 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 		const struct iio_device *dev, const struct iio_buffer *buffer,
 		size_t raw_bytes, void *metadata, size_t metadata_capacity,
 		size_t *iq_offset, size_t *iq_bytes);
+/* Provider-specific session status. Return -ENODATA when the active metadata
+ * request has no provider status, preserving the existing DDR status path. */
+ssize_t iiod_buffer_metadata_status(void *provider_context,
+		void *status, size_t status_capacity);
+/* Cancel only the provider-owned finite session while retaining the open iiOD
+ * buffer.  This lets the client read a terminal provider receipt before CLOSE.
+ * Providers without an independently cancellable session return -ENODATA. */
+int iiod_buffer_metadata_cancel(void *provider_context);
+int iiod_buffer_metadata_feedback(void *provider_context, const void *feedback, size_t bytes);
 /* A provider returns -ESTALE when a valid IQ block has fallen outside its
  * retained observation window.  Preserve-backlog treats that as terminal;
  * drop-backlog may retire the uncovered block and continue with fresh data.
