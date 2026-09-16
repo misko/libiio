@@ -654,6 +654,8 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 	}
 
 #ifdef IIOD_HAS_BUFFER_METADATA
+	char direct_max_frames[16];
+
 	{
 		struct iio_device *counter_controller = iio_context_find_device(ctx, "tandem-agc");
 		long long counter_version = 0, counter_topology = 0;
@@ -744,9 +746,15 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
 	}
+	ret = snprintf(direct_max_frames, sizeof(direct_max_frames), "%u",
+		(unsigned int)IIO_BUFFER_METADATA_DIRECT_MAX);
+	if (ret <= 0 || (size_t)ret >= sizeof(direct_max_frames)) {
+		iio_context_destroy(ctx);
+		return EXIT_FAILURE;
+	}
 	ret = iio_context_add_attr(ctx,
 		"iio,buffer-direct-async-max-frames",
-		STRINGIFY(IIO_BUFFER_METADATA_DIRECT_MAX));
+		direct_max_frames);
 	if (ret < 0) {
 		iio_context_destroy(ctx);
 		return EXIT_FAILURE;
