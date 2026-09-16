@@ -144,7 +144,8 @@ int spf_hop_adaptive_policy_offer_host(struct spf_hop_adaptive_policy *p,
 {
 	uint8_t wire[SPF_HOP_HOST_FEEDBACK_BYTES];
 	const struct committed_visit *v;
-	uint64_t offset;
+	uint64_t offset, skipped;
+	unsigned w, r;
 	int ret;
 	if (!p || !p->request.host.enabled) return -ENOTSUP;
 	if (!f || spf_hop_host_feedback_encode(wire,sizeof(wire),f)) return -EINVAL;
@@ -152,13 +153,33 @@ int spf_hop_adaptive_policy_offer_host(struct spf_hop_adaptive_policy *p,
 		f->stream_id!=stream_id || f->rx!=p->request.host.rx ||
 		memcmp(f->configuration_sha256,p->request.host.configuration_sha256,32)) return -ESTALE;
 	if (f->visit<p->next_host_visit) return -EALREADY;
-	if (f->visit!=p->next_host_visit ||
-		f->visit>=atomic_load_explicit(&p->visible_committed,memory_order_acquire)) return -ERANGE;
+	if (f->visit>=atomic_load_explicit(&p->visible_committed,memory_order_acquire)) return -ERANGE;
 	v=&p->visits[f->visit];
 	if (f->target!=v->target || f->valid_start<v->start || f->valid_end<v->end) return -EINVAL;
 	offset=f->valid_start-v->start;
 	if ((offset & UINT64_C(0xffffffff)) || f->valid_end-v->end!=offset) return -EINVAL;
 	if (now<f->valid_end || now-f->valid_end>p->request.geometry.sample_rate_hz) return -ESTALE;
+	/* A transport-accounted IQ gap can cover a complete visit, so the host has
+	 * no samples from which to produce that visit's feedback. Advance every
+	 * omitted, already-committed visit as an explicitly unhealthy/unknown
+	 * observation before accepting the next source-bound result. This preserves
+	 * feedback order without inventing a detection or permanently faulting the
+	 * adaptive policy. Bound the whole batch before enqueueing so failure cannot
+	 * leave a partially advanced host sequence. */
+	skipped=f->visit-p->next_host_visit;
+	w=atomic_load_explicit(&p->write,memory_order_relaxed);
+	r=atomic_load_explicit(&p->read,memory_order_acquire);
+	if (skipped+1 > FEEDBACK_CAPACITY-(w-r)) return -ERANGE;
+	while (p->next_host_visit<f->visit) {
+		const struct committed_visit *missing=&p->visits[p->next_host_visit];
+		leo_adaptive_observation_v1 unavailable={
+			f->session,f->generation,p->next_host_visit,
+			missing->start+offset,missing->end+offset,
+			f->source_rate_hz,f->rx,missing->target,LEO_ADAPTIVE_UNKNOWN,0};
+		ret=spf_hop_adaptive_policy_offer(p,&unavailable);
+		if (ret) return ret;
+		++p->next_host_visit;
+	}
 	leo_adaptive_observation_v1 o={f->session,f->generation,f->visit,f->valid_start,f->valid_end,
 		f->source_rate_hz,f->rx,f->target,f->outcome,f->healthy};
 	ret=spf_hop_adaptive_policy_offer(p,&o);

@@ -252,6 +252,36 @@ static void wide_host_policy_creation(void)
 	}
 }
 
+static void host_feedback_can_advance_one_unavailable_visit(void)
+{
+	struct spf_hop_request_v2 r=request(15000000,SPF_HOP_ADAPTIVE);
+	struct spf_hop_adaptive_policy *p;
+	struct spf_hop_choice_v2 c;
+	leo_adaptive_observation_v1 observations[3];
+	uint64_t now=UINT64_C(0xfffffff0);
+	struct spf_hop_host_feedback_v1 f={0};
+	r.host.enabled=1; r.host.rx=0; r.host.decision_rate_hz=2500000;
+	r.host.factor=6; r.host.delay=100; r.host.supported_start=34; r.host.supported_end=300000;
+	memset(r.host.configuration_sha256,0x17,32);
+	assert(!spf_hop_adaptive_policy_create(&p,&r));
+	for (unsigned index=0;index<3;++index)
+		observations[index]=visit(p,&r,index,&now,&c);
+	f=(struct spf_hop_host_feedback_v1){.session=71,.generation=9,.stream_id=94,
+		.visit=0,.event_sequence=0,.valid_start=observations[0].valid_start,
+		.valid_end=observations[0].valid_end,.source_rate_hz=15000000,
+		.decision_rate_hz=2500000,.rx=0,.target=observations[0].target,
+		.outcome=LEO_ADAPTIVE_NOT_DETECTED,.healthy=1,.screen_mask=63,
+		.supported_start=34,.supported_end=300000,.factor=6,.delay=100};
+	memcpy(f.configuration_sha256,r.host.configuration_sha256,32);
+	assert(!spf_hop_adaptive_policy_offer_host(p,&f,94,observations[0].valid_end));
+	/* Visit 1 has no retained IQ. Visit 2 must advance it as unavailable. */
+	f.visit=f.event_sequence=2; f.valid_start=observations[2].valid_start;
+	f.valid_end=observations[2].valid_end; f.target=observations[2].target;
+	assert(!spf_hop_adaptive_policy_offer_host(p,&f,94,observations[2].valid_end));
+	assert(spf_hop_adaptive_policy_offer_host(p,&f,94,observations[2].valid_end)==-EALREADY);
+	spf_hop_adaptive_policy_destroy(p);
+}
+
 int main(void)
 {
 	all_masks(2500000, SPF_HOP_ADAPTIVE);
@@ -262,6 +292,7 @@ int main(void)
 	threaded_feedback(2500000);
 	threaded_feedback(5000000);
 	host_feedback();
+	host_feedback_can_advance_one_unavailable_visit();
 	wide_host_policy_creation();
 	puts("native feedback/policy: 458752 mask decisions + 4000 threaded decisions + fault cases PASS; synthetic, no RF");
 	return 0;
