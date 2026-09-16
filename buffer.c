@@ -8,8 +8,10 @@
 
 #include "iio-config.h"
 #include "iio-private.h"
+#include "debug.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
 
 #define IIO_BUFFER_METADATA_STATUS_CACHE_MAX 4096U
@@ -291,6 +293,39 @@ int iio_buffer_set_metadata_batch_size(struct iio_buffer *buffer,
 	return 0;
 }
 
+/* ABI 3 predates the larger finite target. Missing advertisement must not
+ * imply that a peer implements this client's compile-time maximum. */
+static int validate_direct_peer_limit(const struct iio_buffer *buffer,
+		unsigned int frames)
+{
+	const char *value = iio_context_get_attr_value(buffer->dev->ctx,
+		"iio,buffer-direct-async-max-frames");
+	unsigned int limit = 4096U;
+	const char *p;
+
+	if (value) {
+		limit = 0;
+		for (p = value; *p; p++) {
+			if (*p < '0' || *p > '9' ||
+					limit > (UINT_MAX - (unsigned int)(*p - '0')) / 10U)
+				break;
+			limit = limit * 10U + (unsigned int)(*p - '0');
+		}
+		if (*p || !limit) {
+			IIO_ERROR("Invalid peer iio,buffer-direct-async-max-frames; "
+				"expected a positive unsigned decimal frame count\n");
+			return -EINVAL;
+		}
+	}
+	if (frames > limit) {
+		IIO_ERROR("Direct-async request of %u frames exceeds peer limit "
+			"of %u frames%s; use a smaller target or update peer iiOD\n",
+			frames, limit, value ? "" : " (legacy fallback)");
+		return -E2BIG;
+	}
+	return 0;
+}
+
 int iio_buffer_set_metadata_read_prequeue_async(struct iio_buffer *buffer,
 		unsigned int frames, size_t metadata_capacity)
 {
@@ -310,6 +345,9 @@ int iio_buffer_set_metadata_read_prequeue_async(struct iio_buffer *buffer,
 		buffer->metadata_batch_cached_frames !=
 			buffer->metadata_batch_next_frame)
 		return -EBUSY;
+	ret = validate_direct_peer_limit(buffer, frames);
+	if (ret < 0)
+		return ret;
 	/* An exhausted direct segment has no queued wire replies.  Permit the
 	 * owner to enqueue the next bounded segment after any in-band control
 	 * command, while retaining -ENODATA until it explicitly does so. */
@@ -376,6 +414,9 @@ int iio_buffer_set_metadata_read_prequeue_async_policy(
 		buffer->metadata_batch_cached_frames !=
 			buffer->metadata_batch_next_frame)
 		return -EBUSY;
+	ret = validate_direct_peer_limit(buffer, frames);
+	if (ret < 0)
+		return ret;
 	/* An exhausted direct segment has no queued wire replies.  Permit the
 	 * owner to enqueue the next bounded segment after any in-band control
 	 * command, while retaining -ENODATA until it explicitly does so. */
