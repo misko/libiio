@@ -183,6 +183,51 @@ restore:
 	return ret;
 }
 
+int spf_scan_session_rebase(struct spf_scan_session *session,
+	uint64_t full_counter_anchor)
+{
+	struct spf_scan_policy_config policy_config;
+	struct spf_scan_policy *policy;
+	uint64_t actual;
+	int ret;
+
+	if (!session || session->stopping || session->released ||
+	    session->ledger_count || session->active != NO_ACTIVE ||
+	    session->output_index || session->output_inflight)
+		return -EBUSY;
+	ret = spf_scan_radio_snapshot(session->radio, full_counter_anchor, &actual);
+	if (ret)
+		return fail_session(session, ret, full_counter_anchor);
+	spf_scan_setup_policy(&session->setup, &policy_config);
+	ret = spf_scan_policy_create(&policy, &policy_config, actual);
+	if (ret)
+		return fail_session(session, ret, actual);
+	spf_scan_policy_destroy(session->policy);
+	session->policy = policy;
+	session->latest_counter = actual;
+	return 0;
+}
+
+static void make_failed_entry_coherent(struct spf_scan_session *session,
+	struct ledger_entry *entry, uint64_t counter, bool queued)
+{
+	const struct spf_scan_target *target =
+		&session->setup.targets[entry->choice.target];
+
+	if (!queued)
+		entry->admission = SPF_VISIT_CANCELLED;
+	entry->queued = queued;
+	entry->recall = (struct spf_scan_radio_receipt) {
+		.profile = target->profile,
+		.frequency_hz = target->frequency_hz,
+		.profile_crc32 = target->profile_crc32,
+		.counter_before = counter,
+		.counter_after = counter,
+	};
+	entry->valid_start = counter;
+	entry->valid_end = counter;
+}
+
 int spf_scan_session_schedule(struct spf_scan_session *session,
 	uint64_t now, uint64_t counter_anchor, struct spf_scan_choice *choice)
 {
@@ -211,36 +256,50 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 	samples = (uint32_t)ticks(session, session->setup.dwell_ms);
 	ret = spf_visit_queue_reserve(session->queue, selected.visit, samples,
 				      now, &admission);
-	if (ret)
+	if (ret) {
+		make_failed_entry_coherent(session, entry, now, false);
 		return fail_session(session, ret, now);
+	}
 	entry->admission = admission;
 	entry->queued = admission == SPF_VISIT_ADMITTED;
 	ret = spf_scan_radio_recall(session->radio,
 			session->setup.targets[selected.target].profile,
 			counter_anchor, &recall);
-	if (ret)
+	if (ret) {
+		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session(session, ret, now);
+	}
 	entry->recall = recall;
 	transition = ticks(session, session->setup.transition_budget_ms);
-	if (selected.selection_counter > UINT64_MAX - transition)
+	if (selected.selection_counter > UINT64_MAX - transition) {
+		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session(session, -EOVERFLOW, recall.counter_after);
+	}
 	valid_start = selected.selection_counter + transition;
 	if (recall.counter_before < selected.selection_counter ||
 	    recall.counter_before > recall.counter_after ||
-	    recall.counter_after > valid_start)
+	    recall.counter_after > valid_start) {
+		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session(session, -ETIME, recall.counter_after);
+	}
 	ret = spf_scan_policy_commit(session->policy, valid_start);
-	if (ret)
+	if (ret) {
+		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session(session, ret, recall.counter_after);
-	if (valid_start > UINT64_MAX - samples)
+	}
+	if (valid_start > UINT64_MAX - samples) {
+		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session(session, -EOVERFLOW, recall.counter_after);
+	}
 	entry->valid_start = valid_start;
 	entry->valid_end = valid_start + samples;
 	if (entry->queued) {
 		ret = spf_visit_queue_bind(session->queue, selected.visit,
 						 valid_start);
-		if (ret)
+		if (ret) {
+			make_failed_entry_coherent(session, entry, now, true);
 			return fail_session(session, ret, recall.counter_after);
+		}
 	}
 	session->active = selected.visit;
 	if (recall.counter_after > session->latest_counter)

@@ -28,6 +28,11 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	const struct spf_scan_setup *setup,
 	const struct spf_scan_session_runtime *runtime,
 	struct spf_scan_radio *radio, uint64_t start_counter);
+/* Before the first visit, align the owner's low-word counter with a full-width
+ * timestamp observed in DMA.  No scan decision is exposed until both clocks
+ * share one epoch. */
+int spf_scan_session_rebase(struct spf_scan_session *session,
+	uint64_t full_counter_anchor);
 int spf_scan_session_schedule(struct spf_scan_session *session,
 	uint64_t now, uint64_t counter_anchor, struct spf_scan_choice *choice);
 int spf_scan_session_next_boundary(const struct spf_scan_session *session,

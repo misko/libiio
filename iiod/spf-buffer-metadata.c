@@ -552,6 +552,18 @@ static void *scan_scheduler(void *opaque)
 	struct timespec pause = { .tv_sec = 0, .tv_nsec = 500000 };
 	int ret;
 
+	pthread_mutex_lock(&ctx->scan_lock);
+	ret = spf_scan_session_next_boundary(ctx->scan_session, &boundary);
+	if (ret) {
+		(void)spf_scan_session_fail(ctx->scan_session,
+					    ctx->scan_counter_anchor, ret);
+		ctx->scan_error = ret;
+		ctx->scan_finished = true;
+		pthread_mutex_unlock(&ctx->scan_lock);
+		return NULL;
+	}
+	pthread_mutex_unlock(&ctx->scan_lock);
+
 	for (;;) {
 		pthread_mutex_lock(&ctx->scan_lock);
 		ret = spf_scan_radio_snapshot(&ctx->scan_radio,
@@ -617,7 +629,6 @@ bool iiod_buffer_metadata_scan_enabled(void *provider_context)
 int iiod_buffer_metadata_scan_start(void *provider_context)
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
-	int ret;
 
 	if (!ctx || !ctx->scan_enabled)
 		return -EOPNOTSUPP;
@@ -627,18 +638,7 @@ int iiod_buffer_metadata_scan_start(void *provider_context)
 		return -EALREADY;
 	}
 	ctx->scan_started = true;
-	ctx->scan_thread_live = true;
 	pthread_mutex_unlock(&ctx->scan_lock);
-	ret = pthread_create(&ctx->scan_thread, NULL, scan_scheduler, ctx);
-	if (ret) {
-		pthread_mutex_lock(&ctx->scan_lock);
-		ctx->scan_thread_live = false;
-		ctx->scan_error = -ret;
-		(void)spf_scan_session_fail(ctx->scan_session,
-						    ctx->scan_counter_anchor, -ret);
-		pthread_mutex_unlock(&ctx->scan_lock);
-		return -ret;
-	}
 	return 0;
 }
 
@@ -647,8 +647,10 @@ int iiod_buffer_metadata_scan_feed(void *provider_context,
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
 	struct spf_buffer_sequence_result sequence;
+	struct spf_scan_choice first_choice;
 	const uint8_t *raw;
 	uint64_t first;
+	bool sequence_committed = false;
 	int ret;
 
 	if (!ctx || !ctx->scan_enabled || !block)
@@ -671,10 +673,44 @@ int iiod_buffer_metadata_scan_feed(void *provider_context,
 	    (ctx->scan_finished &&
 	     spf_scan_session_capture_complete(ctx->scan_session)))
 		ret = -ESHUTDOWN;
-	else
+	else if (!ctx->scan_thread_live && !ctx->scan_finished) {
+		/* The owner ioctls expose only the coherent low counter word.  The
+		 * first completed DMA block supplies its unambiguous 64-bit epoch.
+		 * Rebase and retune after that block, so pre-retune IQ can never be
+		 * attributed to visit zero. */
+		ret = spf_scan_session_rebase(ctx->scan_session,
+				first + ctx->samples_per_channel);
+		if (!ret)
+			ret = spf_scan_session_counter(ctx->scan_session,
+						       &ctx->scan_counter_anchor);
+		if (!ret)
+			ret = spf_scan_session_schedule(ctx->scan_session,
+				ctx->scan_counter_anchor, ctx->scan_counter_anchor,
+				&first_choice);
+		if (!ret)
+			ret = spf_scan_session_feed(ctx->scan_session,
+				(uintptr_t)block, raw + 8, first,
+				ctx->samples_per_channel);
+		if (!ret) {
+			spf_buffer_sequence_commit(&ctx->sequence, &sequence);
+			sequence_committed = true;
+			ret = pthread_create(&ctx->scan_thread, NULL,
+					     scan_scheduler, ctx);
+			if (!ret)
+				ctx->scan_thread_live = true;
+			else
+				ret = -ret;
+		}
+		if (ret) {
+			(void)spf_scan_session_fail(ctx->scan_session,
+				ctx->scan_counter_anchor, ret);
+			ctx->scan_error = ret;
+			ctx->scan_finished = true;
+		}
+	} else
 		ret = spf_scan_session_feed(ctx->scan_session, (uintptr_t)block,
 				raw + 8, first, ctx->samples_per_channel);
-	if (!ret)
+	if (!ret && !sequence_committed)
 		spf_buffer_sequence_commit(&ctx->sequence, &sequence);
 	pthread_mutex_unlock(&ctx->scan_lock);
 	return ret;
@@ -786,7 +822,7 @@ int iiod_buffer_metadata_scan_cancel(void *provider_context)
 	ctx->scan_cancel_requested = true;
 	join = ctx->scan_thread_live;
 	ctx->scan_thread_live = false;
-	if (!ctx->scan_started) {
+	if (!ctx->scan_started || (!join && !ctx->scan_finished)) {
 		(void)spf_scan_session_cancel(ctx->scan_session,
 					      ctx->scan_counter_anchor);
 		ctx->scan_finished = true;

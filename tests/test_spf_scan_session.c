@@ -219,6 +219,9 @@ static void test_recall_failure_cancels_and_restores(void)
 	assert(radio.released);
 	assert(spf_scan_session_take_output(session, &output) == 0);
 	assert(output.record.visit == 0 && output.record.result == SPF_VISIT_CANCELLED);
+	assert(output.record.profile_crc32 == request.targets[output.record.target].profile_crc32);
+	assert(output.record.transition_before == base && output.record.transition_after == base);
+	assert(output.record.valid_start == base && output.record.valid_end == base);
 	assert(spf_scan_session_complete_output(session, 0) == 0);
 	assert(spf_scan_session_terminal(session, &terminal) == 0);
 	assert(terminal.state == SPF_SCAN_TERMINAL_FAILED && terminal.error == -EIO);
@@ -292,12 +295,90 @@ static void test_graceful_cancel_restores_and_accounts(void)
 	assert(spf_scan_session_destroy(session) == 0);
 }
 
+static void test_rebase_uses_full_dma_epoch_before_first_visit(void)
+{
+	const uint64_t epoch = UINT64_C(5) << 32;
+	const uint64_t anchor = epoch + UINT64_C(0x1000);
+	struct spf_scan_session_runtime runtime = {
+		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.drain_bytes_per_second = 60000000, .release_block = release_block,
+	};
+	struct spf_scan_session_output output;
+	struct spf_scan_terminal terminal;
+	struct spf_scan_choice choice;
+	struct spf_scan_session *session;
+	struct spf_scan_radio radio;
+	struct spf_scan_setup request = setup();
+	uint64_t counter;
+
+	assert(spf_scan_radio_init(&radio, 29, mock_ioctl) == 0);
+	mock_now = anchor + 100;
+	assert(spf_scan_session_create(&session, &request, &runtime, &radio, 0) == 0);
+	assert(spf_scan_session_counter(session, &counter) == 0);
+	assert(counter == (uint32_t)mock_now);
+	assert(spf_scan_session_rebase(session, anchor) == 0);
+	assert(spf_scan_session_counter(session, &counter) == 0);
+	assert(counter == mock_now);
+	assert(spf_scan_session_schedule(session, counter, counter, &choice) == 0);
+	assert(choice.selection_counter == mock_now);
+	assert(spf_scan_session_cancel(session, counter + 1000) == 0);
+	assert(spf_scan_session_take_output(session, &output) == 0);
+	assert(output.record.result == SPF_VISIT_CANCELLED);
+	assert(spf_scan_session_complete_output(session, 0) == 0);
+	assert(spf_scan_session_terminal(session, &terminal) == 0);
+	assert(spf_scan_session_destroy(session) == 0);
+}
+
+static void test_reservation_failure_never_serializes_admitted_placeholder(void)
+{
+	const uint64_t base = UINT64_C(0x6ffff0000);
+	struct spf_scan_session_runtime runtime = {
+		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.drain_bytes_per_second = 60000000, .release_block = release_block,
+	};
+	struct spf_scan_session_output output;
+	struct spf_scan_terminal terminal;
+	struct spf_scan_choice choice;
+	struct spf_scan_session *session;
+	struct spf_scan_radio radio;
+	struct spf_scan_setup request = setup();
+	static uint32_t data;
+	uintptr_t token = 500;
+	unsigned i;
+
+	assert(spf_scan_radio_init(&radio, 29, mock_ioctl) == 0);
+	mock_now = base;
+	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
+	assert(spf_scan_session_schedule(session, base, base, &choice) == 0);
+	for (i = 0; i < 4; i++)
+		assert(spf_scan_session_feed(session, token++, &data,
+			base + (uint64_t)i * 100000, 100000) == 0);
+	mock_now = base + 300000;
+	assert(spf_scan_session_schedule(session, mock_now, mock_now, &choice) == -ERANGE);
+	assert(spf_scan_session_take_output(session, &output) == 0);
+	assert(output.record.visit == 0 && output.record.result == SPF_VISIT_CANCELLED);
+	assert(spf_scan_session_complete_output(session, 0) == 0);
+	assert(spf_scan_session_take_output(session, &output) == 0);
+	assert(output.record.visit == 1 && output.record.result == SPF_VISIT_CANCELLED);
+	assert(output.record.profile_crc32 == request.targets[output.record.target].profile_crc32);
+	assert(output.record.transition_before == mock_now);
+	assert(output.record.transition_after == mock_now);
+	assert(output.record.valid_start == mock_now && output.record.valid_end == mock_now);
+	assert(spf_scan_session_complete_output(session, 1) == 0);
+	assert(spf_scan_session_terminal(session, &terminal) == 0);
+	assert(terminal.state == SPF_SCAN_TERMINAL_FAILED && terminal.error == -ERANGE);
+	assert(terminal.cancelled == 2 && terminal.planned == 2);
+	assert(spf_scan_session_destroy(session) == 0);
+}
+
 int main(void)
 {
 	test_three_visits_feedback_and_early_restore();
 	test_recall_failure_cancels_and_restores();
 	test_transport_failure_cancels_current_and_remainder();
 	test_graceful_cancel_restores_and_accounts();
+	test_rebase_uses_full_dma_epoch_before_first_visit();
+	test_reservation_failure_never_serializes_admitted_placeholder();
 	puts("PASS: scan session joins scheduler, owner recall, DMA visits, feedback and restore");
 	return 0;
 }
