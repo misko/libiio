@@ -81,6 +81,19 @@ add_executable(test_direct_async_lifecycle test_direct_async_lifecycle.c)
 target_include_directories(test_direct_async_lifecycle PRIVATE ../iiod)
 list(APPEND IIO_TESTS_TARGETS test_direct_async_lifecycle)
 
+add_executable(test_spf_scan_policy test_spf_scan_policy.c
+	../iiod/spf-scan-policy.c)
+target_include_directories(test_spf_scan_policy PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_scan_policy)
+add_executable(test_spf_visit_queue test_spf_visit_queue.c
+	../iiod/spf-visit-queue.c)
+target_include_directories(test_spf_visit_queue PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_visit_queue)
+add_executable(test_spf_scan_radio test_spf_scan_radio.c
+	../iiod/spf-scan-radio.c)
+target_include_directories(test_spf_scan_radio PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_scan_radio)
+
 if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	set(SPF_RADIO_FRAME_V3_SOURCE "")
 	set(SPF_THREAD_JOIN_SOURCE "")
