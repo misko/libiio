@@ -117,6 +117,28 @@ set(IIOD_SCANNER_GLRT_MINIMUM_EXACT_SCORE "" CACHE STRING "Pinned positive-only 
 set(IIOD_SCANNER_GLRT_MINIMUM_MARGIN "" CACHE STRING "Pinned positive-only margin threshold")
 option(IIOD_SCANNER_ADAPTIVE_HOP "Opt in to userspace adaptive hop V2 (requires positive-only GLRT)" OFF)
 option(IIOD_SCANNER_GLRT_CAPTURE_PROTECTION "Opt in to bounded GLRT admission, pressure shedding and watchdog" OFF)
+option(IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS "Opt in to healthy UNKNOWN for explicit GLRT admission skips" OFF)
+option(IIOD_SCANNER_GLRT_FAIR_ADMISSION "Opt in to bounded held-dwell admission with freshness guard" OFF)
+set(IIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS "120" CACHE STRING "Pinned fair-admission pending age (1..240 ms)")
+if(NOT IIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS MATCHES "^[1-9][0-9]?[0-9]?$" OR
+		IIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS GREATER 240)
+	message(FATAL_ERROR "Fair GLRT pending age must be an integer in 1..240 ms")
+endif()
+if(NOT IIOD_SCANNER_GLRT_FAIR_ADMISSION AND
+		NOT IIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS STREQUAL "120")
+	message(FATAL_ERROR "Nondefault pending age requires explicit fair GLRT admission")
+endif()
+if(IIOD_SCANNER_GLRT_FAIR_ADMISSION AND
+		(NOT IIOD_SCANNER_GLRT_LIBRARY OR NOT IIOD_SCANNER_GLRT_CAPTURE_PROTECTION OR
+		 NOT IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS OR
+		 NOT IIOD_SCANNER_GLRT_MODE STREQUAL "positive-only-v1"))
+	message(FATAL_ERROR "Fair GLRT admission requires a positive-only SDK, protection and cooperative skips")
+endif()
+if(IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS AND
+		(NOT IIOD_SCANNER_GLRT_LIBRARY OR NOT IIOD_SCANNER_GLRT_CAPTURE_PROTECTION OR
+		 NOT IIOD_SCANNER_GLRT_MODE STREQUAL "positive-only-v1"))
+	message(FATAL_ERROR "Cooperative GLRT skips require a positive-only SDK and capture protection")
+endif()
 if(IIOD_SCANNER_GLRT_CAPTURE_PROTECTION AND NOT IIOD_SCANNER_GLRT_LIBRARY)
 	message(FATAL_ERROR "Scanner capture protection requires an explicit GLRT SDK")
 endif()
@@ -187,6 +209,14 @@ function(iiod_configure_scanner_glrt target)
 	target_compile_definitions(${target} PRIVATE IIOD_SCANNER_GLRT_MODE="${IIOD_SCANNER_GLRT_MODE}")
 	if(IIOD_SCANNER_GLRT_CAPTURE_PROTECTION)
 		target_compile_definitions(${target} PRIVATE IIOD_SCANNER_GLRT_CAPTURE_PROTECTION=1)
+	endif()
+	if(IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS)
+		target_compile_definitions(${target} PRIVATE IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS=1)
+	endif()
+	if(IIOD_SCANNER_GLRT_FAIR_ADMISSION)
+		target_compile_definitions(${target} PRIVATE IIOD_SCANNER_GLRT_FAIR_ADMISSION=1)
+		target_compile_definitions(${target} PRIVATE
+			IIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS=${IIOD_SCANNER_GLRT_MAXIMUM_PENDING_AGE_MS})
 	endif()
 	if(IIOD_SCANNER_ADAPTIVE_HOP)
 		target_compile_definitions(${target} PRIVATE IIOD_HAS_SCANNER_ADAPTIVE_HOP=1)

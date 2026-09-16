@@ -450,11 +450,11 @@ int spf_hop_session_v2_init(struct spf_hop_session_v2 *s, const struct spf_hop_r
 	return spf_hop_session_v1_init(&s->core, &r->geometry, &adaptive_core_ops, s);
 }
 
-int spf_hop_session_v2_start(struct spf_hop_session_v2 *s)
-{ return s ? spf_hop_session_v1_start(&s->core) : -EINVAL; }
-
 int spf_hop_session_v2_arm(struct spf_hop_session_v2 *s)
 { return s ? spf_hop_session_v1_arm(&s->core) : -EINVAL; }
+
+int spf_hop_session_v2_start(struct spf_hop_session_v2 *s)
+{ return s ? spf_hop_session_v1_start(&s->core) : -EINVAL; }
 
 int spf_hop_session_v2_on_block(struct spf_hop_session_v2 *s, uint64_t sequence,
 	uint64_t first, uint64_t end, struct spf_hop_sidecar_v2 *sidecar)

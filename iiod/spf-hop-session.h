@@ -49,10 +49,10 @@ struct spf_hop_session_v1 {
 int spf_hop_session_v1_init(struct spf_hop_session_v1 *session,
 	const struct spf_hop_request_v1 *request,
 	const struct spf_hop_device_ops_v1 *ops, void *device_context);
-int spf_hop_session_v1_start(struct spf_hop_session_v1 *session);
 /* Optional two-phase start: expose ARMED before DMA/metadata readiness is
  * proven, without issuing a recall. start() activates either IDLE or ARMED. */
 int spf_hop_session_v1_arm(struct spf_hop_session_v1 *session);
+int spf_hop_session_v1_start(struct spf_hop_session_v1 *session);
 int spf_hop_session_v1_on_block(struct spf_hop_session_v1 *session,
 	uint64_t buffer_sequence, uint64_t first_sample, uint64_t block_end,
 	struct spf_hop_sidecar_v1 *sidecar);
@@ -84,8 +84,8 @@ struct spf_hop_session_v2 {
 
 int spf_hop_session_v2_init(struct spf_hop_session_v2 *, const struct spf_hop_request_v2 *,
 	const struct spf_hop_device_ops_v2 *, void *);
-int spf_hop_session_v2_start(struct spf_hop_session_v2 *);
 int spf_hop_session_v2_arm(struct spf_hop_session_v2 *);
+int spf_hop_session_v2_start(struct spf_hop_session_v2 *);
 int spf_hop_session_v2_on_block(struct spf_hop_session_v2 *, uint64_t, uint64_t,
 	uint64_t, struct spf_hop_sidecar_v2 *);
 int spf_hop_session_v2_cancel(struct spf_hop_session_v2 *, uint16_t);

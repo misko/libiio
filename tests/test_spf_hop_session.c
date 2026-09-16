@@ -383,6 +383,7 @@ static void test_arm_defers_hops_until_dma_is_ready(void)
 	assert(spf_hop_session_v1_start(&session) == 0);
 	assert(device.submit_calls == 1 && session.status.state == SPF_HOP_STATE_RUNNING);
 	assert(spf_hop_session_v1_start(&session) == -EINVAL);
+	assert(spf_hop_session_v1_arm(&session) == -EINVAL);
 	device.events[0] = make_event(&request, 0, 1100, 1102);
 	device.event_count = 1;
 	assert(spf_hop_session_v1_on_block(&session, 0, 1000, 1100, &sidecar) == 0);

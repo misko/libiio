@@ -143,7 +143,7 @@ static size_t adaptive_request_packet(uint8_t *packet, unsigned mode, int invali
 	return (size_t)result;
 }
 
-static unsigned adaptive_consume(const uint8_t *packet, unsigned *positives)
+static unsigned adaptive_consume(const uint8_t *packet, unsigned *positives, unsigned *recovered)
 {
 	unsigned count = packet[16] | (unsigned)packet[17] << 8;
 	const uint8_t *record = packet + 128 + read32(packet + 12);
@@ -156,12 +156,21 @@ static unsigned adaptive_consume(const uint8_t *packet, unsigned *positives)
 		assert(record[68] == e->to_profile % 4 + 1 && record[69] == e->to_profile / 4 && record[70] == 1);
 		assert(record[71] != 2); /* No public NO_SIGNAL claim. */
 		if (record[71] == 1) { assert(13 & (1U << e->to_profile)); ++*positives; }
+		if (visit >= 18 && read32(record + 76) == 63) ++*recovered;
 	}
 	return count;
 }
 
-static void test_adaptive_provider(unsigned mode, bool cancelled, bool failure)
+static void test_adaptive_provider(unsigned mode, bool cancelled, bool failure, bool pressure)
 {
+	bool expect_fallback = failure;
+	bool fault_injected = false;
+#ifndef IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS
+	expect_fallback = expect_fallback || pressure;
+#endif
+#ifndef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+	assert(!pressure);
+#endif
 	uint8_t request[4096], output[65536]; uint32_t mask = 15;
 	struct iiod_buffer_burst_plan plan;
 	void *context = NULL;
@@ -193,8 +202,14 @@ static void test_adaptive_provider(unsigned mode, bool cancelled, bool failure)
 	uint8_t *raw = calloc(1, state->layout.raw_bytes); assert(raw);
 	for (size_t sample = 0; sample < state->samples_per_channel; ++sample)
 		((int16_t *)(raw + 8))[sample * 4] = 30000;
-	unsigned records = 0, positives = 0, weighted = 0, based = 0, fallback = 0, frames;
+	unsigned records = 0, positives = 0, weighted = 0, based = 0, fallback = 0, recovered = 0, frames;
 	for (frames = 0; frames < 240; ++frames) {
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+		/* Exercise the real owner pressure port after initial activity. Keep
+		 * acquisition moving through >3 visits, then allow normal recovery. */
+		if (pressure && frames >= 60 && frames < 96)
+			spf_scanner_glrt_capture_budget(state->glrt, 16000000, 0);
+#endif
 		uint64_t first = fixture_first + frames * (uint64_t)state->samples_per_channel;
 		memcpy(raw, &first, 8);
 		ssize_t result = iiod_buffer_metadata_get(context, rx_device, (void *)raw,
@@ -202,7 +217,7 @@ static void test_adaptive_provider(unsigned mode, bool cancelled, bool failure)
 		assert(result > 0 && offset == 8 && iq_bytes == state->layout.iq_bytes);
 		for (size_t sample = 0; sample < state->samples_per_channel; ++sample)
 			assert(((int16_t *)(raw + 8))[sample * 4] == 30000);
-		records += adaptive_consume(output, &positives);
+		records += adaptive_consume(output, &positives, &recovered);
 		const uint8_t *legacy; size_t legacy_bytes;
 		assert(!leo_scanner_glrt_legacy_view(output, (size_t)result, &legacy, &legacy_bytes));
 		const spf_radio_meta_v3_prefix_t *prefix = (const void *)legacy;
@@ -212,25 +227,43 @@ static void test_adaptive_provider(unsigned mode, bool cancelled, bool failure)
 			weighted += hop.choices[i].reason == SPF_HOP_CHOICE_WEIGHTED;
 			based += hop.choices[i].basis_visit != UINT64_MAX;
 			fallback += hop.choices[i].reason == SPF_HOP_CHOICE_FAULT_FALLBACK;
-			if (!failure) assert(hop.choices[i].reason != SPF_HOP_CHOICE_FAULT_FALLBACK);
+			if (!expect_fallback) assert(hop.choices[i].reason != SPF_HOP_CHOICE_FAULT_FALLBACK);
+#ifdef IIOD_SCANNER_GLRT_COOPERATIVE_SKIPS
+			if (pressure && frames <= 130)
+				assert(hop.choices[i].reason != SPF_HOP_CHOICE_FAULT_FALLBACK);
+#endif
 		}
 		struct iiod_buffer_metadata_frame_info info;
 		assert(!iiod_buffer_metadata_describe_frame(context, output, (size_t)result, &info));
 		assert(info.first_sample_sequence == first && !info.missing_samples_before);
-		if (failure && frames == 9) spf_scanner_glrt_feed(state->glrt, NULL, NULL, 0);
+#ifdef IIOD_SCANNER_GLRT_FAIR_ADMISSION
+		leo_scanner_glrt_admission_stats_v1 admission;
+		assert(!spf_scanner_glrt_admission_stats(state->glrt, &admission));
+		assert(admission.enabled && admission.pending <= 1 && admission.running <= 1);
+#endif
+		/* A failure-after-recovery scenario must observe actual recovery
+		 * before killing the worker. A fixed frame number can instead kill
+		 * still-pending work and cannot prove numerical recovery. The same
+		 * four-second capture bounds this wait; failure must still occur. */
+		if (failure && !fault_injected &&
+			(pressure ? frames >= 130U && recovered : frames == 9U)) {
+			printf("fault injection rate=%u frame=%u recovered=%u\n", fixture_rate, frames, recovered);
+			spf_scanner_glrt_feed(state->glrt, NULL, NULL, 0);
+			fault_injected = true;
+		}
 		if (cancelled && frames == 9) { assert(!iiod_buffer_metadata_cancel(context)); break; }
 		if (hop.geometry.state == SPF_HOP_STATE_COMPLETED) break;
 		/* Real-time synthetic producer pacing, no RF. Detector completion is
 		 * asynchronous; source time never waits on an individual GLRT result. */
 		struct timespec pause = {0, 20000000}; nanosleep(&pause, NULL);
 	}
-	assert(frames < 240 && restores == 1);
+	assert(frames < 240 && restores == 1 && fault_injected == failure);
 	bool final = false;
 	for (unsigned attempt = 0; attempt < 2500; ++attempt) {
 		ssize_t result = plan.drain_metadata(context, output, sizeof(output));
 		if (result == -EAGAIN) { struct timespec pause = {0, 2000000}; nanosleep(&pause, NULL); continue; }
 		assert(result > 0);
-		records += adaptive_consume(output, &positives);
+		records += adaptive_consume(output, &positives, &recovered);
 		if (read32(output + 20) & 2) { final = true; break; }
 	}
 	assert(final && records == adaptive_fixture.count);
@@ -239,8 +272,13 @@ static void test_adaptive_provider(unsigned mode, bool cancelled, bool failure)
 	struct spf_hop_status_v1 status;
 	assert(!spf_hop_status_v2_decode(&status, output, SPF_HOP_STATUS_BYTES));
 	assert(status.state == (cancelled ? SPF_HOP_STATE_CANCELLED : SPF_HOP_STATE_COMPLETED));
-	if (!cancelled && !failure) assert(positives && weighted && based);
-	if (failure) {
+	if (!cancelled && !failure) {
+		assert(positives && based);
+		/* The legacy policy intentionally latches a pressure fault before
+		 * weighted scheduling begins. Only healthy policy runs require it. */
+		if (!expect_fallback) assert(weighted);
+	}
+	if (expect_fallback) {
 		assert(fallback && status.state == SPF_HOP_STATE_COMPLETED);
 		bool seen = false;
 		for (unsigned i = 0; i < adaptive_fixture.count; ++i) {
@@ -249,11 +287,33 @@ static void test_adaptive_provider(unsigned mode, bool cancelled, bool failure)
 			if (seen) assert(e->choice.reason == SPF_HOP_CHOICE_FAULT_FALLBACK && e->device.to_profile == i % 8);
 		}
 	}
+#ifdef IIOD_SCANNER_GLRT_CAPTURE_PROTECTION
+	if (pressure) {
+		leo_scanner_glrt_protection_stats_v1 stats;
+		assert(!spf_scanner_glrt_protection_stats(state->glrt, &stats));
+		assert(stats.pressure_skips >= 3 && stats.resumptions >= 1);
+		assert(stats.history_blocks_skipped >= 36 && stats.disabled == failure);
+		assert(recovered); /* Actual numerical checks resumed after pressure. */
+	}
+#endif
+#ifdef IIOD_SCANNER_GLRT_FAIR_ADMISSION
+	leo_scanner_glrt_admission_stats_v1 admission;
+	assert(!spf_scanner_glrt_admission_stats(state->glrt, &admission));
+	assert(admission.enabled && !admission.pending && !admission.running);
+	if (getenv("SPF_EXPECT_FAIR_SHEDDING") && !cancelled && !failure && !pressure) {
+		assert(admission.dispatched && admission.dispatched < records);
+		assert(admission.replacements || admission.expired || admission.freshness_skips);
+	}
+	printf("fair provider rate=%u mode=%u dispatched=%llu replaced=%llu expired=%llu freshness=%llu pressure_drops=%llu\n",
+		fixture_rate, mode, (unsigned long long)admission.dispatched,
+		(unsigned long long)admission.replacements, (unsigned long long)admission.expired,
+		(unsigned long long)admission.freshness_skips, (unsigned long long)admission.pressure_drops);
+#endif
 	iiod_buffer_metadata_close(context);
 	assert(restores == 1 && !adaptive_fixture.opened);
 	free(raw);
 	for (unsigned edge = 0; edge < 2; ++edge) { free(adaptive_pilot[edge]); adaptive_pilot[edge] = NULL; }
-	printf("adaptive provider rate=%u mode=%u cancelled=%u failure=%u visits=%u positives=%u weighted=%u based=%u fallback=%u PASS\n",
-		fixture_rate, mode, cancelled, failure, records, positives, weighted, based, fallback); fflush(stdout);
+	printf("adaptive provider rate=%u mode=%u cancelled=%u failure=%u pressure=%u visits=%u positives=%u weighted=%u based=%u fallback=%u recovered=%u PASS\n",
+		fixture_rate, mode, cancelled, failure, pressure, records, positives, weighted, based, fallback, recovered); fflush(stdout);
 }
 #endif
