@@ -93,6 +93,10 @@ add_executable(test_spf_scan_radio test_spf_scan_radio.c
 	../iiod/spf-scan-radio.c)
 target_include_directories(test_spf_scan_radio PRIVATE ../iiod)
 list(APPEND IIO_TESTS_TARGETS test_spf_scan_radio)
+add_executable(test_spf_visit_capacity test_spf_visit_capacity.c
+	../iiod/spf-visit-queue.c)
+target_include_directories(test_spf_visit_capacity PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_visit_capacity)
 
 if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	set(SPF_RADIO_FRAME_V3_SOURCE "")
