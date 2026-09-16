@@ -139,6 +139,10 @@ int spf_scan_session_create(struct spf_scan_session **out,
 		profiles[i].frequency_hz = setup->targets[i].frequency_hz;
 		profiles[i].crc32 = setup->targets[i].profile_crc32;
 	}
+	ret = spf_scan_radio_acquire(radio, setup->source_rate_hz,
+				     runtime->block_samples);
+	if (ret)
+		goto restore;
 	ret = spf_scan_radio_configure(radio, profiles, setup->target_count);
 	if (ret)
 		goto restore;

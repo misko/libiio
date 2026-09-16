@@ -35,6 +35,7 @@ struct spf_scan_radio {
 	uint64_t frequency_hz[SPF_SCAN_RADIO_MAX_PROFILES];
 	uint32_t profile_crc32[SPF_SCAN_RADIO_MAX_PROFILES];
 	uint32_t features;
+	bool acquired;
 	bool configured;
 	bool faulted;
 	bool released;
@@ -42,12 +43,16 @@ struct spf_scan_radio {
 
 int spf_scan_radio_init(struct spf_scan_radio *radio, int fd,
 			spf_scan_radio_ioctl_fn call_ioctl);
+int spf_scan_radio_acquire(struct spf_scan_radio *radio, uint32_t source_rate_hz,
+			   uint32_t samples_per_block);
 int spf_scan_radio_configure(struct spf_scan_radio *radio,
 			     const struct spf_scan_radio_profile *profiles,
 			     size_t profile_count);
 int spf_scan_radio_recall(struct spf_scan_radio *radio, uint32_t profile,
 			  uint64_t counter_anchor,
 			  struct spf_scan_radio_receipt *receipt);
+int spf_scan_radio_snapshot(struct spf_scan_radio *radio,
+			    uint64_t counter_anchor, uint64_t *counter);
 int spf_scan_radio_release(struct spf_scan_radio *radio, uint64_t counter_anchor,
 			   struct spf_scan_radio_release_receipt *receipt);
 

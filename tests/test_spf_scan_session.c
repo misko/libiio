@@ -40,6 +40,8 @@ static int mock_ioctl(int fd, unsigned long request, void *argument)
 			configured_frequency[i] = config->profiles[i].frequency_hz;
 		return 0;
 	}
+	if (request == ADI_RX_COUNTER_IOC_ACQUIRE)
+		return 0;
 	if (request == ADI_RX_COUNTER_IOC_RECALL) {
 		struct adi_rx_counter_scan_recall *recall = argument;
 
