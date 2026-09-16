@@ -416,6 +416,47 @@ static void test_exhausted_direct_segment_can_be_rearmed(void)
 	assert(fixture.state.cancel_calls == 0);
 }
 
+static void test_rejected_direct_rearm_can_be_retried(void)
+{
+	static const char busy[] = "-16\n";
+	struct fixture fixture = {0};
+	struct iio_buffer *buffer = fixture_buffer(&fixture);
+	struct test_metadata metadata;
+	size_t metadata_bytes = 0;
+	size_t tail;
+
+	assert(iio_buffer_set_metadata_read_prequeue_async_policy(buffer, 1,
+		TEST_METADATA_BYTES,
+		IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG) == 0);
+	assert(iio_buffer_refill_with_metadata(buffer, &metadata,
+		sizeof(metadata), &metadata_bytes) == TEST_IQ_BYTES);
+	assert(metadata.sequence == 0);
+	tail = fixture.state.response_bytes - fixture.state.response_offset;
+	assert(fixture.state.response_bytes + sizeof(busy) - 1U <=
+		sizeof(fixture.state.responses));
+	memmove(fixture.state.responses + fixture.state.response_offset +
+			sizeof(busy) - 1U,
+		fixture.state.responses + fixture.state.response_offset, tail);
+	memcpy(fixture.state.responses + fixture.state.response_offset, busy,
+		sizeof(busy) - 1U);
+	fixture.state.response_bytes += sizeof(busy) - 1U;
+
+	assert(iio_buffer_set_metadata_read_prequeue_async_policy(buffer, 1,
+		TEST_METADATA_BYTES,
+		IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG) == 0);
+	assert(iio_buffer_refill_with_metadata(buffer, &metadata,
+		sizeof(metadata), &metadata_bytes) == -EBUSY);
+	assert(fixture.state.cancel_calls == 0);
+	assert(iio_buffer_set_metadata_read_prequeue_async_policy(buffer, 1,
+		TEST_METADATA_BYTES,
+		IIO_BUFFER_METADATA_OVERRUN_PRESERVE_BACKLOG) == 0);
+	assert(iio_buffer_refill_with_metadata(buffer, &metadata,
+		sizeof(metadata), &metadata_bytes) == TEST_IQ_BYTES);
+	assert(metadata.sequence == 1);
+	destroy_fixture_buffer(&fixture, buffer);
+	assert(fixture.state.cancel_calls == 0);
+}
+
 static void test_gates_and_early_close(void)
 {
 	struct fixture missing = {0};
@@ -672,6 +713,7 @@ int main(void)
 	test_exact_kernel_queue_capability_is_required();
 	test_fifo_drain_single_command();
 	test_exhausted_direct_segment_can_be_rearmed();
+	test_rejected_direct_rearm_can_be_retried();
 	test_gates_and_early_close();
 	test_long_capture_is_one_command();
 	test_explicit_overrun_policy_commands();

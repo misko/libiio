@@ -219,6 +219,15 @@ static void fail_metadata_batch(struct iio_buffer *buffer)
 		ops->cancel(buffer->dev);
 }
 
+static void reset_metadata_direct_segment(struct iio_buffer *buffer)
+{
+	free(buffer->metadata_direct_mask);
+	buffer->metadata_direct_mask = NULL;
+	buffer->metadata_direct_frames = 0;
+	buffer->metadata_direct_pending = 0;
+	buffer->metadata_direct_capacity = 0;
+}
+
 static void cache_terminal_metadata_status(struct iio_buffer *buffer)
 {
 	const struct iio_backend_ops *ops = buffer->dev->ctx->ops;
@@ -665,6 +674,16 @@ ssize_t iio_buffer_refill_with_metadata(struct iio_buffer *buffer,
 				dev->words * sizeof(*buffer->mask))) {
 			ret = read < 0 ? read : -EIO;
 			*metadata_bytes = 0;
+			/* A newly rearmed command can be rejected while iiOD finishes
+			 * an immediately preceding in-band feedback command.  No frame
+			 * was admitted, and the command response has been consumed, so
+			 * leave the transport exhausted and explicitly rearmable. */
+			if (buffer->metadata_direct_pending ==
+					buffer->metadata_direct_frames &&
+					(ret == -EBUSY || ret == -ENODATA)) {
+				reset_metadata_direct_segment(buffer);
+				return ret;
+			}
 			cache_terminal_metadata_status(buffer);
 			fail_metadata_batch(buffer);
 			return ret;
