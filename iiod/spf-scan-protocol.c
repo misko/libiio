@@ -376,7 +376,8 @@ static int visit_validate(const struct spf_scan_visit_record *visit)
 	    visit->target >= SPF_SCAN_TARGETS || visit->profile >= SPF_SCAN_TARGETS ||
 	    visit->result > SPF_VISIT_CANCELLED ||
 	    visit->eligible_mask & ~UINT32_C(0xff) ||
-	    visit->flags & ~SPF_SCAN_VISIT_FLAGS)
+	    !(visit->flags & SPF_SCAN_VISIT_FLAGS) ||
+	    visit->flags & ~SPF_SCAN_VISIT_FLAG_MASK)
 		return -EINVAL;
 	samples = visit->valid_end - visit->valid_start;
 	if (samples > UINT64_MAX / 4)

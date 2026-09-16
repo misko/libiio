@@ -128,6 +128,7 @@ static struct result simulate(uint32_t rate, uint32_t dwell_ms,
 	struct spf_visit_queue_config config = {
 		.block_count = 50,
 		.headroom_blocks = 2,
+		.maximum_visits = 50,
 		.block_samples = 1000000,
 		.source_rate_hz = rate,
 		.maximum_bytes = 200000000,

@@ -31,6 +31,9 @@ struct spf_visit_queue {
 };
 static struct visit *at(struct spf_visit_queue *q, unsigned index)
 { return &q->visits[(q->head + index) % SPF_VISIT_QUEUE_MAX_VISITS]; }
+static const struct visit *at_const(const struct spf_visit_queue *q,
+				    unsigned index)
+{ return &q->visits[(q->head + index) % SPF_VISIT_QUEUE_MAX_VISITS]; }
 
 int spf_visit_queue_create(struct spf_visit_queue **out,
 	const struct spf_visit_queue_config *c, int (*release)(void *, uintptr_t), void *ctx)
@@ -38,6 +41,7 @@ int spf_visit_queue_create(struct spf_visit_queue **out,
 	struct spf_visit_queue *q;
 	if (!out || !c || !release || c->block_count < 4 || c->block_count > 64 ||
 		c->headroom_blocks < 2 || c->headroom_blocks >= c->block_count ||
+		!c->maximum_visits || c->maximum_visits > SPF_VISIT_QUEUE_MAX_VISITS ||
 		!c->block_samples || c->block_samples > 1000000 ||
 		(c->source_rate_hz != 10000000 && c->source_rate_hz != 15000000 &&
 		 c->source_rate_hz != 20000000 && c->source_rate_hz != 30000000) ||
@@ -99,7 +103,7 @@ int spf_visit_queue_reserve(struct spf_visit_queue *q, uint64_t id,
 	/* Conservative count at any phase of the DMA frame boundary. */
 	blocks = (samples + q->config.block_samples - 1) / q->config.block_samples + 1;
 	*result = SPF_VISIT_SKIP_CAPACITY;
-	if (q->stats.visits == SPF_VISIT_QUEUE_MAX_VISITS ||
+	if (q->stats.visits == q->config.maximum_visits ||
 		blocks + q->stats.leased_blocks + q->stats.reserved_blocks >
 		q->config.block_count - q->config.headroom_blocks ||
 		bytes > q->config.maximum_bytes ||
@@ -274,6 +278,18 @@ int spf_visit_queue_cancel(struct spf_visit_queue *q)
 
 void spf_visit_queue_stats(const struct spf_visit_queue *q, struct spf_visit_queue_stats *stats)
 { if (q && stats) *stats = q->stats; }
+
+bool spf_visit_queue_capture_complete(const struct spf_visit_queue *q)
+{
+	unsigned i;
+
+	if (!q)
+		return false;
+	for (i = 0; i < q->stats.visits; i++)
+		if (at_const(q, i)->result == SPF_VISIT_ADMITTED)
+			return false;
+	return true;
+}
 
 int spf_visit_queue_destroy(struct spf_visit_queue *q)
 {

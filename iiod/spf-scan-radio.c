@@ -144,7 +144,7 @@ int spf_scan_radio_release(struct spf_scan_radio *radio, uint64_t counter_anchor
 	uint64_t before, after;
 	int ret;
 
-	if (!radio || !receipt || !radio->configured || radio->released)
+	if (!radio || !receipt || radio->released)
 		return -EINVAL;
 	release.magic = ADI_RX_COUNTER_MAGIC;
 	release.version = ADI_RX_COUNTER_SCAN_VERSION;

@@ -15,6 +15,7 @@ enum spf_visit_result {
 struct spf_visit_queue;
 struct spf_visit_queue_config {
 	unsigned block_count, headroom_blocks;
+	unsigned maximum_visits;
 	uint32_t block_samples, source_rate_hz;
 	uint64_t maximum_bytes, maximum_age_ticks, drain_bytes_per_second;
 };
@@ -62,4 +63,7 @@ int spf_visit_queue_cancel(struct spf_visit_queue *queue);
 int spf_visit_queue_reap(struct spf_visit_queue *queue);
 void spf_visit_queue_stats(const struct spf_visit_queue *queue,
 	struct spf_visit_queue_stats *stats);
+/* True once every closed capture window has either complete IQ or an explicit
+ * terminal outcome. Transport may still hold or queue those complete views. */
+bool spf_visit_queue_capture_complete(const struct spf_visit_queue *queue);
 #endif

@@ -101,6 +101,12 @@ add_executable(test_spf_scan_protocol test_spf_scan_protocol.c
 	../iiod/spf-scan-protocol.c ../iiod/spf-scan-policy.c)
 target_include_directories(test_spf_scan_protocol PRIVATE ../iiod)
 list(APPEND IIO_TESTS_TARGETS test_spf_scan_protocol)
+add_executable(test_spf_scan_session test_spf_scan_session.c
+	../iiod/spf-scan-session.c ../iiod/spf-scan-protocol.c
+	../iiod/spf-scan-policy.c ../iiod/spf-scan-radio.c
+	../iiod/spf-visit-queue.c)
+target_include_directories(test_spf_scan_session PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_scan_session)
 
 if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 	set(SPF_RADIO_FRAME_V3_SOURCE "")
