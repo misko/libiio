@@ -161,7 +161,9 @@ if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 		../iiod/spf-counter-metadata.c ../iiod/spf-buffer-metadata.c
 		../iiod/spf-buffer-layout.c ../iiod/spf-sampler-coverage.c
 		../iiod/spf-temperature-cache.c ../iiod/spf-ddr-burst-request.c
-		../iiod/spf-ddr-ring-request.c
+		../iiod/spf-ddr-ring-request.c ../iiod/spf-scan-session.c
+		../iiod/spf-scan-protocol.c ../iiod/spf-scan-policy.c
+		../iiod/spf-scan-radio.c ../iiod/spf-visit-queue.c
 		${IIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES})
 	target_include_directories(test_spf_counter_metadata PRIVATE ../iiod ..
 		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
