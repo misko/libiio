@@ -77,10 +77,38 @@ target_link_libraries(iio_writedev iio iio_tests_helper)
 set(IIO_TESTS_TARGETS iio_genxml iio_info iio_attr iio_readdev iio_reg
 	iio_writedev)
 
-add_executable(test_spf_hop_protocol test_spf_hop_protocol.c
-	../iiod/spf-hop-protocol.c)
 add_executable(test_direct_async_lifecycle test_direct_async_lifecycle.c)
 target_include_directories(test_direct_async_lifecycle PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_direct_async_lifecycle)
+
+add_executable(test_spf_scan_policy test_spf_scan_policy.c
+	../iiod/spf-scan-policy.c)
+target_include_directories(test_spf_scan_policy PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_scan_policy)
+add_executable(test_spf_visit_queue test_spf_visit_queue.c
+	../iiod/spf-visit-queue.c)
+target_include_directories(test_spf_visit_queue PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_visit_queue)
+add_executable(test_spf_scan_radio test_spf_scan_radio.c
+	../iiod/spf-scan-radio.c)
+target_include_directories(test_spf_scan_radio PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_scan_radio)
+add_executable(test_spf_visit_capacity test_spf_visit_capacity.c
+	../iiod/spf-visit-queue.c)
+target_include_directories(test_spf_visit_capacity PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_visit_capacity)
+add_executable(test_spf_scan_protocol test_spf_scan_protocol.c
+	../iiod/spf-scan-protocol.c ../iiod/spf-scan-policy.c)
+target_include_directories(test_spf_scan_protocol PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_scan_protocol)
+add_executable(test_spf_scan_session test_spf_scan_session.c
+	../iiod/spf-scan-session.c ../iiod/spf-scan-protocol.c
+	../iiod/spf-scan-policy.c ../iiod/spf-scan-radio.c
+	../iiod/spf-visit-queue.c)
+target_include_directories(test_spf_scan_session PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_scan_session)
+add_executable(test_spf_hop_protocol test_spf_hop_protocol.c
+	../iiod/spf-hop-protocol.c)
 add_executable(test_spf_hop_session test_spf_hop_session.c
 	../iiod/spf-hop-protocol.c ../iiod/spf-hop-adaptive-protocol.c ../iiod/spf-hop-session.c)
 add_executable(test_spf_hop_scheduler test_spf_hop_scheduler.c
@@ -94,8 +122,7 @@ target_include_directories(test_spf_hop_protocol PRIVATE ../iiod)
 target_include_directories(test_spf_hop_session PRIVATE ../iiod)
 target_include_directories(test_spf_hop_scheduler PRIVATE ../iiod)
 target_link_libraries(test_spf_hop_scheduler ${PTHREAD_LIBRARIES})
-list(APPEND IIO_TESTS_TARGETS test_direct_async_lifecycle
-	test_spf_hop_protocol test_spf_hop_session test_spf_hop_scheduler
+list(APPEND IIO_TESTS_TARGETS test_spf_hop_protocol test_spf_hop_session test_spf_hop_scheduler
 	test_spf_hop_adaptive)
 if(IIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER MATCHES
 		"spf-hop-device-userspace\\.c$")

@@ -92,6 +92,25 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 	return READBUFMSTAT;
 }
 
+<INITIAL>READSCAN|readscan {
+	BEGIN(WANT_DEVICE);
+	return READSCAN;
+}
+
+<INITIAL>SCANCAPS|scancaps {
+	return SCANCAPS;
+}
+
+<INITIAL>SCANFEEDBACK|scanfeedback {
+	BEGIN(WANT_DEVICE);
+	return SCANFEEDBACK;
+}
+
+<INITIAL>SCANACK|scanack {
+	BEGIN(WANT_DEVICE);
+	return SCANACK;
+}
+
 <INITIAL>CANCELBUFM|cancelbufm {
 	BEGIN(WANT_DEVICE);
 	return CANCELBUFM;

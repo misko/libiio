@@ -51,6 +51,10 @@ if (IIOD_BUFFER_METADATA_PROVIDER)
 			${CMAKE_CURRENT_SOURCE_DIR}/spf-ddr-ring-request.c)
 		set(SPF_SAMPLER_COVERAGE_SOURCE
 			${CMAKE_CURRENT_SOURCE_DIR}/spf-sampler-coverage.c)
+		set(SPF_SCAN_SOURCES
+			${CMAKE_CURRENT_SOURCE_DIR}/spf-visit-queue.c
+			${CMAKE_CURRENT_SOURCE_DIR}/spf-scan-radio.c
+			${CMAKE_CURRENT_SOURCE_DIR}/spf-scan-session.c)
 		list(FIND IIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES
 			${SPF_TEMPERATURE_CACHE_SOURCE} SPF_TEMPERATURE_CACHE_INDEX)
 		if (SPF_TEMPERATURE_CACHE_INDEX EQUAL -1)
@@ -83,6 +87,14 @@ if (IIOD_BUFFER_METADATA_PROVIDER)
 			list(APPEND IIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES
 				${SPF_SAMPLER_COVERAGE_SOURCE})
 		endif()
+		foreach(SPF_SCAN_SOURCE ${SPF_SCAN_SOURCES})
+			list(FIND IIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES
+				${SPF_SCAN_SOURCE} SPF_SCAN_SOURCE_INDEX)
+			if (SPF_SCAN_SOURCE_INDEX EQUAL -1)
+				list(APPEND IIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES
+					${SPF_SCAN_SOURCE})
+			endif()
+		endforeach()
 		if (IIOD_BUFFER_PERSISTENT_HOP_DEVICE_PROVIDER)
 			set(SPF_HOP_SOURCES
 				${CMAKE_CURRENT_SOURCE_DIR}/spf-hop-protocol.c
@@ -239,7 +251,7 @@ function(iiod_configure_scanner_glrt target)
 endfunction()
 
 set(IIOD_CFILES iiod.c ops.c thread-pool.c ddr-ring-core.c
-	spf-ddr-ring-status.c
+	spf-ddr-ring-status.c spf-scan-policy.c spf-scan-protocol.c
 	${IIOD_METADATA_CFILES}
 	${BISON_parser_OUTPUTS} ${FLEX_lexer_OUTPUTS})
 
@@ -315,7 +327,8 @@ if(WITH_TESTS AND WITH_XML_BACKEND)
 	add_executable(test_metadata_drain_server
 		../tests/test_metadata_drain_server.c ../tests/metadata-drain-client.c
 		thread-pool.c ddr-ring-core.c
-		spf-ddr-ring-status.c buffer-metadata-none.c ../iiod-client.c
+		spf-ddr-ring-status.c spf-scan-policy.c spf-scan-protocol.c
+		buffer-metadata-none.c ../iiod-client.c
 		../iiod-command-batch.c ../lock.c ../utilities.c
 		${BISON_parser_OUTPUTS} ${FLEX_lexer_OUTPUTS})
 	target_include_directories(test_metadata_drain_server PRIVATE

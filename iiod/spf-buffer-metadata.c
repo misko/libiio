@@ -101,7 +101,118 @@ struct spf_iiod_metadata_context {
 	bool hop_device_opened;
 	bool hop_session_initialized;
 #endif
+	bool scan_enabled;
+	bool scan_started;
+	bool scan_thread_live;
+	bool scan_cancel_requested;
+	bool scan_finished;
+	unsigned int scan_kernel_buffers;
+	int scan_error;
+	pthread_t scan_thread;
+	pthread_mutex_t scan_lock;
+	struct spf_scan_setup scan_setup;
+	struct spf_scan_radio scan_radio;
+	struct spf_scan_session *scan_session;
+	uint64_t scan_counter_anchor;
 };
+
+static int scan_release_block(void *context, uintptr_t token)
+{
+	(void)context;
+	return iio_buffer_block_release((struct iio_buffer_block *)token);
+}
+
+static int scan_open(const struct iio_device *dev, size_t samples_count,
+		const uint32_t *mask, size_t words, size_t scan_bytes,
+		const void *request, size_t request_bytes, void **provider_context,
+		size_t *extra_samples)
+{
+	struct spf_scan_session_runtime runtime;
+	struct spf_buffer_layout layout;
+	struct spf_iiod_metadata_context *ctx;
+	const struct iio_context *iio_ctx;
+	struct iio_channel *rx0;
+	long long rate, bandwidth;
+	unsigned int buffers;
+	int ret;
+
+	if (!iio_device_get_name(dev) ||
+	    strcmp(iio_device_get_name(dev), "cf-ad9361-lpc"))
+		return -ENODEV;
+	ret = spf_buffer_layout_resolve(samples_count, mask, words, scan_bytes,
+					&layout);
+	if (ret)
+		return ret;
+	if (layout.enabled_scan_mask != 3 || layout.receiver_count != 1)
+		return -EINVAL;
+	ctx = calloc(1, sizeof(*ctx));
+	if (!ctx)
+		return -ENOMEM;
+	ret = spf_scan_setup_decode(&ctx->scan_setup, request, request_bytes);
+	if (ret)
+		goto error;
+	ctx->rx = (struct iio_device *)dev;
+	ctx->layout = layout;
+	ctx->samples_per_channel = (uint32_t)samples_count;
+	iio_ctx = iio_device_get_context(dev);
+	ctx->phy = iio_context_find_device(iio_ctx, "ad9361-phy");
+	rx0 = ctx->phy ? iio_device_find_channel(ctx->phy, "voltage0", false) : NULL;
+	if (!rx0 || iio_channel_attr_read_longlong(rx0, "sampling_frequency",
+						  &rate) ||
+	    iio_channel_attr_read_longlong(rx0, "rf_bandwidth", &bandwidth) ||
+	    rate != ctx->scan_setup.source_rate_hz ||
+	    bandwidth != ctx->scan_setup.analog_bandwidth_hz) {
+		ret = -ERANGE;
+		goto error;
+	}
+	buffers = iio_device_get_kernel_buffers_count(dev);
+	if (buffers < 4 || buffers > SPF_VISIT_QUEUE_MAX_BLOCKS) {
+		ret = -ENOSPC;
+		goto error;
+	}
+	ctx->counter_fd = open("/dev/tandem-agc-events", O_RDWR | O_CLOEXEC);
+	if (ctx->counter_fd < 0) {
+		ret = -errno;
+		goto error;
+	}
+	ret = spf_scan_radio_init(&ctx->scan_radio, ctx->counter_fd, NULL);
+	if (ret)
+		goto error_close;
+	runtime = (struct spf_scan_session_runtime) {
+		.block_count = buffers,
+		.headroom_blocks = 2,
+		.block_samples = (uint32_t)samples_count,
+		.drain_bytes_per_second = UINT64_C(60000000),
+		.release_block = scan_release_block,
+	};
+	ret = spf_scan_session_create(&ctx->scan_session, &ctx->scan_setup,
+				      &runtime, &ctx->scan_radio, 0);
+	if (ret)
+		goto error_close;
+	ret = spf_scan_session_counter(ctx->scan_session,
+				       &ctx->scan_counter_anchor);
+	if (ret)
+		goto error_session;
+	ret = pthread_mutex_init(&ctx->scan_lock, NULL);
+	if (ret) {
+		ret = -ret;
+		goto error_session;
+	}
+	ctx->scan_enabled = true;
+	ctx->scan_kernel_buffers = buffers;
+	*provider_context = ctx;
+	*extra_samples = layout.extra_samples;
+	return 0;
+
+error_session:
+	(void)spf_scan_session_cancel(ctx->scan_session, 0);
+	(void)spf_scan_session_destroy(ctx->scan_session);
+error_close:
+	close(ctx->counter_fd);
+error:
+	free(ctx);
+	return ret;
+}
 
 #ifdef IIOD_HAS_BUFFER_PERSISTENT_HOP
 static size_t hop_sidecar_capacity(const struct spf_iiod_metadata_context *ctx)
@@ -319,6 +430,11 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 		!extra_samples || !burst_plan)
 		return -EINVAL;
 	memset(burst_plan, 0, sizeof(*burst_plan));
+	if (request_bytes >= 4 &&
+	    spf_counter_read32(request) == UINT32_C(0x51535053))
+		return scan_open(dev, samples_count, mask, words, scan_bytes,
+				 request, request_bytes, provider_context,
+				 extra_samples);
 	if (request_bytes >= 4 && spf_counter_read32(request) == SPF_COUNTER_REQUEST_MAGIC)
 		return counter_open(dev, samples_count, mask, words, scan_bytes, request,
 				    request_bytes, provider_context, extra_samples);
@@ -744,6 +860,8 @@ int iiod_buffer_metadata_buffer_opened(void *provider_context,
 
 	if (!ctx || !kernel_buffers_count)
 		return -EINVAL;
+	if (ctx->scan_enabled)
+		return kernel_buffers_count == ctx->scan_kernel_buffers ? 0 : -ENOSPC;
 	if (ctx->counter_only)
 		return 0;
 	ret = spf_sampler_coverage_plan_compute(ctx->samples_per_channel,
@@ -780,6 +898,8 @@ int iiod_buffer_metadata_before_refill(void *provider_context)
 
 	if (!ctx)
 		return -EINVAL;
+	if (ctx->scan_enabled)
+		return 0;
 	if (ctx->counter_only)
 		return 0;
 	/* The first dequeue consumes an already queued block. Every later refill
@@ -803,6 +923,8 @@ int iiod_buffer_metadata_after_refill(void *provider_context)
 
 	if (!ctx)
 		return -EINVAL;
+	if (ctx->scan_enabled)
+		return 0;
 	if (ctx->counter_only)
 		return 0;
 	if (ctx->refills_started > 1 &&
@@ -829,6 +951,23 @@ void iiod_buffer_metadata_close(void *provider_context)
 	struct spf_iiod_metadata_context *ctx = provider_context;
 	if (!ctx)
 		return;
+	if (ctx->scan_enabled) {
+		struct spf_scan_session_output output;
+		struct spf_scan_terminal terminal;
+
+		(void)iiod_buffer_metadata_scan_cancel(ctx);
+		pthread_mutex_lock(&ctx->scan_lock);
+		while (!spf_scan_session_take_output(ctx->scan_session, &output))
+			(void)spf_scan_session_complete_output(ctx->scan_session,
+						       output.record.visit);
+		(void)spf_scan_session_terminal(ctx->scan_session, &terminal);
+		(void)spf_scan_session_destroy(ctx->scan_session);
+		pthread_mutex_unlock(&ctx->scan_lock);
+		pthread_mutex_destroy(&ctx->scan_lock);
+		close(ctx->counter_fd);
+		free(ctx);
+		return;
+	}
 	if (ctx->counter_only) {
 		close(ctx->counter_fd);
 		free(ctx);
@@ -874,6 +1013,311 @@ void iiod_buffer_metadata_close(void *provider_context)
 	free(ctx);
 }
 
+static void *scan_scheduler(void *opaque)
+{
+	struct spf_iiod_metadata_context *ctx = opaque;
+	uint64_t boundary = 0, now = 0;
+	struct timespec pause = { .tv_sec = 0, .tv_nsec = 500000 };
+	int ret;
+
+	pthread_mutex_lock(&ctx->scan_lock);
+	ret = spf_scan_session_next_boundary(ctx->scan_session, &boundary);
+	if (ret) {
+		(void)spf_scan_session_fail(ctx->scan_session,
+					    ctx->scan_counter_anchor, ret);
+		ctx->scan_error = ret;
+		ctx->scan_finished = true;
+		pthread_mutex_unlock(&ctx->scan_lock);
+		return NULL;
+	}
+	pthread_mutex_unlock(&ctx->scan_lock);
+
+	for (;;) {
+		pthread_mutex_lock(&ctx->scan_lock);
+		ret = spf_scan_radio_snapshot(&ctx->scan_radio,
+					      ctx->scan_counter_anchor, &now);
+		if (!ret)
+			ctx->scan_counter_anchor = now;
+		if (ret) {
+			(void)spf_scan_session_fail(ctx->scan_session,
+						    ctx->scan_counter_anchor, ret);
+			ctx->scan_error = ret;
+			ctx->scan_finished = true;
+			pthread_mutex_unlock(&ctx->scan_lock);
+			break;
+		}
+		if (ctx->scan_cancel_requested) {
+			ret = spf_scan_session_cancel(ctx->scan_session, now);
+			ctx->scan_error = ret && ret != -EINVAL ? ret : -ECANCELED;
+			ctx->scan_finished = true;
+			pthread_mutex_unlock(&ctx->scan_lock);
+			break;
+		}
+		if (!boundary || now >= boundary) {
+			struct spf_scan_choice choice;
+
+			ret = spf_scan_session_schedule(ctx->scan_session, now, now,
+							&choice);
+			if (ret == -ENODATA) {
+				ret = spf_scan_session_stop(ctx->scan_session, now);
+				ctx->scan_error = ret;
+				ctx->scan_finished = true;
+				pthread_mutex_unlock(&ctx->scan_lock);
+				break;
+			}
+			if (ret) {
+				ctx->scan_error = ret;
+				ctx->scan_finished = true;
+				pthread_mutex_unlock(&ctx->scan_lock);
+				break;
+			}
+			ret = spf_scan_session_next_boundary(ctx->scan_session,
+							     &boundary);
+			if (ret) {
+				(void)spf_scan_session_fail(ctx->scan_session, now, ret);
+				ctx->scan_error = ret;
+				ctx->scan_finished = true;
+				pthread_mutex_unlock(&ctx->scan_lock);
+				break;
+			}
+		}
+		pthread_mutex_unlock(&ctx->scan_lock);
+		(void)nanosleep(&pause, NULL);
+	}
+	return NULL;
+}
+
+bool iiod_buffer_metadata_scan_enabled(void *provider_context)
+{
+	const struct spf_iiod_metadata_context *ctx = provider_context;
+
+	return ctx && ctx->scan_enabled;
+}
+
+int iiod_buffer_metadata_scan_start(void *provider_context)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+
+	if (!ctx || !ctx->scan_enabled)
+		return -EOPNOTSUPP;
+	pthread_mutex_lock(&ctx->scan_lock);
+	if (ctx->scan_started) {
+		pthread_mutex_unlock(&ctx->scan_lock);
+		return -EALREADY;
+	}
+	ctx->scan_started = true;
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return 0;
+}
+
+int iiod_buffer_metadata_scan_feed(void *provider_context,
+		struct iio_buffer_block *block, size_t raw_bytes)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	struct spf_buffer_sequence_result sequence;
+	struct spf_scan_choice first_choice;
+	const uint8_t *raw;
+	uint64_t first;
+	bool sequence_committed = false;
+	int ret;
+
+	if (!ctx || !ctx->scan_enabled || !block)
+		return -EINVAL;
+	if (raw_bytes != ctx->layout.raw_bytes)
+		return -EIO;
+	raw = iio_buffer_block_start(block);
+	if (!raw)
+		return -EIO;
+	first = spf_counter_read64(raw);
+	if (first < 2)
+		return -ERANGE;
+	first -= 2;
+	ret = spf_buffer_sequence_resolve(&ctx->sequence, first,
+					  ctx->samples_per_channel, &sequence);
+	if (ret)
+		return ret;
+	pthread_mutex_lock(&ctx->scan_lock);
+	if (!ctx->scan_started ||
+	    (ctx->scan_finished &&
+	     spf_scan_session_capture_complete(ctx->scan_session)))
+		ret = -ESHUTDOWN;
+	else if (!ctx->scan_thread_live && !ctx->scan_finished) {
+		/* The owner ioctls expose only the coherent low counter word.  The
+		 * first completed DMA block supplies its unambiguous 64-bit epoch.
+		 * Rebase and retune after that block, so pre-retune IQ can never be
+		 * attributed to visit zero. */
+		ret = spf_scan_session_rebase(ctx->scan_session,
+				first + ctx->samples_per_channel);
+		if (!ret)
+			ret = spf_scan_session_counter(ctx->scan_session,
+						       &ctx->scan_counter_anchor);
+		if (!ret)
+			ret = spf_scan_session_schedule(ctx->scan_session,
+				ctx->scan_counter_anchor, ctx->scan_counter_anchor,
+				&first_choice);
+		if (!ret)
+			ret = spf_scan_session_feed(ctx->scan_session,
+				(uintptr_t)block, raw + 8, first,
+				ctx->samples_per_channel);
+		if (!ret) {
+			spf_buffer_sequence_commit(&ctx->sequence, &sequence);
+			sequence_committed = true;
+			ret = pthread_create(&ctx->scan_thread, NULL,
+					     scan_scheduler, ctx);
+			if (!ret)
+				ctx->scan_thread_live = true;
+			else
+				ret = -ret;
+		}
+		if (ret) {
+			(void)spf_scan_session_fail(ctx->scan_session,
+				ctx->scan_counter_anchor, ret);
+			ctx->scan_error = ret;
+			ctx->scan_finished = true;
+		}
+	} else
+		ret = spf_scan_session_feed(ctx->scan_session, (uintptr_t)block,
+				raw + 8, first, ctx->samples_per_channel);
+	if (!ret && !sequence_committed)
+		spf_buffer_sequence_commit(&ctx->sequence, &sequence);
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return ret;
+}
+
+int iiod_buffer_metadata_scan_take(void *provider_context,
+		struct spf_scan_session_output *output)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	int ret;
+
+	if (!ctx || !ctx->scan_enabled)
+		return -EOPNOTSUPP;
+	pthread_mutex_lock(&ctx->scan_lock);
+	ret = spf_scan_session_take_output(ctx->scan_session, output);
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return ret;
+}
+
+int iiod_buffer_metadata_scan_complete(void *provider_context, uint64_t visit)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	int ret;
+
+	if (!ctx || !ctx->scan_enabled)
+		return -EOPNOTSUPP;
+	pthread_mutex_lock(&ctx->scan_lock);
+	ret = spf_scan_session_complete_output(ctx->scan_session, visit);
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return ret;
+}
+
+int iiod_buffer_metadata_scan_abort(void *provider_context, uint64_t visit,
+		int transport_error)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	int ret;
+
+	if (!ctx || !ctx->scan_enabled)
+		return -EOPNOTSUPP;
+	pthread_mutex_lock(&ctx->scan_lock);
+	ret = spf_scan_session_abort_output(ctx->scan_session, visit,
+					     transport_error);
+	ctx->scan_cancel_requested = true;
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return ret;
+}
+
+enum spf_scan_feedback_result iiod_buffer_metadata_scan_feedback(
+		void *provider_context, const struct spf_scan_feedback *feedback)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	enum spf_scan_feedback_result result;
+	uint64_t now;
+	int ret;
+
+	if (!ctx || !ctx->scan_enabled)
+		return SPF_SCAN_REJECTED;
+	pthread_mutex_lock(&ctx->scan_lock);
+	/* The scheduler and DMA feed already advance the session's coherent
+	 * source-time watermark under this mutex. A second owner ioctl from the
+	 * feedback TCP path races the active producer without adding temporal
+	 * information: delivered feedback necessarily follows its closed dwell. */
+	ret = spf_scan_session_counter(ctx->scan_session, &now);
+	if (!ret)
+		result = spf_scan_session_feedback(ctx->scan_session, feedback, now);
+	else
+		result = SPF_SCAN_REJECTED;
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return result;
+}
+
+int iiod_buffer_metadata_scan_take_ack(void *provider_context,
+		struct spf_scan_ack *ack)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	int ret;
+
+	if (!ctx || !ctx->scan_enabled)
+		return -EOPNOTSUPP;
+	pthread_mutex_lock(&ctx->scan_lock);
+	ret = spf_scan_session_take_ack(ctx->scan_session, ack);
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return ret;
+}
+
+int iiod_buffer_metadata_scan_terminal(void *provider_context,
+		struct spf_scan_terminal *terminal)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	int ret;
+
+	if (!ctx || !ctx->scan_enabled)
+		return -EOPNOTSUPP;
+	pthread_mutex_lock(&ctx->scan_lock);
+	ret = spf_scan_session_terminal(ctx->scan_session, terminal);
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return ret;
+}
+
+int iiod_buffer_metadata_scan_cancel(void *provider_context)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	bool join;
+
+	if (!ctx || !ctx->scan_enabled)
+		return -EOPNOTSUPP;
+	pthread_mutex_lock(&ctx->scan_lock);
+	ctx->scan_cancel_requested = true;
+	join = ctx->scan_thread_live;
+	ctx->scan_thread_live = false;
+	if (!ctx->scan_started || (!join && !ctx->scan_finished)) {
+		(void)spf_scan_session_cancel(ctx->scan_session,
+					      ctx->scan_counter_anchor);
+		ctx->scan_finished = true;
+	}
+	pthread_mutex_unlock(&ctx->scan_lock);
+	if (join)
+		(void)pthread_join(ctx->scan_thread, NULL);
+	return 0;
+}
+
+int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes)
+{
+	struct spf_scan_caps caps;
+	struct spf_scan_radio radio;
+	int fd, ret;
+
+	fd = open("/dev/tandem-agc-events", O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return -errno;
+	ret = spf_scan_radio_init(&radio, fd, NULL);
+	close(fd);
+	if (ret)
+		return ret;
+	spf_scan_caps_default(&caps);
+	return spf_scan_caps_encode(wire, bytes, &caps);
+}
+
 ssize_t iiod_buffer_metadata_get(void *provider_context,
 		const struct iio_device *dev, const struct iio_buffer *buffer,
 		size_t raw_bytes, void *metadata, size_t metadata_capacity,
@@ -907,6 +1351,8 @@ ssize_t iiod_buffer_metadata_get(void *provider_context,
 	if (!ctx || dev != ctx->rx || !buffer || !metadata || !iq_offset ||
 		!iq_bytes)
 		return -EINVAL;
+	if (ctx->scan_enabled)
+		return -EOPNOTSUPP;
 	if (ctx->counter_only) {
 		if (raw_bytes != ctx->layout.raw_bytes)
 			return -EIO;

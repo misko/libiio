@@ -108,5 +108,87 @@ int iiod_buffer_metadata_rebase_frame(void *provider_context,
 	return -ENOSYS;
 }
 
+bool iiod_buffer_metadata_scan_enabled(void *provider_context)
+{
+	(void)provider_context;
+	return false;
+}
+
+int iiod_buffer_metadata_scan_start(void *provider_context)
+{
+	(void)provider_context;
+	return -EOPNOTSUPP;
+}
+
+int iiod_buffer_metadata_scan_feed(void *provider_context,
+		struct iio_buffer_block *block, size_t raw_bytes)
+{
+	(void)provider_context;
+	(void)block;
+	(void)raw_bytes;
+	return -EOPNOTSUPP;
+}
+
+int iiod_buffer_metadata_scan_take(void *provider_context,
+		struct spf_scan_session_output *output)
+{
+	(void)provider_context;
+	(void)output;
+	return -EOPNOTSUPP;
+}
+
+int iiod_buffer_metadata_scan_complete(void *provider_context, uint64_t visit)
+{
+	(void)provider_context;
+	(void)visit;
+	return -EOPNOTSUPP;
+}
+
+int iiod_buffer_metadata_scan_abort(void *provider_context, uint64_t visit,
+		int transport_error)
+{
+	(void)provider_context;
+	(void)visit;
+	(void)transport_error;
+	return -EOPNOTSUPP;
+}
+
+enum spf_scan_feedback_result iiod_buffer_metadata_scan_feedback(
+		void *provider_context, const struct spf_scan_feedback *feedback)
+{
+	(void)provider_context;
+	(void)feedback;
+	return SPF_SCAN_REJECTED;
+}
+
+int iiod_buffer_metadata_scan_take_ack(void *provider_context,
+		struct spf_scan_ack *ack)
+{
+	(void)provider_context;
+	(void)ack;
+	return -EOPNOTSUPP;
+}
+
+int iiod_buffer_metadata_scan_terminal(void *provider_context,
+		struct spf_scan_terminal *terminal)
+{
+	(void)provider_context;
+	(void)terminal;
+	return -EOPNOTSUPP;
+}
+
+int iiod_buffer_metadata_scan_cancel(void *provider_context)
+{
+	(void)provider_context;
+	return -EOPNOTSUPP;
+}
+
+int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes)
+{
+	(void)wire;
+	(void)bytes;
+	return -EOPNOTSUPP;
+}
+
 int iiod_buffer_metadata_feedback(void *context, const void *feedback, size_t bytes)
 { (void)context; (void)feedback; (void)bytes; return -ENOSYS; }
