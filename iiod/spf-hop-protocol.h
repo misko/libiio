@@ -52,9 +52,13 @@ enum spf_hop_status_flag_v1 {
 enum spf_hop_event_flag_v1 {
 	SPF_HOP_EVENT_COUNTER_BOUNDS_ATTESTED = UINT8_C(1) << 0,
 	SPF_HOP_EVENT_LO_ATTESTED = UINT8_C(1) << 1,
+	/* A logical adaptive decision retained the already-attested profile.  No
+	 * Fast Lock operation occurred, so the interval is continuous valid IQ. */
+	SPF_HOP_EVENT_NO_RECALL = UINT8_C(1) << 2,
 };
 
 #define SPF_HOP_EVENT_FLAGS_V1 UINT8_C(0x03)
+#define SPF_HOP_EVENT_FLAGS_ALLOWED_V1 UINT8_C(0x07)
 #define SPF_HOP_PROFILE_NONE UINT8_C(0xff)
 
 enum spf_hop_event_kind_v1 {
