@@ -186,7 +186,12 @@ static int scan_open(const struct iio_device *dev, size_t samples_count,
 		goto error_close;
 	runtime = (struct spf_scan_session_runtime) {
 		.block_count = buffers,
-		.headroom_blocks = 2,
+		/* A Pluto's ADC DMA queue has four blocks.  A full dwell reserves
+		 * its data block plus the conservative boundary block, so retaining
+		 * two blocks as headroom leaves no forward-progress slot once the
+		 * first dwell is queued.  Larger queues retain the two-block margin;
+		 * the native four-block queue retains one rearm block. */
+		.headroom_blocks = buffers == 4 ? 1 : 2,
 		.block_samples = (uint32_t)samples_count,
 		.bytes_per_sample = layout.iq_bytes_per_sample,
 		.drain_bytes_per_second = UINT64_C(60000000),

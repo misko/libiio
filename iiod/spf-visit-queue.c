@@ -40,7 +40,7 @@ int spf_visit_queue_create(struct spf_visit_queue **out,
 {
 	struct spf_visit_queue *q;
 	if (!out || !c || !release || c->block_count < 4 || c->block_count > 64 ||
-		c->headroom_blocks < 2 || c->headroom_blocks >= c->block_count ||
+		!c->headroom_blocks || c->headroom_blocks >= c->block_count ||
 		!c->maximum_visits || c->maximum_visits > SPF_VISIT_QUEUE_MAX_VISITS ||
 		!c->block_samples || c->block_samples > 1000000 ||
 		(c->source_rate_hz != 2500000 && c->source_rate_hz != 10000000 && c->source_rate_hz != 15000000 &&
