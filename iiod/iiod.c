@@ -809,7 +809,7 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		if (ret >= 0)
 			ret = iio_context_add_attr(ctx,
 				"iio,adaptive-scan-rates-hz",
-				"10000000,15000000,20000000,30000000");
+				"2500000,10000000,15000000,20000000,30000000");
 		if (ret < 0) {
 			iio_context_destroy(ctx);
 			return EXIT_FAILURE;
