@@ -14,6 +14,7 @@ static uint64_t mock_now;
 static uint64_t configured_frequency[8];
 static unsigned released_blocks;
 static int fail_recall;
+static unsigned recall_count;
 
 static int mock_ioctl(int fd, unsigned long request, void *argument)
 {
@@ -45,6 +46,7 @@ static int mock_ioctl(int fd, unsigned long request, void *argument)
 	if (request == ADI_RX_COUNTER_IOC_RECALL) {
 		struct adi_rx_counter_scan_recall *recall = argument;
 
+		recall_count++;
 		if (fail_recall) {
 			errno = EIO;
 			return -1;
@@ -140,6 +142,7 @@ static void test_three_visits_feedback_and_early_restore(void)
 	const uint64_t base = UINT64_C(0x1ffff0000);
 	struct spf_scan_session_runtime runtime = {
 		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.bytes_per_sample = 4,
 		.drain_bytes_per_second = 60000000, .release_block = release_block,
 	};
 	struct spf_scan_feedback feedback;
@@ -201,6 +204,7 @@ static void test_recall_failure_cancels_and_restores(void)
 	const uint64_t base = UINT64_C(0x2ffff0000);
 	struct spf_scan_session_runtime runtime = {
 		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.bytes_per_sample = 4,
 		.drain_bytes_per_second = 60000000, .release_block = release_block,
 	};
 	struct spf_scan_session_output output;
@@ -229,11 +233,63 @@ static void test_recall_failure_cancels_and_restores(void)
 	assert(spf_scan_session_destroy(session) == 0);
 }
 
+static void test_dual_rx_uses_one_shared_recall_and_eight_byte_frames(void)
+{
+	const uint64_t base = UINT64_C(0x7ffff0000);
+	struct spf_scan_session_runtime runtime = {
+		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.bytes_per_sample = 8, .drain_bytes_per_second = 60000000,
+		.release_block = release_block,
+	};
+	struct spf_scan_session_output output;
+	struct spf_scan_choice choice;
+	struct spf_scan_session *session;
+	struct spf_scan_radio radio;
+	struct spf_scan_setup request = setup();
+	static uint64_t data;
+	uintptr_t token = 900;
+	uint64_t boundary;
+
+	request.source_rate_hz = 2500000;
+	request.analog_bandwidth_hz = 2500000;
+	request.rx_mask = SPF_SCAN_RX1_RX2;
+	request.target_count = 1;
+	memset(&request.targets[1], 0, sizeof(request.targets[1]));
+	assert(spf_scan_setup_validate(&request) == 0);
+	assert(spf_scan_radio_init(&radio, 29, mock_ioctl) == 0);
+	mock_now = base;
+	recall_count = 0;
+	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
+	assert(spf_scan_session_schedule(session, base, base, &choice) == 0);
+	assert(recall_count == 1);
+	assert(spf_scan_session_next_boundary(session, &boundary) == 0);
+	assert(boundary == choice.selection_counter + 75000);
+	assert(spf_scan_session_feed(session, token++, &data, base, 100000) == 0);
+	/* The mocked DMA block already extends past the nominal boundary; schedule
+	 * at its coherent source watermark as the live scheduler does. */
+	mock_now = base + 100000;
+	assert(spf_scan_session_schedule(session, mock_now, mock_now, &choice) == 0);
+	assert(recall_count == 1);
+	assert(spf_scan_session_next_boundary(session, &boundary) == 0);
+	assert(boundary == mock_now + 50000);
+	assert(spf_scan_session_take_output(session, &output) == 0);
+	assert(output.record.visit == 0);
+	assert(output.record.result == SPF_VISIT_COMPLETE);
+	assert(output.record.iq_bytes == (output.record.valid_end -
+		output.record.valid_start) * 8);
+	assert(spf_scan_session_complete_output(session, output.record.visit) == 0);
+	assert(spf_scan_session_cancel(session, boundary) == 0);
+	assert(spf_scan_session_take_output(session, &output) == 0);
+	assert(spf_scan_session_complete_output(session, output.record.visit) == 0);
+	assert(spf_scan_session_destroy(session) == 0);
+}
+
 static void test_transport_failure_cancels_current_and_remainder(void)
 {
 	const uint64_t base = UINT64_C(0x3ffff0000);
 	struct spf_scan_session_runtime runtime = {
 		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.bytes_per_sample = 4,
 		.drain_bytes_per_second = 60000000, .release_block = release_block,
 	};
 	struct spf_scan_session_output output;
@@ -270,6 +326,7 @@ static void test_graceful_cancel_restores_and_accounts(void)
 	const uint64_t base = UINT64_C(0x4ffff0000);
 	struct spf_scan_session_runtime runtime = {
 		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.bytes_per_sample = 4,
 		.drain_bytes_per_second = 60000000, .release_block = release_block,
 	};
 	struct spf_scan_session_output output;
@@ -301,6 +358,7 @@ static void test_rebase_uses_full_dma_epoch_before_first_visit(void)
 	const uint64_t anchor = epoch + UINT64_C(0x1000);
 	struct spf_scan_session_runtime runtime = {
 		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.bytes_per_sample = 4,
 		.drain_bytes_per_second = 60000000, .release_block = release_block,
 	};
 	struct spf_scan_session_output output;
@@ -334,6 +392,7 @@ static void test_reservation_failure_never_serializes_admitted_placeholder(void)
 	const uint64_t base = UINT64_C(0x6ffff0000);
 	struct spf_scan_session_runtime runtime = {
 		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.bytes_per_sample = 4,
 		.drain_bytes_per_second = 60000000, .release_block = release_block,
 	};
 	struct spf_scan_session_output output;
@@ -375,6 +434,7 @@ int main(void)
 {
 	test_three_visits_feedback_and_early_restore();
 	test_recall_failure_cancels_and_restores();
+	test_dual_rx_uses_one_shared_recall_and_eight_byte_frames();
 	test_transport_failure_cancels_current_and_remainder();
 	test_graceful_cancel_restores_and_accounts();
 	test_rebase_uses_full_dma_epoch_before_first_visit();

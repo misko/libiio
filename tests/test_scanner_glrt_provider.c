@@ -287,7 +287,7 @@ static size_t make_request(uint8_t *packet, bool glrt)
 	memcpy(legacy, &tandem, 104);
 	assert(spf_hop_request_v1_encode(legacy + 104, SPF_HOP_REQUEST_BYTES, &hop) == 0);
 	if (!glrt) { memcpy(packet, legacy, sizeof(legacy)); return sizeof(legacy); }
-	leo_scanner_glrt_request_v1 request = {.generation = 9, .rx = 1,
+	leo_scanner_glrt_request_v1 request = {.generation = 9, .rx = 0,
 		.legacy_request = legacy, .legacy_bytes = sizeof(legacy)};
 	/* This fixture uses pinned test-only identities, never release identities. */
 	for (j = 0; j < 32; j++) {

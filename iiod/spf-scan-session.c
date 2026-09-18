@@ -23,14 +23,17 @@ struct spf_scan_session {
 	struct spf_scan_policy *policy;
 	struct spf_visit_queue *queue;
 	struct spf_scan_radio *radio;
+	uint32_t bytes_per_sample;
 	struct ledger_entry *ledger;
 	size_t ledger_capacity, ledger_count, active, output_index;
 	uint64_t latest_counter, final_counter;
+	uint32_t current_profile;
 	uint64_t delivered, skipped, invalid, cancelled, iq_bytes;
 	struct spf_scan_radio_release_receipt restoration;
 	enum spf_visit_result inflight_result;
 	int error;
 	bool stopping, failed, cancelled_session, released, output_inflight;
+	bool current_profile_valid;
 	bool terminal_taken;
 };
 
@@ -115,7 +118,8 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	uint64_t actual_start;
 	int ret;
 
-	if (!out || !setup || !runtime || !radio || !runtime->release_block)
+	if (!out || !setup || !runtime || !radio || !runtime->release_block ||
+	    (runtime->bytes_per_sample != 4 && runtime->bytes_per_sample != 8))
 		return -EINVAL;
 	ret = spf_scan_setup_validate(setup);
 	if (ret)
@@ -133,6 +137,7 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	}
 	session->setup = *setup;
 	session->radio = radio;
+	session->bytes_per_sample = runtime->bytes_per_sample;
 	session->ledger_capacity = capacity;
 	session->active = NO_ACTIVE;
 	session->latest_counter = start_counter;
@@ -142,7 +147,9 @@ int spf_scan_session_create(struct spf_scan_session **out,
 		profiles[i].crc32 = setup->targets[i].profile_crc32;
 	}
 	ret = spf_scan_radio_acquire(radio, setup->source_rate_hz,
-				     runtime->block_samples);
+				     runtime->block_samples,
+				     setup->rx_mask == SPF_SCAN_RX1_RX2 ?
+				     UINT32_C(0x0f) : UINT32_C(0x03));
 	if (ret)
 		goto restore;
 	ret = spf_scan_radio_configure(radio, profiles, setup->target_count);
@@ -161,6 +168,7 @@ int spf_scan_session_create(struct spf_scan_session **out,
 		.headroom_blocks = runtime->headroom_blocks,
 		.maximum_visits = setup->maximum_queue_visits,
 		.block_samples = runtime->block_samples,
+		.bytes_per_sample = runtime->bytes_per_sample,
 		.source_rate_hz = setup->source_rate_hz,
 		.maximum_bytes = setup->maximum_queue_bytes,
 		.maximum_age_ticks = (uint64_t)setup->source_rate_hz *
@@ -262,15 +270,33 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 	}
 	entry->admission = admission;
 	entry->queued = admission == SPF_VISIT_ADMITTED;
-	ret = spf_scan_radio_recall(session->radio,
+	if (session->current_profile_valid &&
+	    session->current_profile == session->setup.targets[selected.target].profile) {
+		/* The shared LO is already at this target.  Do not manufacture an
+		 * invalid interval or perform a redundant Fast Lock recall. */
+		recall = (struct spf_scan_radio_receipt) {
+			.profile = session->current_profile,
+			.frequency_hz = session->setup.targets[selected.target].frequency_hz,
+			.profile_crc32 = session->setup.targets[selected.target].profile_crc32,
+			.counter_before = counter_anchor,
+			.counter_after = counter_anchor,
+		};
+	} else {
+		ret = spf_scan_radio_recall(session->radio,
 			session->setup.targets[selected.target].profile,
 			counter_anchor, &recall);
-	if (ret) {
-		make_failed_entry_coherent(session, entry, now, entry->queued);
-		return fail_session(session, ret, now);
+		if (ret) {
+			make_failed_entry_coherent(session, entry, now, entry->queued);
+			return fail_session(session, ret, now);
+		}
+		session->current_profile = recall.profile;
+		session->current_profile_valid = true;
 	}
 	entry->recall = recall;
-	transition = ticks(session, session->setup.transition_budget_ms);
+	transition = session->current_profile_valid &&
+		session->current_profile == session->setup.targets[selected.target].profile &&
+		recall.counter_before == recall.counter_after ? 0 :
+		ticks(session, session->setup.transition_budget_ms);
 	if (selected.selection_counter > UINT64_MAX - transition) {
 		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session(session, -EOVERFLOW, recall.counter_after);
@@ -387,7 +413,7 @@ static void make_record(const struct spf_scan_session *session,
 		.valid_end = entry->valid_end,
 		.frequency_hz = target->frequency_hz,
 		.iq_bytes = result == SPF_VISIT_COMPLETE ?
-			(entry->valid_end - entry->valid_start) * 4 : 0,
+			(entry->valid_end - entry->valid_start) * session->bytes_per_sample : 0,
 		.analog_bandwidth_hz = session->setup.analog_bandwidth_hz,
 		.source_rate_hz = session->setup.source_rate_hz,
 		.target = entry->choice.target,
@@ -475,7 +501,8 @@ static int finish_output(struct spf_scan_session *session, uint64_t visit,
 	}
 	if (result == SPF_VISIT_COMPLETE) {
 		session->delivered++;
-		session->iq_bytes += (entry->valid_end - entry->valid_start) * 4;
+		session->iq_bytes += (entry->valid_end - entry->valid_start) *
+			session->bytes_per_sample;
 	} else if (result == SPF_VISIT_SKIP_CAPACITY || result == SPF_VISIT_SKIP_AGE) {
 		session->skipped++;
 	} else if (result == SPF_VISIT_INVALID_GAP) {

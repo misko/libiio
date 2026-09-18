@@ -143,7 +143,8 @@ static int scan_open(const struct iio_device *dev, size_t samples_count,
 					&layout);
 	if (ret)
 		return ret;
-	if (layout.enabled_scan_mask != 3 || layout.receiver_count != 1)
+	if ((layout.enabled_scan_mask != 3 && layout.enabled_scan_mask != 0x0f) ||
+	    (layout.receiver_count != 1 && layout.receiver_count != 2))
 		return -EINVAL;
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
@@ -153,6 +154,11 @@ static int scan_open(const struct iio_device *dev, size_t samples_count,
 		goto error;
 	ctx->rx = (struct iio_device *)dev;
 	ctx->layout = layout;
+	if ((ctx->scan_setup.rx_mask == SPF_SCAN_RX1 && layout.enabled_scan_mask != 3) ||
+	    (ctx->scan_setup.rx_mask == SPF_SCAN_RX1_RX2 && layout.enabled_scan_mask != 0x0f)) {
+		ret = -EINVAL;
+		goto error;
+	}
 	ctx->samples_per_channel = (uint32_t)samples_count;
 	iio_ctx = iio_device_get_context(dev);
 	ctx->phy = iio_context_find_device(iio_ctx, "ad9361-phy");
@@ -182,6 +188,7 @@ static int scan_open(const struct iio_device *dev, size_t samples_count,
 		.block_count = buffers,
 		.headroom_blocks = 2,
 		.block_samples = (uint32_t)samples_count,
+		.bytes_per_sample = layout.iq_bytes_per_sample,
 		.drain_bytes_per_second = UINT64_C(60000000),
 		.release_block = scan_release_block,
 	};

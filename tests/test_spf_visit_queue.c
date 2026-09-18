@@ -26,7 +26,7 @@ static int release(void *opaque, uintptr_t token)
 static struct spf_visit_queue_config config(void)
 {
 	struct spf_visit_queue_config c = {8, 2, 64, 100, 10000000, 200000000,
-		10000000, 60000000};
+		10000000, 60000000, 4};
 	return c;
 }
 static struct spf_visit_queue *create(struct fixture *f, struct spf_visit_queue_config c)

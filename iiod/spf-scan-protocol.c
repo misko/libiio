@@ -102,6 +102,7 @@ static bool digest_present(const uint8_t digest[32])
 static uint32_t rate_flag(uint32_t rate)
 {
 	switch (rate) {
+	case 2500000: return SPF_SCAN_RATE_2P5M;
 	case 10000000: return SPF_SCAN_RATE_10M;
 	case 15000000: return SPF_SCAN_RATE_15M;
 	case 20000000: return SPF_SCAN_RATE_20M;
@@ -116,7 +117,7 @@ void spf_scan_caps_default(struct spf_scan_caps *caps)
 		return;
 	*caps = (struct spf_scan_caps) {
 		.rate_mask = SPF_SCAN_RATE_MASK_FIXED,
-		.rx_mask = 1,
+		.rx_mask = SPF_SCAN_RX1_RX2,
 		.formats = SPF_SCAN_FORMAT_CI16,
 		.maximum_targets = SPF_SCAN_TARGETS,
 		.maximum_fastlock_profiles = SPF_SCAN_TARGETS,
@@ -136,7 +137,7 @@ void spf_scan_caps_default(struct spf_scan_caps *caps)
 static int caps_validate(const struct spf_scan_caps *caps)
 {
 	if (!caps || caps->rate_mask != SPF_SCAN_RATE_MASK_FIXED ||
-	    caps->rx_mask != 1 || caps->formats != SPF_SCAN_FORMAT_CI16 ||
+	    caps->rx_mask != SPF_SCAN_RX1_RX2 || caps->formats != SPF_SCAN_FORMAT_CI16 ||
 	    caps->maximum_targets != SPF_SCAN_TARGETS ||
 	    caps->maximum_fastlock_profiles != SPF_SCAN_TARGETS ||
 	    caps->minimum_dwell_ms != 20 || caps->maximum_dwell_ms != 240 ||
@@ -188,13 +189,15 @@ int spf_scan_setup_validate(const struct spf_scan_setup *setup)
 
 	if (!setup || !rate_flag(setup->source_rate_hz) ||
 	    setup->analog_bandwidth_hz < 200000 ||
-	    setup->analog_bandwidth_hz > 56000000 ||
+	    setup->analog_bandwidth_hz > setup->source_rate_hz ||
 	    !setup->maximum_queue_bytes ||
 	    setup->maximum_queue_bytes > UINT64_C(200000000) ||
 	    !setup->maximum_queue_age_ms || setup->maximum_queue_age_ms > 10000 ||
 	    !setup->maximum_queue_visits || setup->maximum_queue_visits > 64 ||
 	    !setup->target_count || setup->target_count > SPF_SCAN_TARGETS ||
-	    setup->rx_mask != 1 || setup->format != SPF_SCAN_FORMAT_CI16 ||
+	    (setup->rx_mask != SPF_SCAN_RX1 &&
+	     setup->rx_mask != SPF_SCAN_RX1_RX2) ||
+	    setup->format != SPF_SCAN_FORMAT_CI16 ||
 	    setup->flags != SPF_SCAN_SETUP_FLAGS ||
 	    !digest_present(setup->analysis_digest))
 		return -EINVAL;

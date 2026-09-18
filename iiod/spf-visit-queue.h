@@ -18,6 +18,7 @@ struct spf_visit_queue_config {
 	unsigned maximum_visits;
 	uint32_t block_samples, source_rate_hz;
 	uint64_t maximum_bytes, maximum_age_ticks, drain_bytes_per_second;
+	uint32_t bytes_per_sample;
 };
 struct spf_visit_slice {
 	uintptr_t token;

@@ -95,24 +95,27 @@ int spf_scan_radio_configure(struct spf_scan_radio *radio,
 }
 
 int spf_scan_radio_acquire(struct spf_scan_radio *radio, uint32_t source_rate_hz,
-			   uint32_t samples_per_block)
+			   uint32_t samples_per_block, uint32_t scan_mask)
 {
 	struct adi_rx_counter_request request = { 0 };
 
 	if (!radio || radio->acquired || radio->released || !source_rate_hz ||
-	    !samples_per_block || samples_per_block & 1U)
+	    !samples_per_block || samples_per_block & 1U ||
+	    (scan_mask != ADI_RX_COUNTER_SCAN_MASK_RX1 &&
+	     scan_mask != ADI_RX_COUNTER_SCAN_MASK_RX1_RX2))
 		return -EINVAL;
 	request.magic = ADI_RX_COUNTER_MAGIC;
 	request.version = ADI_RX_COUNTER_VERSION;
 	request.size = sizeof(request);
 	request.required_features = ADI_RX_COUNTER_FEATURES;
-	request.scan_mask = 3;
+	request.scan_mask = scan_mask;
 	request.sample_rate_hz = source_rate_hz;
 	request.samples_per_channel = samples_per_block;
 	if (radio->call_ioctl(radio->fd, ADI_RX_COUNTER_IOC_ACQUIRE,
 			      &request) < 0)
 		return -errno;
 	radio->acquired = true;
+	radio->scan_mask = scan_mask;
 	return 0;
 }
 

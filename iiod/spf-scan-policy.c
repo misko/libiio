@@ -50,7 +50,7 @@ int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
 		!c->decay_ms || c->decay_ms > 60000 ||
 		c->maximum_boost < 1 || c->maximum_boost > 16)
 		return -EINVAL;
-	if (c->source_rate_hz != 10000000 && c->source_rate_hz != 15000000 &&
+	if (c->source_rate_hz != 2500000 && c->source_rate_hz != 10000000 && c->source_rate_hz != 15000000 &&
 		c->source_rate_hz != 20000000 && c->source_rate_hz != 30000000)
 		return -EOPNOTSUPP;
 	for (i = 0; i < sizeof(c->analysis_digest); i++)
