@@ -106,5 +106,7 @@ int iiod_buffer_metadata_scan_terminal(void *provider_context,
 		struct spf_scan_terminal *terminal);
 int iiod_buffer_metadata_scan_cancel(void *provider_context);
 int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes);
+int iiod_buffer_metadata_scan_time(void *provider_context,
+		const struct spf_scan_time_query *query, struct spf_scan_time *result);
 
 #endif

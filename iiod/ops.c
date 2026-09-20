@@ -3905,6 +3905,34 @@ ssize_t read_adaptive_scan_capabilities(struct parser_pdata *pdata,
 	return ret < 0 ? ret : (ssize_t)sizeof(wire);
 }
 
+ssize_t read_adaptive_scan_time(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t bytes)
+{
+	uint8_t query_wire[SPF_SCAN_TIME_QUERY_BYTES], wire[SPF_SCAN_TIME_BYTES];
+	struct spf_scan_time_query query;
+	struct spf_scan_time result;
+	struct DevEntry *entry;
+	ssize_t ret;
+	if (bytes != sizeof(query_wire)) ret = -EINVAL;
+	else if ((ret = read_all(pdata, query_wire, sizeof(query_wire))) < 0) ;
+	else if ((ret = spf_scan_time_query_decode(&query, query_wire, sizeof(query_wire)))) ;
+	else if (!(entry = scan_control_entry_get(dev))) ret = -ENODATA;
+	else {
+		ret = iiod_buffer_metadata_scan_time(entry->metadata_provider_context, &query, &result);
+		if (!ret) ret = spf_scan_time_encode(wire, sizeof(wire), &result);
+		scan_control_entry_put(entry);
+	}
+	if (ret) { print_value(pdata, ret); return ret; }
+	print_value(pdata, sizeof(wire));
+	ret = write_all(pdata, wire, sizeof(wire));
+	return ret < 0 ? ret : (ssize_t)sizeof(wire);
+}
+
+void read_adaptive_scan_time_capabilities(struct parser_pdata *pdata)
+{
+	print_value(pdata, 1);
+}
+
 ssize_t submit_adaptive_scan_feedback(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t bytes)
 {

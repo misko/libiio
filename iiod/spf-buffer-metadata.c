@@ -114,7 +114,35 @@ struct spf_iiod_metadata_context {
 	struct spf_scan_radio scan_radio;
 	struct spf_scan_session *scan_session;
 	uint64_t scan_counter_anchor;
+	uint64_t scan_clock_epoch;
+	uint8_t scan_boot_id[16];
 };
+
+static uint64_t scan_monotonic_ns(void)
+{
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts)) return 0;
+	return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + ts.tv_nsec;
+}
+
+static void scan_clock_identity(struct spf_iiod_metadata_context *ctx)
+{
+	FILE *file = fopen("/proc/sys/kernel/random/boot_id", "r");
+	char uuid[37];
+	unsigned i, j = 0, value;
+	ctx->scan_clock_epoch = scan_monotonic_ns();
+	if (!file) return;
+	if (fscanf(file, "%36s", uuid) == 1 && strlen(uuid) == 36) {
+		for (i = 0; i < 36 && j < 16;) {
+			if (uuid[i] == '-') { ++i; continue; }
+			if (sscanf(uuid + i, "%2x", &value) != 1) break;
+			ctx->scan_boot_id[j++] = (uint8_t)value;
+			i += 2;
+		}
+	}
+	if (j != 16) memset(ctx->scan_boot_id, 0, 16);
+	fclose(file);
+}
 
 static int scan_release_block(void *context, uintptr_t token)
 {
@@ -199,6 +227,7 @@ static int scan_open(const struct iio_device *dev, size_t samples_count,
 		goto error_session;
 	}
 	ctx->scan_enabled = true;
+	scan_clock_identity(ctx);
 	ctx->scan_kernel_buffers = buffers;
 	*provider_context = ctx;
 	*extra_samples = layout.extra_samples;
@@ -1249,6 +1278,46 @@ enum spf_scan_feedback_result iiod_buffer_metadata_scan_feedback(
 		result = SPF_SCAN_REJECTED;
 	pthread_mutex_unlock(&ctx->scan_lock);
 	return result;
+}
+
+int iiod_buffer_metadata_scan_time(void *provider_context,
+		const struct spf_scan_time_query *query, struct spf_scan_time *result)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	struct spf_scan_radio radio;
+	uint64_t counter, before, after;
+	int ret;
+	if (!ctx || !ctx->scan_enabled || !query || !result) return -EOPNOTSUPP;
+	/* Do not stall the capture scheduler for an optional timing observation. */
+	if (pthread_mutex_trylock(&ctx->scan_lock)) return -EAGAIN;
+	if (query->session != ctx->scan_setup.session ||
+	    query->generation != ctx->scan_setup.generation) ret = -ESTALE;
+	else if (!ctx->scan_thread_live) ret = -EAGAIN;
+	else if (ctx->scan_finished || ctx->scan_cancel_requested) ret = -ESHUTDOWN;
+	else {
+		/* Query failure must not set the capture owner's faulted flag. */
+		radio = ctx->scan_radio;
+		before = scan_monotonic_ns();
+		ret = spf_scan_radio_snapshot(&radio, ctx->scan_counter_anchor, &counter);
+		after = scan_monotonic_ns();
+		if (!ret && (!before || after < before ||
+		    counter - ctx->scan_counter_anchor >= (UINT64_C(1) << 31))) ret = -ERANGE;
+		if (!ret) {
+			memset(result, 0, sizeof(*result));
+			result->identity = *query;
+			memcpy(result->boot_id, ctx->scan_boot_id, 16);
+			result->epoch = ctx->scan_clock_epoch;
+			result->counter = counter;
+			result->monotonic_before_ns = before;
+			result->monotonic_after_ns = after;
+			result->sample_rate_hz = ctx->scan_setup.source_rate_hz;
+			/* The current kernel ABI attests coherence, not snapshot age.
+			 * Never invent a latency guarantee for an unidentified bitstream. */
+			result->maximum_snapshot_age_ns = UINT64_MAX;
+		}
+	}
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return ret;
 }
 
 int iiod_buffer_metadata_scan_take_ack(void *provider_context,
