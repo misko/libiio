@@ -143,6 +143,13 @@ int main(int argc, char **argv)
 	assert(spf_scan_visit_decode(&visit_out, wire, SPF_SCAN_VISIT_BYTES) == 0);
 	assert(!memcmp(&visit, &visit_out, sizeof(visit)));
 	corruption(wire, SPF_SCAN_VISIT_BYTES, decode_visit, sizeof(visit_out));
+	visit.iq_bytes = (visit.valid_end - visit.valid_start) * 8;
+	assert(spf_scan_visit_encode(wire, sizeof(wire), &visit) == 0);
+	assert(spf_scan_visit_decode(&visit_out, wire, SPF_SCAN_VISIT_BYTES) == 0);
+	assert(!memcmp(&visit, &visit_out, sizeof(visit)));
+	visit.iq_bytes = (visit.valid_end - visit.valid_start) * 6;
+	assert(spf_scan_visit_encode(wire, sizeof(wire), &visit) == -EINVAL);
+	visit.iq_bytes = (visit.valid_end - visit.valid_start) * 4;
 
 	assert(spf_scan_feedback_encode(wire, sizeof(wire), &feedback) == 0);
 	assert(spf_scan_feedback_decode(&feedback_out, wire,

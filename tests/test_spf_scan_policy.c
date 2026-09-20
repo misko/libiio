@@ -102,6 +102,22 @@ static void test_feedback_and_terminal(void)
 	spf_scan_policy_destroy(p);
 }
 
+static void test_commit_after_transition_budget_is_valid(void)
+{
+	struct spf_scan_policy_config c = config();
+	struct spf_scan_policy *p = NULL;
+	struct spf_scan_choice choice;
+	uint64_t start = dt(&c, 25);
+
+	assert(!spf_scan_policy_create(&p, &c, 0));
+	assert(!spf_scan_policy_select(p, 0, &choice));
+	assert(start > choice.selection_counter + dt(&c, c.transition_budget_ms));
+	assert(!spf_scan_policy_commit(p, start));
+	assert(!spf_scan_policy_finish_visit(p, choice.visit, true));
+	spf_scan_policy_stop(p, start + dt(&c, c.dwell_ms));
+	spf_scan_policy_destroy(p);
+}
+
 static void test_mailbox_reservation(void)
 {
 	struct spf_scan_policy_config c = config();
@@ -245,6 +261,7 @@ int main(void)
 {
 	test_admission();
 	test_feedback_and_terminal();
+	test_commit_after_transition_budget_is_valid();
 	test_mailbox_reservation();
 	test_order_expiry_and_invalid_capture();
 	test_weighted_replay_and_deadlines();

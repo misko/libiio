@@ -249,9 +249,11 @@ int spf_scan_policy_commit(struct spf_scan_policy *p, uint64_t start)
 	struct scan_visit *v;
 	if (!p || !p->selected || p->stopped)
 		return -EINVAL;
-	if (start < p->selection.selection_counter ||
-		start - p->selection.selection_counter > p->transition ||
-		start > p->end || p->end - start < p->dwell)
+	/* transition is the required settling minimum, not an expiry.  A PHY
+	 * Fast-Lock ioctl may begin after the snapshot used for selection; callers
+	 * then commit at its measured completion plus transition. */
+	if (start < p->selection.selection_counter || start > p->end ||
+		p->end - start < p->dwell)
 		return -ETIME;
 	v = &p->visits[p->visit_count++];
 	*v = (struct scan_visit){start, start + p->dwell, p->selection.target, false, false};

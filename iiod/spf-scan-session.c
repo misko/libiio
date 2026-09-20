@@ -9,6 +9,11 @@
 #define TERMINAL_FLAG_RESTORED UINT32_C(1)
 #define TERMINAL_REASON_COMPLETE UINT32_C(1)
 #define TERMINAL_REASON_INTERNAL UINT32_C(3)
+/* Failed-session subreasons are intentionally carried in the existing
+ * protocol reason field.  Older clients treat this field as opaque. */
+#define TERMINAL_REASON_POLICY_SELECT UINT32_C(4)
+#define TERMINAL_REASON_RECALL_LATE UINT32_C(5)
+#define TERMINAL_REASON_POLICY_COMMIT UINT32_C(6)
 
 struct ledger_entry {
 	struct spf_scan_choice choice;
@@ -32,6 +37,7 @@ struct spf_scan_session {
 	struct spf_scan_radio_release_receipt restoration;
 	enum spf_visit_result inflight_result;
 	int error;
+	uint32_t failure_reason;
 	bool stopping, failed, cancelled_session, released, output_inflight;
 	bool current_profile_valid;
 	bool terminal_taken;
@@ -83,8 +89,8 @@ static int maybe_release(struct spf_scan_session *session)
 	return 0;
 }
 
-static int fail_session(struct spf_scan_session *session, int error,
-			uint64_t counter)
+static int fail_session_reason(struct spf_scan_session *session, int error,
+			uint64_t counter, uint32_t reason)
 {
 	if (!session->stopping) {
 		(void)close_active(session, counter);
@@ -97,10 +103,18 @@ static int fail_session(struct spf_scan_session *session, int error,
 	}
 	session->failed = true;
 	session->error = error < 0 ? error : -EIO;
+	if (reason)
+		session->failure_reason = reason;
 	if (counter > session->latest_counter)
 		session->latest_counter = counter;
 	(void)maybe_release(session);
 	return session->error;
+}
+
+static int fail_session(struct spf_scan_session *session, int error,
+	uint64_t counter)
+{
+	return fail_session_reason(session, error, counter, 0);
 }
 
 int spf_scan_session_create(struct spf_scan_session **out,
@@ -253,8 +267,12 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 	if (ret)
 		return fail_session(session, ret, now);
 	ret = spf_scan_policy_select(session->policy, now, &selected);
-	if (ret)
+	if (ret) {
+		if (ret == -ETIME)
+			return fail_session_reason(session, ret, now,
+				TERMINAL_REASON_POLICY_SELECT);
 		return ret;
+	}
 	if (selected.visit != session->ledger_count ||
 	    session->ledger_count >= session->ledger_capacity)
 		return fail_session(session, -EOVERFLOW, now);
@@ -302,16 +320,34 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 		return fail_session(session, -EOVERFLOW, recall.counter_after);
 	}
 	valid_start = selected.selection_counter + transition;
-	if (recall.counter_before < selected.selection_counter ||
-	    recall.counter_before > recall.counter_after ||
-	    recall.counter_after > valid_start) {
+	/* A snapshot and a Fast-Lock receipt are separate kernel operations.  The
+	 * receipt can legitimately be stamped just before the snapshot selected the
+	 * visit (the counter is sampled on different sides of the ioctl boundary).
+	 * That is safe: valid_start remains selection + transition, so it only gives
+	 * the LO more settling time.  Only a recall completing after valid_start can
+	 * contaminate the visit. */
+	if (recall.counter_before > recall.counter_after) {
 		make_failed_entry_coherent(session, entry, now, entry->queued);
-		return fail_session(session, -ETIME, recall.counter_after);
+		return fail_session_reason(session, -ETIME, recall.counter_after,
+			TERMINAL_REASON_RECALL_LATE);
+	}
+	/* Fast-Lock execution is serialized by the PHY and can start later than
+	 * the preceding counter snapshot.  Do not discard the whole scan when that
+	 * happens: move this visit's valid boundary to transition milliseconds after
+	 * the actual recall completion.  This preserves the settling guarantee and
+	 * accurately accounts for the short non-IQ interval. */
+	if (recall.counter_after > valid_start) {
+		if (recall.counter_after > UINT64_MAX - transition) {
+			make_failed_entry_coherent(session, entry, now, entry->queued);
+			return fail_session(session, -EOVERFLOW, recall.counter_after);
+		}
+		valid_start = recall.counter_after + transition;
 	}
 	ret = spf_scan_policy_commit(session->policy, valid_start);
 	if (ret) {
 		make_failed_entry_coherent(session, entry, now, entry->queued);
-		return fail_session(session, ret, recall.counter_after);
+		return fail_session_reason(session, ret, recall.counter_after,
+			ret == -ETIME ? TERMINAL_REASON_POLICY_COMMIT : 0);
 	}
 	if (valid_start > UINT64_MAX - samples) {
 		make_failed_entry_coherent(session, entry, now, entry->queued);
@@ -611,7 +647,8 @@ int spf_scan_session_terminal(struct spf_scan_session *session,
 		.state = session->failed ? SPF_SCAN_TERMINAL_FAILED :
 			(session->cancelled_session ? SPF_SCAN_TERMINAL_CANCELLED :
 			 SPF_SCAN_TERMINAL_COMPLETED),
-		.reason = session->failed ? TERMINAL_REASON_INTERNAL :
+		.reason = session->failed ? (session->failure_reason ?
+			session->failure_reason : TERMINAL_REASON_INTERNAL) :
 			(session->cancelled_session ? UINT32_C(2) :
 			 TERMINAL_REASON_COMPLETE),
 		.error = session->failed || session->cancelled_session ?

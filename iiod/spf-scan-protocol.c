@@ -383,11 +383,11 @@ static int visit_validate(const struct spf_scan_visit_record *visit)
 	    visit->flags & ~SPF_SCAN_VISIT_FLAG_MASK)
 		return -EINVAL;
 	samples = visit->valid_end - visit->valid_start;
-	if (samples > UINT64_MAX / 4)
+	if (samples > UINT64_MAX / 8)
 		return -EINVAL;
 	if ((visit->result == SPF_VISIT_COMPLETE) != !!visit->iq_bytes ||
 	    (visit->result == SPF_VISIT_COMPLETE &&
-	     visit->iq_bytes != samples * 4))
+	     visit->iq_bytes != samples * 4 && visit->iq_bytes != samples * 8))
 		return -EINVAL;
 	return 0;
 }

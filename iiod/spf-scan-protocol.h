@@ -17,11 +17,14 @@
 	(SPF_SCAN_VISIT_FLAGS | SPF_SCAN_VISIT_DEADLINE_FORCED)
 #define SPF_SCAN_TERMINAL_FLAGS UINT32_C(0x00000001)
 #define SPF_SCAN_FORMAT_CI16 UINT32_C(1)
-#define SPF_SCAN_RATE_2P5M (UINT32_C(1) << 0)
-#define SPF_SCAN_RATE_10M (UINT32_C(1) << 1)
-#define SPF_SCAN_RATE_15M (UINT32_C(1) << 2)
-#define SPF_SCAN_RATE_20M (UINT32_C(1) << 3)
-#define SPF_SCAN_RATE_30M (UINT32_C(1) << 4)
+/* v1 originally allocated bits 0..3 to 10/15/20/30 MS/s.  2.5 MS/s is an
+ * extension and must append bit 4; renumbering would make an old client read
+ * a 10 MS/s-only endpoint as 2.5 MS/s capable. */
+#define SPF_SCAN_RATE_10M (UINT32_C(1) << 0)
+#define SPF_SCAN_RATE_15M (UINT32_C(1) << 1)
+#define SPF_SCAN_RATE_20M (UINT32_C(1) << 2)
+#define SPF_SCAN_RATE_30M (UINT32_C(1) << 3)
+#define SPF_SCAN_RATE_2P5M (UINT32_C(1) << 4)
 #define SPF_SCAN_RATE_MASK_FIXED \
 	(SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_10M | SPF_SCAN_RATE_15M | \
 	 SPF_SCAN_RATE_20M | SPF_SCAN_RATE_30M)
