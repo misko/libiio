@@ -220,6 +220,12 @@ int main(void)
 		}
 		assert(fixture.feedback_calls==2 && fixture.entry.buf==NULL);
 	}
+	client_write(&fixture, "SCANTIMECAPS\n", strlen("SCANTIMECAPS\n"));
+	assert(fixture.output_bytes == 2 && !memcmp(fixture.output, "1\n", 2));
+	fixture.output_offset = fixture.output_bytes;
+	client_write(&fixture, "SCANTIME dev0 0\n", strlen("SCANTIME dev0 0\n"));
+	assert(fixture.output_bytes == 4 && !memcmp(fixture.output, "-22\n", 4));
+	fixture.output_offset = fixture.output_bytes;
 	drain_test_client_destroy(fixture.client);
 	pthread_mutex_destroy(&fixture.entry.thdlist_lock);
 	iio_context_destroy(fixture.parser.ctx);

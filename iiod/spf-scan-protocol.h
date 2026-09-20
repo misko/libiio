@@ -30,6 +30,25 @@
 #define SPF_SCAN_FEEDBACK_BYTES 112U
 #define SPF_SCAN_ACK_BYTES 96U
 #define SPF_SCAN_TERMINAL_BYTES 128U
+#define SPF_SCAN_TIME_QUERY_BYTES 48U
+#define SPF_SCAN_TIME_BYTES 128U
+
+/* Separate opt-in command; existing published scan records are unchanged.
+ * UINT64_MAX snapshot age means unknown, never zero uncertainty. */
+struct spf_scan_time_query {
+	uint64_t request, session, generation;
+};
+struct spf_scan_time {
+	struct spf_scan_time_query identity;
+	uint8_t boot_id[16];
+	uint64_t epoch, counter, monotonic_before_ns, monotonic_after_ns;
+	uint32_t sample_rate_hz;
+	uint64_t maximum_snapshot_age_ns;
+};
+int spf_scan_time_query_encode(void *, size_t, const struct spf_scan_time_query *);
+int spf_scan_time_query_decode(struct spf_scan_time_query *, const void *, size_t);
+int spf_scan_time_encode(void *, size_t, const struct spf_scan_time *);
+int spf_scan_time_decode(struct spf_scan_time *, const void *, size_t);
 
 enum spf_scan_terminal_state {
 	SPF_SCAN_TERMINAL_COMPLETED = 1,

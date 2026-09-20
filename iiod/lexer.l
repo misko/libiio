@@ -106,6 +106,13 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 	return SCANFEEDBACK;
 }
 
+<INITIAL>SCANTIME|scantime {
+	BEGIN(WANT_DEVICE);
+	return SCANTIME;
+}
+<INITIAL>SCANTIMECAPS|scantimecaps {
+	return SCANTIMECAPS;
+}
 <INITIAL>SCANACK|scanack {
 	BEGIN(WANT_DEVICE);
 	return SCANACK;
