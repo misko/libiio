@@ -9,6 +9,9 @@
 #include <stdint.h>
 
 #define SPF_SCAN_PROTOCOL_VERSION UINT16_C(1)
+#include "spf-scan-rate.h"
+#define SPF_SCAN_RUNTIME_RATE_VERSION UINT16_C(2)
+#define SPF_SCAN_RATE_MODE_SETUP_VALIDATED UINT32_C(1)
 #define SPF_SCAN_PROTOCOL_FEATURES UINT32_C(0x000000ff)
 #define SPF_SCAN_SETUP_FLAGS UINT32_C(0x00000001)
 #define SPF_SCAN_VISIT_FLAGS UINT32_C(0x00000001)
@@ -67,6 +70,8 @@ enum spf_scan_terminal_state {
 };
 
 struct spf_scan_caps {
+	uint16_t protocol_version; /* zero initializes the legacy version */
+	uint32_t rate_mode, minimum_rate_hz, maximum_rate_hz;
 	uint32_t rate_mask, rx_mask, formats, maximum_targets;
 	uint32_t maximum_fastlock_profiles, minimum_dwell_ms, maximum_dwell_ms;
 	uint32_t maximum_duration_ms;
@@ -83,6 +88,7 @@ struct spf_scan_target {
 };
 
 struct spf_scan_setup {
+	uint16_t protocol_version;
 	uint64_t session, generation, seed;
 	uint32_t source_rate_hz, analog_bandwidth_hz;
 	uint32_t duration_ms, dwell_ms, transition_budget_ms;
@@ -96,6 +102,7 @@ struct spf_scan_setup {
 };
 
 struct spf_scan_visit_record {
+	uint16_t protocol_version;
 	uint64_t session, generation, visit, selection_counter;
 	uint64_t transition_before, transition_after, valid_start, valid_end;
 	uint64_t frequency_hz, iq_bytes, missing_samples_before;

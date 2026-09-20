@@ -75,6 +75,7 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token READBUFMSTAT
 %token READSCAN
 %token SCANCAPS
+%token SCANCAPS2
 %token SCANFEEDBACK
 %token SCANACK
 %token SCANTIME
@@ -144,6 +145,7 @@ Line:
 		"\tREADSCAN <device>\n"
 		"\t\tStream feature-103 visit records and complete IQ visits\n"
 		"\tSCANCAPS <capacity>\n"
+		"\tSCANCAPS2 <capacity>\n"
 		"\tSCANTIMECAPS\n"
 		"\tSCANTIME <device> <query_bytes>\n"
 		"\tSCANFEEDBACK <device> <bytes>\n"
@@ -423,7 +425,18 @@ Line:
 		char *capacity = $3;
 		size_t cap = strtoul(capacity, NULL, 10);
 		struct parser_pdata *pdata = yyget_extra(scanner);
-		ssize_t ret = read_adaptive_scan_capabilities(pdata, cap);
+		ssize_t ret = read_adaptive_scan_capabilities(pdata, cap, false);
+		free(capacity);
+		if (ret < 0)
+			YYABORT;
+		else
+			YYACCEPT;
+	}
+	| SCANCAPS2 SPACE WORD END {
+		char *capacity = $3;
+		size_t cap = strtoul(capacity, NULL, 10);
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = read_adaptive_scan_capabilities(pdata, cap, true);
 		free(capacity);
 		if (ret < 0)
 			YYABORT;

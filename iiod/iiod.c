@@ -801,7 +801,7 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 		return EXIT_FAILURE;
 	}
 	if (!iiod_buffer_metadata_scan_capabilities(scan_caps,
-						    sizeof(scan_caps))) {
+						    sizeof(scan_caps), false)) {
 		ret = iio_context_add_attr(ctx, "iio,adaptive-scan", "1");
 		if (ret >= 0)
 			ret = iio_context_add_attr(ctx,
@@ -810,6 +810,9 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 			ret = iio_context_add_attr(ctx,
 				"iio,adaptive-scan-rates-hz",
 				"2500000,10000000,15000000,20000000,30000000");
+		if (ret >= 0)
+			ret = iio_context_add_attr(ctx,
+				"iio,adaptive-scan-runtime-rates", "2");
 		if (ret < 0) {
 			iio_context_destroy(ctx);
 			return EXIT_FAILURE;

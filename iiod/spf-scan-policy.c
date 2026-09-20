@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "spf-scan-policy.h"
+#include "spf-scan-rate.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +32,7 @@ struct spf_scan_policy {
 
 static uint64_t ticks(const struct spf_scan_policy_config *c, uint32_t ms)
 {
-	return (uint64_t)c->source_rate_hz * ms / 1000;
+	return spf_scan_ticks(c->source_rate_hz, ms);
 }
 
 int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
@@ -50,8 +51,7 @@ int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
 		!c->decay_ms || c->decay_ms > 60000 ||
 		c->maximum_boost < 1 || c->maximum_boost > 16)
 		return -EINVAL;
-	if (c->source_rate_hz != 2500000 && c->source_rate_hz != 10000000 && c->source_rate_hz != 15000000 &&
-		c->source_rate_hz != 20000000 && c->source_rate_hz != 30000000)
+	if (!spf_scan_rate_valid(c->source_rate_hz))
 		return -EOPNOTSUPP;
 	for (i = 0; i < sizeof(c->analysis_digest); i++)
 		digest |= c->analysis_digest[i];

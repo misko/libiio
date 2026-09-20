@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "spf-scan-protocol.h"
+#include "spf-scan-rate.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -75,8 +76,11 @@ static int check(const uint8_t *p, size_t actual, size_t expected,
 		return -EINVAL;
 	if (actual != expected)
 		return -EMSGSIZE;
-	if (get32(p) != magic || (uint16_t)(p[4] | p[5] << 8) !=
-	    SPF_SCAN_PROTOCOL_VERSION || (uint16_t)(p[6] | p[7] << 8) != expected)
+	if (get32(p) != magic ||
+	    ((uint16_t)(p[4] | p[5] << 8) != SPF_SCAN_PROTOCOL_VERSION &&
+	     !((magic == MAGIC_CAPS || magic == MAGIC_SETUP || magic == MAGIC_VISIT) &&
+	       (uint16_t)(p[4] | p[5] << 8) == SPF_SCAN_RUNTIME_RATE_VERSION)) ||
+	    (uint16_t)(p[6] | p[7] << 8) != expected)
 		return -EPROTONOSUPPORT;
 	if (get32(p + 8) != SPF_SCAN_PROTOCOL_FEATURES || get32(p + 12) != flags ||
 	    get32(p + expected - 4) != crc32(p, expected - 4))
@@ -174,6 +178,25 @@ static uint32_t rate_flag(uint32_t rate)
 	}
 }
 
+static bool rate_valid(uint32_t rate, uint16_t version)
+{
+	if (!version || version == SPF_SCAN_PROTOCOL_VERSION)
+		return rate_flag(rate) != 0;
+	return version == SPF_SCAN_RUNTIME_RATE_VERSION && spf_scan_rate_valid(rate);
+}
+
+static void rate_header(uint8_t *p, uint16_t version)
+{
+	if (version)
+		put16(p + 4, version);
+}
+
+static uint16_t rate_version(const uint8_t *p)
+{
+	/* Keep legacy zero-initialized C callers and structures compatible. */
+	return p[4] == SPF_SCAN_PROTOCOL_VERSION ? 0 : p[4];
+}
+
 void spf_scan_caps_default(struct spf_scan_caps *caps)
 {
 	if (!caps)
@@ -199,6 +222,19 @@ void spf_scan_caps_default(struct spf_scan_caps *caps)
 
 static int caps_validate(const struct spf_scan_caps *caps)
 {
+	if (!caps)
+		return -EINVAL;
+	if (caps->protocol_version == SPF_SCAN_RUNTIME_RATE_VERSION) {
+		if (caps->rate_mode != SPF_SCAN_RATE_MODE_SETUP_VALIDATED ||
+		    caps->minimum_rate_hz < SPF_SCAN_RATE_MIN ||
+		    caps->maximum_rate_hz > SPF_SCAN_RATE_MAX ||
+		    caps->minimum_rate_hz > caps->maximum_rate_hz)
+			return -EINVAL;
+	} else if ((caps->protocol_version &&
+		    caps->protocol_version != SPF_SCAN_PROTOCOL_VERSION) ||
+		   caps->rate_mode || caps->minimum_rate_hz || caps->maximum_rate_hz) {
+		return -EINVAL;
+	}
 	if (!caps || caps->rate_mask != SPF_SCAN_RATE_MASK_FIXED ||
 	    caps->rx_mask != SPF_SCAN_RX1_RX2 || caps->formats != SPF_SCAN_FORMAT_CI16 ||
 	    caps->maximum_targets != SPF_SCAN_TARGETS ||
@@ -250,7 +286,7 @@ int spf_scan_setup_validate(const struct spf_scan_setup *setup)
 	uint32_t profiles = 0;
 	unsigned i, j;
 
-	if (!setup || !rate_flag(setup->source_rate_hz) ||
+	if (!setup || !rate_valid(setup->source_rate_hz, setup->protocol_version) ||
 	    setup->analog_bandwidth_hz < 200000 ||
 	    setup->analog_bandwidth_hz > setup->source_rate_hz ||
 	    !setup->maximum_queue_bytes ||
@@ -298,6 +334,7 @@ int spf_scan_caps_encode(void *wire, size_t bytes,
 	if (bytes < sizeof(p))
 		return -ENOSPC;
 	header(p, MAGIC_CAPS, sizeof(p), 0);
+	rate_header(p, caps->protocol_version);
 	put32(p + 16, caps->rate_mask);
 	put32(p + 20, caps->rx_mask);
 	put32(p + 24, caps->formats);
@@ -313,6 +350,9 @@ int spf_scan_caps_encode(void *wire, size_t bytes,
 	put32(p + 68, caps->maximum_application_delay_ms);
 	put32(p + 72, caps->maximum_analog_bandwidth_hz);
 	put32(p + 76, caps->source_counter_bits);
+	put32(p + 80, caps->rate_mode);
+	put32(p + 84, caps->minimum_rate_hz);
+	put32(p + 88, caps->maximum_rate_hz);
 	put32(p + 92, crc32(p, 92));
 	memcpy(wire, p, sizeof(p));
 	return 0;
@@ -329,9 +369,12 @@ int spf_scan_caps_decode(struct spf_scan_caps *caps,
 		return -EINVAL;
 	if (ret)
 		return ret;
-	if (!all_zero(p + 80, 12))
+	if (!rate_version(p) && !all_zero(p + 80, 12))
 		return -EBADMSG;
 	out = (struct spf_scan_caps) {
+		.protocol_version = rate_version(p),
+		.rate_mode = get32(p + 80), .minimum_rate_hz = get32(p + 84),
+		.maximum_rate_hz = get32(p + 88),
 		.rate_mask = get32(p + 16), .rx_mask = get32(p + 20),
 		.formats = get32(p + 24), .maximum_targets = get32(p + 28),
 		.maximum_fastlock_profiles = get32(p + 32),
@@ -360,6 +403,7 @@ int spf_scan_setup_encode(void *wire, size_t bytes,
 	if (bytes < sizeof(p))
 		return -ENOSPC;
 	header(p, MAGIC_SETUP, sizeof(p), SPF_SCAN_SETUP_FLAGS);
+	rate_header(p, setup->protocol_version);
 	put64(p + 16, setup->session); put64(p + 24, setup->generation);
 	put64(p + 32, setup->seed); put32(p + 40, setup->source_rate_hz);
 	put32(p + 44, setup->analog_bandwidth_hz); put32(p + 48, setup->duration_ms);
@@ -400,6 +444,7 @@ int spf_scan_setup_decode(struct spf_scan_setup *setup,
 		return ret;
 	if (get32(p + 108) || !all_zero(p + 336, 12))
 		return -EBADMSG;
+	out.protocol_version = rate_version(p);
 	out.session = get64(p + 16); out.generation = get64(p + 24);
 	out.seed = get64(p + 32); out.source_rate_hz = get32(p + 40);
 	out.analog_bandwidth_hz = get32(p + 44); out.duration_ms = get32(p + 48);
@@ -436,7 +481,7 @@ static int visit_validate(const struct spf_scan_visit_record *visit)
 	    visit->valid_start > visit->valid_end ||
 	    visit->frequency_hz < UINT64_C(70000000) ||
 	    visit->frequency_hz > UINT64_C(6000000000) ||
-	    !rate_flag(visit->source_rate_hz) ||
+	    !rate_valid(visit->source_rate_hz, visit->protocol_version) ||
 	    visit->analog_bandwidth_hz < 200000 ||
 	    visit->analog_bandwidth_hz > 56000000 ||
 	    visit->target >= SPF_SCAN_TARGETS || visit->profile >= SPF_SCAN_TARGETS ||
@@ -465,6 +510,7 @@ int spf_scan_visit_encode(void *wire, size_t bytes,
 	if (bytes < sizeof(p))
 		return -ENOSPC;
 	header(p, MAGIC_VISIT, sizeof(p), visit->flags);
+	rate_header(p, visit->protocol_version);
 	put64(p + 16, visit->session); put64(p + 24, visit->generation);
 	put64(p + 32, visit->visit); put64(p + 40, visit->selection_counter);
 	put64(p + 48, visit->transition_before); put64(p + 56, visit->transition_after);
@@ -496,6 +542,7 @@ int spf_scan_visit_decode(struct spf_scan_visit_record *visit,
 		return ret;
 	if (!all_zero(p + 140, 16))
 		return -EBADMSG;
+	out.protocol_version = rate_version(p);
 	out.session = get64(p + 16); out.generation = get64(p + 24);
 	out.visit = get64(p + 32); out.selection_counter = get64(p + 40);
 	out.transition_before = get64(p + 48); out.transition_after = get64(p + 56);

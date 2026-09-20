@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "spf-visit-queue.h"
+#include "spf-scan-rate.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,8 +44,7 @@ int spf_visit_queue_create(struct spf_visit_queue **out,
 		!c->headroom_blocks || c->headroom_blocks >= c->block_count ||
 		!c->maximum_visits || c->maximum_visits > SPF_VISIT_QUEUE_MAX_VISITS ||
 		!c->block_samples || c->block_samples > 1000000 ||
-		(c->source_rate_hz != 2500000 && c->source_rate_hz != 10000000 && c->source_rate_hz != 15000000 &&
-		 c->source_rate_hz != 20000000 && c->source_rate_hz != 30000000) ||
+		!spf_scan_rate_valid(c->source_rate_hz) ||
 		(c->bytes_per_sample != 4 && c->bytes_per_sample != 8) ||
 		!c->maximum_bytes || c->maximum_bytes > UINT64_C(200000000) ||
 		!c->maximum_age_ticks || c->maximum_age_ticks > (uint64_t)c->source_rate_hz * 10 ||

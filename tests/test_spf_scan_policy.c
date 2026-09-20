@@ -37,12 +37,15 @@ static void test_admission(void)
 {
 	struct spf_scan_policy_config c = config(), bad;
 	struct spf_scan_policy *p = NULL;
-	unsigned rates[] = {10000000, 15000000, 20000000, 30000000}, i;
-	for (i = 0; i < 4; i++) {
+	unsigned rates[] = {520833, 2500000, 5000000, 7500000, 8000000,
+		12345679, 10000000, 15000000, 20000000, 30000000, 61440000}, i;
+	for (i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
 		c.source_rate_hz = rates[i];
 		assert(!spf_scan_policy_validate(&c));
 	}
-	bad = c; bad.source_rate_hz = 60000000;
+	bad = c; bad.source_rate_hz = 61440001;
+	assert(spf_scan_policy_validate(&bad) == -EOPNOTSUPP);
+	bad = c; bad.source_rate_hz = 520832;
 	assert(spf_scan_policy_validate(&bad) == -EOPNOTSUPP);
 	bad = c; bad.maximum_revisit_ms = 1039;
 	assert(spf_scan_policy_validate(&bad) == -ERANGE);

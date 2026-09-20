@@ -1382,7 +1382,7 @@ int iiod_buffer_metadata_scan_cancel(void *provider_context)
 	return 0;
 }
 
-int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes)
+int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, bool runtime_rates)
 {
 	struct spf_scan_caps caps;
 	struct spf_scan_radio radio;
@@ -1396,6 +1396,12 @@ int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes)
 	if (ret)
 		return ret;
 	spf_scan_caps_default(&caps);
+	if (runtime_rates) {
+		caps.protocol_version = SPF_SCAN_RUNTIME_RATE_VERSION;
+		caps.rate_mode = SPF_SCAN_RATE_MODE_SETUP_VALIDATED;
+		caps.minimum_rate_hz = SPF_SCAN_RATE_MIN;
+		caps.maximum_rate_hz = SPF_SCAN_RATE_MAX;
+	}
 	return spf_scan_caps_encode(wire, bytes, &caps);
 }
 

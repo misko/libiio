@@ -48,6 +48,54 @@ static struct spf_scan_setup setup(void)
 	return value;
 }
 
+static void runtime_rates(void)
+{
+	const uint32_t rates[] = {520833, 2500000, 5000000, 7500000,
+		8000000, 12345679, 61440000};
+	struct spf_scan_setup request = setup(), decoded;
+	struct spf_scan_caps caps, decoded_caps;
+	uint8_t wire[SPF_SCAN_SETUP_BYTES];
+	unsigned i, rx;
+	spf_scan_caps_default(&caps);
+	assert(!spf_scan_caps_encode(wire, sizeof(wire), &caps));
+	assert(wire[4] == 1);
+	for (i = 80; i < 92; i++) assert(!wire[i]);
+	caps.protocol_version = 2;
+	caps.rate_mode = SPF_SCAN_RATE_MODE_SETUP_VALIDATED;
+	caps.minimum_rate_hz = SPF_SCAN_RATE_MIN;
+	caps.maximum_rate_hz = SPF_SCAN_RATE_MAX;
+	assert(!spf_scan_caps_encode(wire, sizeof(wire), &caps));
+	assert(!spf_scan_caps_decode(&decoded_caps, wire, SPF_SCAN_CAPS_BYTES));
+	assert(decoded_caps.protocol_version == 2 && decoded_caps.rate_mask == 0x1f);
+	assert(decoded_caps.minimum_rate_hz == 520833 &&
+	       decoded_caps.maximum_rate_hz == 61440000);
+	request.analog_bandwidth_hz = 200000;
+	for (i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
+		for (rx = 1; rx <= 3; rx++) {
+			request.source_rate_hz = rates[i];
+			request.rx_mask = rx;
+			request.protocol_version = 2;
+			if (rx == 2) {
+				assert(spf_scan_setup_encode(wire, sizeof(wire), &request));
+				continue;
+			}
+			assert(!spf_scan_setup_encode(wire, sizeof(wire), &request));
+			assert(!spf_scan_setup_decode(&decoded, wire, SPF_SCAN_SETUP_BYTES));
+			assert(decoded.source_rate_hz == rates[i] && decoded.protocol_version == 2);
+		}
+	}
+	request.source_rate_hz = 7500000;
+	request.protocol_version = 1;
+	assert(spf_scan_setup_encode(wire, sizeof(wire), &request));
+	request.protocol_version = 2;
+	request.source_rate_hz = 520832;
+	assert(spf_scan_setup_encode(wire, sizeof(wire), &request));
+	request.source_rate_hz = 61440001;
+	assert(spf_scan_setup_encode(wire, sizeof(wire), &request));
+	assert(spf_scan_ticks(7500000, 120) == 900000);
+	assert(spf_scan_ticks(12345679, 120) == 1481481);
+}
+
 static void time_protocol(void)
 {
 	uint8_t wire[SPF_SCAN_TIME_BYTES];
@@ -206,6 +254,7 @@ int main(int argc, char **argv)
 		       SPF_SCAN_SETUP_BYTES);
 		assert(fclose(golden) == 0);
 	}
+	runtime_rates();
 	time_protocol();
 	if (argc == 3 && !strcmp(argv[1], "--time-golden")) {
 		struct spf_scan_time t = {

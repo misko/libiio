@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "spf-scan-session.h"
+#include "spf-scan-rate.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -45,7 +46,7 @@ struct spf_scan_session {
 
 static uint64_t ticks(const struct spf_scan_session *session, uint32_t ms)
 {
-	return (uint64_t)session->setup.source_rate_hz * ms / 1000;
+	return spf_scan_ticks(session->setup.source_rate_hz, ms);
 }
 
 static int close_active(struct spf_scan_session *session, uint64_t counter)
@@ -439,6 +440,7 @@ static void make_record(const struct spf_scan_session *session,
 		&session->setup.targets[entry->choice.target];
 
 	*record = (struct spf_scan_visit_record) {
+		.protocol_version = session->setup.protocol_version,
 		.session = session->setup.session,
 		.generation = session->setup.generation,
 		.visit = entry->choice.visit,
