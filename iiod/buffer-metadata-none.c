@@ -183,6 +183,13 @@ int iiod_buffer_metadata_scan_cancel(void *provider_context)
 	return -EOPNOTSUPP;
 }
 
+int iiod_buffer_metadata_scan_time(void *provider_context,
+		const struct spf_scan_time_query *query, struct spf_scan_time *result)
+{
+	(void)provider_context; (void)query; (void)result;
+	return -EOPNOTSUPP;
+}
+
 int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes)
 {
 	(void)wire;

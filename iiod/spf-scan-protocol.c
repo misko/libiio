@@ -99,6 +99,69 @@ static bool digest_present(const uint8_t digest[32])
 	return !all_zero(digest, 32);
 }
 
+int spf_scan_time_query_encode(void *wire, size_t bytes,
+		const struct spf_scan_time_query *q)
+{
+	uint8_t *p = wire;
+	if (!p || !q || !q->request || !q->session || !q->generation)
+		return -EINVAL;
+	if (bytes < SPF_SCAN_TIME_QUERY_BYTES) return -ENOSPC;
+	memset(p, 0, SPF_SCAN_TIME_QUERY_BYTES);
+	header(p, UINT32_C(0x51545053), SPF_SCAN_TIME_QUERY_BYTES, 1);
+	put64(p + 16, q->request); put64(p + 24, q->session);
+	put64(p + 32, q->generation);
+	put32(p + 44, crc32(p, 44));
+	return 0;
+}
+
+int spf_scan_time_query_decode(struct spf_scan_time_query *q,
+		const void *wire, size_t bytes)
+{
+	const uint8_t *p = wire;
+	int ret = check(p, bytes, SPF_SCAN_TIME_QUERY_BYTES, UINT32_C(0x51545053), 1);
+	if (ret) return ret;
+	if (!q || get32(p + 40) || !get64(p + 16) || !get64(p + 24) || !get64(p + 32))
+		return -EINVAL;
+	*q = (struct spf_scan_time_query){get64(p + 16), get64(p + 24), get64(p + 32)};
+	return 0;
+}
+
+int spf_scan_time_encode(void *wire, size_t bytes, const struct spf_scan_time *t)
+{
+	uint8_t *p = wire;
+	if (!p || !t || !t->identity.request || !t->identity.session ||
+	    !t->identity.generation || all_zero(t->boot_id, 16) || !t->epoch ||
+	    !t->sample_rate_hz || t->monotonic_after_ns < t->monotonic_before_ns)
+		return -EINVAL;
+	if (bytes < SPF_SCAN_TIME_BYTES) return -ENOSPC;
+	memset(p, 0, SPF_SCAN_TIME_BYTES);
+	header(p, UINT32_C(0x41545053), SPF_SCAN_TIME_BYTES, 1);
+	put64(p + 16, t->identity.request); put64(p + 24, t->identity.session);
+	put64(p + 32, t->identity.generation); memcpy(p + 40, t->boot_id, 16);
+	put64(p + 56, t->epoch); put64(p + 64, t->counter);
+	put64(p + 72, t->monotonic_before_ns); put64(p + 80, t->monotonic_after_ns);
+	put32(p + 88, t->sample_rate_hz); put32(p + 92, 64);
+	put64(p + 96, t->maximum_snapshot_age_ns);
+	put32(p + 124, crc32(p, 124));
+	return 0;
+}
+
+int spf_scan_time_decode(struct spf_scan_time *t, const void *wire, size_t bytes)
+{
+	const uint8_t *p = wire;
+	uint8_t check_wire[SPF_SCAN_TIME_BYTES];
+	int ret = check(p, bytes, SPF_SCAN_TIME_BYTES, UINT32_C(0x41545053), 1);
+	if (ret) return ret;
+	if (!t || get32(p + 92) != 64 || !all_zero(p + 104, 20)) return -EINVAL;
+	memset(t, 0, sizeof(*t));
+	t->identity = (struct spf_scan_time_query){get64(p + 16), get64(p + 24), get64(p + 32)};
+	memcpy(t->boot_id, p + 40, 16); t->epoch = get64(p + 56);
+	t->counter = get64(p + 64); t->monotonic_before_ns = get64(p + 72);
+	t->monotonic_after_ns = get64(p + 80); t->sample_rate_hz = get32(p + 88);
+	t->maximum_snapshot_age_ns = get64(p + 96);
+	return spf_scan_time_encode(check_wire, sizeof(check_wire), t);
+}
+
 static uint32_t rate_flag(uint32_t rate)
 {
 	switch (rate) {

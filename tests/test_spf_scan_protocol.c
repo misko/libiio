@@ -48,6 +48,34 @@ static struct spf_scan_setup setup(void)
 	return value;
 }
 
+static void time_protocol(void)
+{
+	uint8_t wire[SPF_SCAN_TIME_BYTES];
+	struct spf_scan_time_query q = {1, 2, 3}, decoded_q;
+	struct spf_scan_time t = {
+		.identity = {1, 2, 3}, .boot_id = {1}, .epoch = 7,
+		.counter = UINT64_C(0x100000010), .monotonic_before_ns = 100,
+		.monotonic_after_ns = 120, .sample_rate_hz = 20000000,
+		.maximum_snapshot_age_ns = UINT64_MAX,
+	}, decoded;
+	unsigned i;
+	assert(!spf_scan_time_query_encode(wire, sizeof(wire), &q));
+	assert(!spf_scan_time_query_decode(&decoded_q, wire, SPF_SCAN_TIME_QUERY_BYTES));
+	assert(!memcmp(&q, &decoded_q, sizeof(q)));
+	q.request = 0;
+	assert(spf_scan_time_query_encode(wire, sizeof(wire), &q) == -EINVAL);
+	assert(!spf_scan_time_encode(wire, sizeof(wire), &t));
+	assert(!spf_scan_time_decode(&decoded, wire, sizeof(wire)));
+	assert(decoded.counter == t.counter && decoded.maximum_snapshot_age_ns == UINT64_MAX);
+	for (i = 0; i < sizeof(wire); ++i) {
+		wire[i] ^= 1;
+		assert(spf_scan_time_decode(&decoded, wire, sizeof(wire)) < 0);
+		wire[i] ^= 1;
+	}
+	t.monotonic_after_ns = 99;
+	assert(spf_scan_time_encode(wire, sizeof(wire), &t) == -EINVAL);
+}
+
 static void corruption(void *wire, size_t bytes,
 			int (*decode)(void *, const void *, size_t), size_t output_bytes)
 {
@@ -177,6 +205,20 @@ int main(int argc, char **argv)
 		assert(fwrite(wire, 1, SPF_SCAN_SETUP_BYTES, golden) ==
 		       SPF_SCAN_SETUP_BYTES);
 		assert(fclose(golden) == 0);
+	}
+	time_protocol();
+	if (argc == 3 && !strcmp(argv[1], "--time-golden")) {
+		struct spf_scan_time t = {
+			.identity = {1, 2, 3}, .boot_id = {1}, .epoch = 7,
+			.counter = UINT64_C(0x100000010), .monotonic_before_ns = 100,
+			.monotonic_after_ns = 120, .sample_rate_hz = 20000000,
+			.maximum_snapshot_age_ns = UINT64_MAX,
+		};
+		golden = fopen(argv[2], "wb");
+		assert(golden);
+		assert(!spf_scan_time_encode(wire, sizeof(wire), &t));
+		assert(fwrite(wire, 1, SPF_SCAN_TIME_BYTES, golden) == SPF_SCAN_TIME_BYTES);
+		assert(!fclose(golden));
 	}
 	puts("PASS: scan protocol round trips, strict reserved fields and per-byte CRC rejection");
 	return 0;

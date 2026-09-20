@@ -165,6 +165,12 @@ if(IIOD_BUFFER_METADATA_PROVIDER MATCHES "spf-buffer-metadata\\.c$")
 		../iiod/spf-scan-protocol.c ../iiod/spf-scan-policy.c
 		../iiod/spf-scan-radio.c ../iiod/spf-visit-queue.c
 		${IIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES})
+	add_executable(test_spf_scan_time test_spf_scan_time.c ../iiod/spf-scan-radio.c)
+	target_include_directories(test_spf_scan_time PRIVATE ../iiod ..
+		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
+	target_compile_options(test_spf_scan_time PRIVATE -ffunction-sections -fdata-sections)
+	target_link_options(test_spf_scan_time PRIVATE -Wl,--gc-sections)
+	target_link_libraries(test_spf_scan_time ${PTHREAD_LIBRARIES})
 	target_include_directories(test_spf_counter_metadata PRIVATE ../iiod ..
 		${IIOD_BUFFER_METADATA_INCLUDE_DIRS})
 	target_link_libraries(test_spf_counter_metadata iio ${PTHREAD_LIBRARIES})
