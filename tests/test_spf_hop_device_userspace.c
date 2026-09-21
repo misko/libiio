@@ -177,9 +177,21 @@ void mock_spf_hop_scheduler_v1_destroy(void *device_context)
 }
 
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
-static unsigned mock_adaptive_creates, mock_adaptive_destroys;
+static unsigned mock_adaptive_creates, mock_adaptive_destroys, mock_adaptive_submits;
 static uint8_t mock_adaptive_mask;
-static const struct spf_hop_device_ops_v2 mock_adaptive_ops = {0};
+static int mock_adaptive_submit(void *io, const struct spf_hop_request_v2 *request)
+{
+	uint8_t first = 0;
+	assert(request->eligible_target_mask == mock_adaptive_mask);
+	while (!(request->eligible_target_mask & (UINT32_C(1) << first)))
+		++first;
+	++mock_adaptive_submits;
+	return userspace_start(io,
+		request->geometry.profiles[first].lo_frequency_hz);
+}
+static const struct spf_hop_device_ops_v2 mock_adaptive_ops = {
+	.submit_plan = mock_adaptive_submit,
+};
 int mock_spf_hop_scheduler_v2_create(const struct spf_hop_request_v2 *r,
 	const struct spf_hop_scheduler_io_v1 *ops, void *io,
 	const struct spf_hop_scheduler_policy_v2 *policy, void *policy_context,
@@ -240,6 +252,9 @@ static void test_adaptive_factory_validates_before_creating_scheduler(void)
 		&r, &context, &ops));
 	assert(context && ops == &mock_adaptive_ops && mock_adaptive_creates == 1);
 	assert(mock_save_writes == 13 && !mock_frequency_writes);
+	mock_counter_reads = 1;
+	assert(!ops->submit_plan(context, &r));
+	assert(mock_adaptive_submits == 1 && mock_counter_reads == 2);
 	spf_hop_device_userspace_v2_destroy(context);
 	assert(mock_adaptive_destroys == 1);
 
@@ -257,6 +272,9 @@ static void test_adaptive_factory_validates_before_creating_scheduler(void)
 		&r, &context, &ops));
 	assert(context && ops == &mock_adaptive_ops && mock_adaptive_creates == 2);
 	assert(mock_save_writes == 21 && !mock_frequency_writes);
+	mock_counter_reads = 1;
+	assert(!ops->submit_plan(context, &r));
+	assert(mock_adaptive_submits == 2 && mock_counter_reads == 2);
 	spf_hop_device_userspace_v2_destroy(context);
 	assert(mock_adaptive_destroys == 2);
 	mock_profiles_enabled = false;
