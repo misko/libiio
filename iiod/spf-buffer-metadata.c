@@ -301,10 +301,14 @@ int iiod_buffer_metadata_open(const struct iio_device *dev,
 	} else if (request_bytes == sizeof(struct adi_tandem_agc_request_v1) +
 			SPF_HOP_ADAPTIVE_REQUEST_BYTES) {
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
+		const uint8_t *adaptive_wire = (const uint8_t *)request +
+			sizeof(struct adi_tandem_agc_request_v1);
 		if (!glrt_enabled) return -ENOTSUP;
-		ret = spf_hop_request_v2_decode(&adaptive_request,
-			(const uint8_t *)request + sizeof(struct adi_tandem_agc_request_v1),
-			SPF_HOP_ADAPTIVE_REQUEST_BYTES);
+		ret = adaptive_wire[8] == (uint8_t)SPF_HOP_ADAPTIVE_MASK_FEATURES ?
+			spf_hop_request_mask_v2_decode(&adaptive_request, adaptive_wire,
+				SPF_HOP_ADAPTIVE_REQUEST_BYTES) :
+			spf_hop_request_v2_decode(&adaptive_request, adaptive_wire,
+				SPF_HOP_ADAPTIVE_REQUEST_BYTES);
 		if (ret) return ret;
 		if (adaptive_request.policy.generation != glrt_request.generation) return -ESTALE;
 		ret = spf_hop_adaptive_policy_validate_pinned(&adaptive_request);

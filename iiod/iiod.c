@@ -763,6 +763,7 @@ static int start_iiod(const char *uri, const char *ffs_mountpoint,
 			{"iio,buffer-scanner-glrt-configuration-sha256", IIOD_SCANNER_GLRT_CONFIGURATION_SHA256},
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
 			{"iio,buffer-adaptive-hop-request", "2"},
+			{"iio,buffer-adaptive-hop-eligible-targets", "1"},
 			{"iio,buffer-host-adaptive-hop-request", "3,4"},
 			{"iio,buffer-host-adaptive-hop-event", "3"},
 			{"iio,buffer-host-adaptive-hop-status", "3"},

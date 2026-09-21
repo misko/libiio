@@ -38,6 +38,21 @@ struct spf_hop_scheduler_v1 {
 	bool restore_called;
 };
 
+static uint32_t scheduler_eligible_mask(const struct spf_hop_scheduler_v1 *scheduler)
+{
+	return scheduler->adaptive && scheduler->adaptive_request.eligible_target_mask ?
+		scheduler->adaptive_request.eligible_target_mask : UINT32_C(0xff);
+}
+
+static uint8_t scheduler_first_eligible(const struct spf_hop_scheduler_v1 *scheduler)
+{
+	uint32_t mask = scheduler_eligible_mask(scheduler);
+	uint8_t profile;
+	for (profile = 0; profile < SPF_HOP_PROFILE_COUNT; ++profile)
+		if (mask & (UINT32_C(1) << profile)) return profile;
+	return SPF_HOP_PROFILE_NONE;
+}
+
 static int request_matches(const struct spf_hop_request_v1 *left,
 	const struct spf_hop_request_v1 *right)
 {
@@ -153,6 +168,7 @@ static void *scheduler_worker(void *opaque)
 		memset(&adaptive_event, 0, sizeof(adaptive_event));
 		if (scheduler->adaptive) {
 			uint64_t now;
+			uint32_t eligible_mask = scheduler_eligible_mask(scheduler);
 			ret = scheduler->io.get_counter(scheduler->io_context, &now);
 			if (ret) { ret = ret > 0 ? -EIO : ret; break; }
 			ret = scheduler->policy.choose(scheduler->policy_context, index, now,
@@ -161,7 +177,11 @@ static void *scheduler_worker(void *opaque)
 			if (adaptive_event.choice.decision_counter != now ||
 				adaptive_event.choice.generation != scheduler->adaptive_request.policy.generation ||
 				adaptive_event.choice.mode != scheduler->adaptive_request.policy.mode ||
-				adaptive_event.choice.proposed_target >= SPF_HOP_PROFILE_COUNT) {
+				adaptive_event.choice.proposed_target >= SPF_HOP_PROFILE_COUNT ||
+				!(eligible_mask & (UINT32_C(1) <<
+					adaptive_event.choice.proposed_target)) ||
+				((adaptive_event.choice.active_mask |
+				  adaptive_event.choice.quiet_mask) & ~eligible_mask)) {
 				ret = -EBADMSG; break;
 			}
 			if (scheduler->adaptive_request.policy.mode == SPF_HOP_ADAPTIVE)
@@ -240,6 +260,7 @@ static int scheduler_submit(void *opaque,
 	const struct spf_hop_request_v1 *request)
 {
 	struct spf_hop_scheduler_v1 *scheduler = opaque;
+	uint8_t startup_profile;
 	int ret;
 
 	if (!scheduler || !request || !request_matches(request,
@@ -247,8 +268,10 @@ static int scheduler_submit(void *opaque,
 		return -EINVAL;
 	if (scheduler->thread_started || scheduler->restore_called)
 		return -EBUSY;
+	startup_profile = scheduler_first_eligible(scheduler);
+	if (startup_profile >= SPF_HOP_PROFILE_COUNT) return -EINVAL;
 	ret = scheduler->io.start(scheduler->io_context,
-		scheduler->request.profiles[0].lo_frequency_hz);
+		scheduler->request.profiles[startup_profile].lo_frequency_hz);
 	if (ret)
 		return ret > 0 ? -EIO : ret;
 	ret = pthread_create(&scheduler->thread, NULL, scheduler_worker,

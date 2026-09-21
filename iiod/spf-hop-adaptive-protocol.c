@@ -70,13 +70,18 @@ static void policy_decode(struct spf_hop_policy_v2 *c, const uint8_t *p)
 	c->unhealthy_limit = (uint32_t)get(p + 44, 4);
 }
 
+static uint32_t eligible_target_mask(const struct spf_hop_request_v2 *r)
+{
+	return r->eligible_target_mask ? r->eligible_target_mask : UINT32_C(0xff);
+}
+
 int spf_hop_request_v2_encode(void *wire, size_t size, const struct spf_hop_request_v2 *r)
 {
 	uint8_t p[SPF_HOP_ADAPTIVE_REQUEST_BYTES] = {0};
 	int ret;
 	if (!wire || !r) return -EINVAL;
 	if (size < sizeof(p)) return -ENOSPC;
-	if (valid_policy(r, 0)) return -EINVAL;
+	if (valid_policy(r, 0) || eligible_target_mask(r) != UINT32_C(0xff)) return -EINVAL;
 	const unsigned char empty_host[sizeof(r->host)] = {0};
 	if (memcmp(&r->host, empty_host, sizeof(r->host))) return -EINVAL;
 	ret = spf_hop_request_v1_encode(p, SPF_HOP_REQUEST_BYTES, &r->geometry);
@@ -113,7 +118,63 @@ int spf_hop_request_v2_decode(struct spf_hop_request_v2 *r, const void *wire, si
 	ret = spf_hop_request_v1_decode(&out.geometry, geometry, sizeof(geometry));
 	if (ret) return ret;
 	policy_decode(&out.policy, p + SPF_HOP_REQUEST_BYTES);
+	out.eligible_target_mask = UINT32_C(0xff);
 	if (valid_policy(&out, 0)) return -EBADMSG;
+	*r = out;
+	return 0;
+}
+
+int spf_hop_request_mask_v2_encode(void *wire, size_t size,
+	const struct spf_hop_request_v2 *r)
+{
+	uint8_t p[SPF_HOP_ADAPTIVE_REQUEST_BYTES] = {0};
+	const unsigned char empty_host[sizeof(r->host)] = {0};
+	uint32_t mask;
+	int ret;
+	if (!wire || !r) return -EINVAL;
+	if (size < sizeof(p)) return -ENOSPC;
+	mask = r->eligible_target_mask;
+	if (valid_policy(r, 0) || !mask ||
+		r->policy.mode != SPF_HOP_ADAPTIVE ||
+		memcmp(&r->host, empty_host, sizeof(r->host))) return -EINVAL;
+	ret = spf_hop_request_v1_encode(p, SPF_HOP_REQUEST_BYTES, &r->geometry);
+	if (ret) return ret;
+	put(p + 4, SPF_HOP_ADAPTIVE_VERSION, 2);
+	put(p + 6, sizeof(p), 2);
+	put(p + 8, SPF_HOP_ADAPTIVE_MASK_FEATURES, 4);
+	put(p + 76, SPF_HOP_ADAPTIVE_EVENT_BYTES, 2);
+	policy_encode(p + SPF_HOP_REQUEST_BYTES, &r->policy);
+	put(p + 336, mask, 1);
+	memcpy(wire, p, sizeof(p));
+	return 0;
+}
+
+int spf_hop_request_mask_v2_decode(struct spf_hop_request_v2 *r,
+	const void *wire, size_t size)
+{
+	const uint8_t *p = wire;
+	uint8_t geometry[SPF_HOP_REQUEST_BYTES];
+	struct spf_hop_request_v2 out = {0};
+	int ret;
+	if (!r || !wire) return -EINVAL;
+	if (size != SPF_HOP_ADAPTIVE_REQUEST_BYTES) return -EMSGSIZE;
+	if (get(p, 4) != SPF_HOP_REQUEST_MAGIC ||
+		get(p + 4, 2) != SPF_HOP_ADAPTIVE_VERSION || get(p + 6, 2) != size)
+		return -EPROTONOSUPPORT;
+	if (get(p + 8, 4) != SPF_HOP_ADAPTIVE_MASK_FEATURES ||
+		get(p + 76, 2) != SPF_HOP_ADAPTIVE_EVENT_BYTES || !p[336] ||
+		get(p + 337, 7) || get(p + 344, 8)) return -EBADMSG;
+	memcpy(geometry, p, sizeof(geometry));
+	put(geometry + 4, SPF_HOP_PROTOCOL_VERSION, 2);
+	put(geometry + 6, SPF_HOP_REQUEST_BYTES, 2);
+	put(geometry + 8, SPF_HOP_REQUIRED_FEATURES_V1, 4);
+	put(geometry + 76, SPF_HOP_EVENT_BYTES, 2);
+	ret = spf_hop_request_v1_decode(&out.geometry, geometry, sizeof(geometry));
+	if (ret) return ret;
+	policy_decode(&out.policy, p + SPF_HOP_REQUEST_BYTES);
+	out.eligible_target_mask = p[336];
+	if (valid_policy(&out, 0) || out.policy.mode != SPF_HOP_ADAPTIVE)
+		return -EBADMSG;
 	*r = out;
 	return 0;
 }
@@ -293,7 +354,8 @@ int spf_hop_request_v3_encode(void *wire, size_t size, const struct spf_hop_requ
 	int ret;
 	if (!wire || !r) return -EINVAL;
 	if (size<sizeof(p)) return -ENOSPC;
-	if (valid_policy(r,1) || r->host.enabled!=1 || r->host.rx>1 ||
+	if (valid_policy(r,1) || eligible_target_mask(r)!=UINT32_C(0xff) ||
+		r->host.enabled!=1 || r->host.rx>1 ||
 		r->host.decision_rate_hz!=2500000 || r->host.factor!=4 || r->host.phase ||
 		r->host.delay!=80 || r->host.supported_start!=40 || r->host.supported_end!=300000 ||
 		!digest_present(r->host.configuration_sha256)) return -EINVAL;
@@ -329,6 +391,7 @@ int spf_hop_request_v3_decode(struct spf_hop_request_v2 *r, const void *wire, si
 	ret=spf_hop_request_v1_decode(&out.geometry,geometry,sizeof(geometry));
 	if (ret) return ret;
 	policy_decode(&out.policy,p+288);
+	out.eligible_target_mask=UINT32_C(0xff);
 	out.host.enabled=get(p+352,4); out.host.rx=get(p+356,4);
 	out.host.decision_rate_hz=get(p+360,4); out.host.factor=get(p+364,4);
 	out.host.phase=get(p+368,4); out.host.delay=get(p+372,4);
@@ -356,6 +419,7 @@ int spf_hop_request_v4_encode(void *wire, size_t size, const struct spf_hop_requ
 	int ret;
 	if (size<sizeof(p)) return -ENOSPC;
 	if (!r || multirate_host_geometry(r) || valid_policy(r,2) ||
+		eligible_target_mask(r)!=UINT32_C(0xff) ||
 		r->host.enabled!=1 || r->host.rx!=0 || r->host.decision_rate_hz!=2500000 ||
 		r->host.phase || r->host.supported_end!=300000 ||
 		!digest_present(r->host.configuration_sha256)) return -EINVAL;
@@ -391,6 +455,7 @@ int spf_hop_request_v4_decode(struct spf_hop_request_v2 *r, const void *wire, si
 	ret=spf_hop_request_v1_decode(&out.geometry,geometry,sizeof(geometry));
 	if (ret) return ret;
 	policy_decode(&out.policy,p+288);
+	out.eligible_target_mask=UINT32_C(0xff);
 	out.host.enabled=1; out.host.rx=get(p+356,4);
 	out.host.decision_rate_hz=get(p+360,4); out.host.factor=get(p+364,4);
 	out.host.phase=get(p+368,4); out.host.delay=get(p+372,4);
@@ -412,7 +477,9 @@ int spf_hop_adaptive_configuration(void *out, size_t size, const struct spf_hop_
 		(r->geometry.sample_rate_hz==10000000 ?
 		 spf_hop_request_v3_encode(bytes,sizeof(bytes),r) :
 		 spf_hop_request_v4_encode(bytes,sizeof(bytes),r)) :
-		spf_hop_request_v2_encode(bytes,sizeof(bytes),r);
+		(eligible_target_mask(r) == UINT32_C(0xff) ?
+		 spf_hop_request_v2_encode(bytes,sizeof(bytes),r) :
+		 spf_hop_request_mask_v2_encode(bytes,sizeof(bytes),r));
 	if (!ret) memcpy(out,bytes,sizeof(bytes));
 	return ret;
 }

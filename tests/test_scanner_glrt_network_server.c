@@ -175,6 +175,7 @@ int main(int argc, char **argv)
 		"<context-attribute name=\"iio,buffer-scanner-glrt-configuration-sha256\" value=\"%s\"/>"
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
 		"<context-attribute name=\"iio,buffer-adaptive-hop-request\" value=\"2\"/>"
+		"<context-attribute name=\"iio,buffer-adaptive-hop-eligible-targets\" value=\"1\"/>"
 		"<context-attribute name=\"iio,buffer-adaptive-hop-event\" value=\"2\"/>"
 		"<context-attribute name=\"iio,buffer-adaptive-hop-status\" value=\"2\"/>"
 		"<context-attribute name=\"iio,buffer-adaptive-hop-modes\" value=\"shadow,adaptive\"/>"

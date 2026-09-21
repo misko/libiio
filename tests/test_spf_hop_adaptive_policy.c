@@ -229,6 +229,56 @@ static void host_feedback(void)
 	}
 }
 
+static void eligible_edges(uint32_t mask)
+{
+	struct spf_hop_request_v2 r=request(2500000,SPF_HOP_ADAPTIVE);
+	struct spf_hop_adaptive_policy *p;
+	struct spf_hop_choice_v2 c;
+	uint64_t now=UINT64_C(0xfffffff0);
+	unsigned saw[5]={0}, index;
+	r.eligible_target_mask=mask;
+	assert(!spf_hop_adaptive_policy_validate_pinned(&r));
+	assert(!spf_hop_adaptive_policy_create(&p,&r));
+	for (index=0;index<120;++index) {
+		if (index==40) now+=r.geometry.sample_rate_hz*4;
+		leo_adaptive_observation_v1 o=visit(p,&r,index,&now,&c);
+		assert(mask & (1U<<c.proposed_target));
+		assert(mask & (1U<<o.target));
+		assert(!((c.active_mask|c.quiet_mask)&~mask));
+		assert(c.reason<=SPF_HOP_CHOICE_FAULT_FALLBACK);
+		saw[c.reason]=1;
+		/* One active edge creates weighted service plus overdue exploration;
+		 * every other eligible edge becomes quiet after three misses. */
+		o.outcome=o.target==(mask==0x0f ? 0U : 4U) ?
+			LEO_ADAPTIVE_DETECTED : LEO_ADAPTIVE_NOT_DETECTED;
+		assert(!spf_hop_adaptive_policy_offer(p,&o));
+	}
+	assert(saw[SPF_HOP_CHOICE_WARMUP]);
+	assert(saw[SPF_HOP_CHOICE_WEIGHTED]);
+	assert(saw[SPF_HOP_CHOICE_EXPLORATION]);
+	spf_hop_adaptive_policy_fault(p);
+	{
+		leo_adaptive_observation_v1 o=visit(p,&r,120,&now,&c);
+		assert(c.reason==SPF_HOP_CHOICE_FAULT_FALLBACK);
+		assert(mask&(1U<<o.target));
+	}
+	spf_hop_adaptive_policy_destroy(p);
+
+	/* A no-detection session deterministically reaches the no-active path. */
+	memset(saw,0,sizeof(saw));
+	assert(!spf_hop_adaptive_policy_create(&p,&r));
+	now=UINT64_C(0xfffffff0);
+	for (index=0;index<40;++index) {
+		leo_adaptive_observation_v1 o=visit(p,&r,index,&now,&c);
+		assert(mask&(1U<<o.target));
+		saw[c.reason]=1;
+		o.outcome=LEO_ADAPTIVE_NOT_DETECTED;
+		assert(!spf_hop_adaptive_policy_offer(p,&o));
+	}
+	assert(saw[SPF_HOP_CHOICE_NONE_ACTIVE]);
+	spf_hop_adaptive_policy_destroy(p);
+}
+
 static void wide_host_policy_creation(void)
 {
 	const unsigned rates[] = {15000000, 20000000};
@@ -292,6 +342,8 @@ int main(void)
 	threaded_feedback(2500000);
 	threaded_feedback(5000000);
 	host_feedback();
+	eligible_edges(0x0f);
+	eligible_edges(0xf0);
 	host_feedback_can_advance_one_unavailable_visit();
 	wide_host_policy_creation();
 	puts("native feedback/policy: 458752 mask decisions + 4000 threaded decisions + fault cases PASS; synthetic, no RF");

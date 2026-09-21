@@ -8,6 +8,9 @@
  * these records MUST NOT be serialized or consumed as fixed-order V1 scans. */
 #define SPF_HOP_ADAPTIVE_VERSION UINT16_C(2)
 #define SPF_HOP_ADAPTIVE_FEATURES UINT32_C(0x3f)
+#define SPF_HOP_ELIGIBLE_TARGETS_FEATURE UINT32_C(0x40)
+#define SPF_HOP_ADAPTIVE_MASK_FEATURES \
+	(SPF_HOP_ADAPTIVE_FEATURES | SPF_HOP_ELIGIBLE_TARGETS_FEATURE)
 #define SPF_HOP_ADAPTIVE_REQUEST_BYTES UINT16_C(352)
 #define SPF_HOP_ADAPTIVE_EVENT_BYTES UINT16_C(144)
 #define SPF_HOP_HOST_REQUEST_BYTES UINT16_C(416)
@@ -38,6 +41,9 @@ struct spf_hop_policy_v2 {
 struct spf_hop_request_v2 {
 	struct spf_hop_request_v1 geometry;
 	struct spf_hop_policy_v2 policy;
+	/* 0 is accepted only for legacy in-process initializers and means 0xff.
+	 * Decoders always normalize it to one nonzero uint8 eligibility bitmap. */
+	uint8_t eligible_target_mask;
 	/* Private shared engine configuration. Nonzero only after explicit HOPR
 	 * major-3 decoding; the published V2 encoder rejects these fields. */
 	struct {
@@ -78,6 +84,8 @@ struct spf_hop_sidecar_v2 {
 
 int spf_hop_request_v2_encode(void *, size_t, const struct spf_hop_request_v2 *);
 int spf_hop_request_v2_decode(struct spf_hop_request_v2 *, const void *, size_t);
+int spf_hop_request_mask_v2_encode(void *, size_t, const struct spf_hop_request_v2 *);
+int spf_hop_request_mask_v2_decode(struct spf_hop_request_v2 *, const void *, size_t);
 int spf_hop_request_v3_encode(void *, size_t, const struct spf_hop_request_v2 *);
 int spf_hop_request_v3_decode(struct spf_hop_request_v2 *, const void *, size_t);
 int spf_hop_request_v4_encode(void *, size_t, const struct spf_hop_request_v2 *);

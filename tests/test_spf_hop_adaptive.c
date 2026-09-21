@@ -70,6 +70,41 @@ static void test_request(void)
 	assert(!memcmp(again, bad, sizeof(again)));
 }
 
+static void test_mask_request(void)
+{
+	struct spf_hop_request_v2 r=request(2500000,SPF_HOP_ADAPTIVE),decoded,sentinel;
+	uint8_t legacy[SPF_HOP_ADAPTIVE_REQUEST_BYTES];
+	uint8_t wire[SPF_HOP_ADAPTIVE_REQUEST_BYTES],again[sizeof(wire)],bad[sizeof(wire)];
+	memset(&sentinel,0xa5,sizeof(sentinel));
+	assert(!spf_hop_request_v2_encode(legacy,sizeof(legacy),&r));
+	r.eligible_target_mask=0x0f;
+	assert(!spf_hop_request_mask_v2_encode(wire,sizeof(wire),&r));
+	assert(wire[4]==2 && wire[8]==SPF_HOP_ADAPTIVE_MASK_FEATURES && wire[336]==0x0f);
+	assert(spf_hop_request_v2_decode(&decoded,wire,sizeof(wire))<0);
+	assert(!spf_hop_request_mask_v2_decode(&decoded,wire,sizeof(wire)));
+	assert(decoded.eligible_target_mask==0x0f);
+	assert(!spf_hop_request_mask_v2_encode(again,sizeof(again),&decoded));
+	assert(!memcmp(wire,again,sizeof(wire)));
+	for (size_t n=337;n<sizeof(wire);++n) {
+		memcpy(bad,wire,sizeof(bad)); bad[n]=1; decoded=sentinel;
+		assert(spf_hop_request_mask_v2_decode(&decoded,bad,sizeof(bad))==-EBADMSG);
+		assert(!memcmp(&decoded,&sentinel,sizeof(decoded)));
+	}
+	assert(!spf_hop_request_v2_decode(&decoded,legacy,sizeof(legacy)));
+	assert(decoded.eligible_target_mask==0xff);
+	assert(!spf_hop_request_v2_encode(again,sizeof(again),&decoded));
+	assert(!memcmp(legacy,again,sizeof(legacy)));
+	memcpy(bad,wire,sizeof(bad)); bad[336]=0; decoded=sentinel;
+	assert(spf_hop_request_mask_v2_decode(&decoded,bad,sizeof(bad))==-EBADMSG);
+	assert(!memcmp(&decoded,&sentinel,sizeof(decoded)));
+	r.eligible_target_mask=0;
+	assert(spf_hop_request_mask_v2_encode(wire,sizeof(wire),&r)==-EINVAL);
+	r.eligible_target_mask=0xf0;
+	assert(!spf_hop_request_mask_v2_encode(wire,sizeof(wire),&r));
+	r.policy.mode=SPF_HOP_SHADOW;
+	assert(spf_hop_request_mask_v2_encode(wire,sizeof(wire),&r)==-EINVAL);
+}
+
 struct fake {
 	struct spf_hop_request_v2 request;
 	uint64_t counter, committed_end;
@@ -84,7 +119,10 @@ struct fake {
 static int start(void *p, uint64_t lo)
 {
 	struct fake *f = p;
-	assert(lo == f->request.geometry.profiles[0].lo_frequency_hz);
+	unsigned first=0;
+	uint32_t mask=f->request.eligible_target_mask ? f->request.eligible_target_mask : 0xff;
+	while (!(mask&(1U<<first))) ++first;
+	assert(lo == f->request.geometry.profiles[first].lo_frequency_hz);
 	++f->starts;
 	return 0;
 }
@@ -192,7 +230,8 @@ static int replay_drain(void *p, struct spf_hop_device_event_v2 *out, size_t cap
 	size_t n = VISITS - r->cursor;
 	if (n > capacity) n = capacity;
 	memcpy(out, r->events + r->cursor, n * sizeof(*out));
-	if (r->corrupt && n && r->cursor == 24) out[0].device.from_profile = 3;
+	if (r->corrupt && n && r->cursor == 24)
+		out[0].device.from_profile=(out[0].device.from_profile+1)%SPF_HOP_PROFILE_COUNT;
 	r->cursor += n;
 	*count = n; *dropped = 0;
 	return 0;
@@ -261,7 +300,7 @@ static void test_session(struct replay *replay, const struct spf_hop_request_v2 
 	assert(replay->restores == 1);
 }
 
-static void test_scheduler(uint64_t rate, uint32_t mode)
+static void test_scheduler(uint64_t rate, uint32_t mode, uint32_t eligible_mask)
 {
 	struct fake f = {0};
 	struct replay replay = {0};
@@ -272,6 +311,7 @@ static void test_scheduler(uint64_t rate, uint32_t mode)
 	size_t total = 0;
 	unsigned attempt, i, different = 0;
 	f.request = request(rate, mode);
+	f.request.eligible_target_mask=eligible_mask;
 	f.counter = UINT64_C(0xffffffff) - 50;
 #ifdef SPF_HOP_TEST_NATIVE_POLICY
 	assert(!spf_hop_adaptive_policy_create(&f.policy, &f.request));
@@ -296,6 +336,9 @@ static void test_scheduler(uint64_t rate, uint32_t mode)
 		const struct spf_hop_device_event_v2 *e = &replay.events[i];
 		assert(e->device.from_profile == (i ? replay.events[i - 1].device.to_profile : SPF_HOP_PROFILE_NONE));
 		assert(e->device.to_profile == (mode == SPF_HOP_SHADOW ? i % 8 : e->choice.proposed_target));
+		assert((eligible_mask ? eligible_mask : 0xff)&(1U<<e->device.to_profile));
+		assert(!((e->choice.active_mask|e->choice.quiet_mask)&
+			~(eligible_mask ? eligible_mask : 0xff)));
 		if (e->choice.proposed_target != i % 8) ++different;
 	}
 	assert(different > 0);
@@ -310,6 +353,7 @@ static void test_scheduler(uint64_t rate, uint32_t mode)
 int main(void)
 {
 	test_request();
+	test_mask_request();
 	{
 		struct spf_hop_request_v2 r=request(10000000,SPF_HOP_ADAPTIVE), decoded;
 		uint8_t wire[SPF_HOP_HOST_REQUEST_BYTES], again[sizeof(wire)];
@@ -376,10 +420,12 @@ int main(void)
 			assert(spf_hop_host_feedback_v1_decode(&got,wire,SPF_HOP_HOST_FEEDBACK_BYTES)<0);
 		}
 	}
-	test_scheduler(2500000, SPF_HOP_ADAPTIVE);
-	test_scheduler(5000000, SPF_HOP_ADAPTIVE);
-	test_scheduler(2500000, SPF_HOP_SHADOW);
-	test_scheduler(5000000, SPF_HOP_SHADOW);
+	test_scheduler(2500000, SPF_HOP_ADAPTIVE,0);
+	test_scheduler(5000000, SPF_HOP_ADAPTIVE,0);
+	test_scheduler(2500000, SPF_HOP_SHADOW,0);
+	test_scheduler(5000000, SPF_HOP_SHADOW,0);
+	test_scheduler(2500000, SPF_HOP_ADAPTIVE,0x0f);
+	test_scheduler(2500000, SPF_HOP_ADAPTIVE,0xf0);
 #ifdef SPF_HOP_TEST_NATIVE_POLICY
 	puts("native policy + feedback + scheduler + session: both rates/modes PASS (synthetic evidence, no RF)");
 #else

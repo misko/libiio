@@ -18,7 +18,8 @@ struct spf_hop_adaptive_policy {
 	leo_adaptive_observation_v1 feedback[FEEDBACK_CAPACITY];
 	struct committed_visit *visits;
 	uint64_t source_epoch_offset;
-	uint32_t committed;
+	int32_t eligible_credits[SPF_HOP_PROFILE_COUNT];
+	uint32_t committed, eligible_mask, eligible_cursor, eligible_pending_total;
 	int have_source_epoch;
 	uint64_t next_host_visit;
 };
@@ -26,10 +27,13 @@ struct spf_hop_adaptive_policy {
 int spf_hop_adaptive_policy_validate_pinned(const struct spf_hop_request_v2 *r)
 {
 	const struct spf_hop_policy_v2 *p;
+	uint32_t eligible_mask;
 	uint8_t wire[SPF_HOP_HOST_REQUEST_BYTES];
 	int ret = spf_hop_adaptive_configuration(wire, sizeof(wire), r);
 	if (ret) return ret;
 	p = &r->policy;
+	eligible_mask = r->eligible_target_mask ? r->eligible_target_mask : UINT8_MAX;
+	if (!eligible_mask) return -EINVAL;
 	return p->warmup_visits == 3 && p->missed_dwells == 3 &&
 		p->active_weight == 3 && p->quiet_weight == 1 && p->cooldown_ms == 2000 &&
 		p->maximum_revisit_ms == 3000 && p->hop_budget_ms == 160 &&
@@ -62,6 +66,7 @@ int spf_hop_adaptive_policy_create(struct spf_hop_adaptive_policy **out,
 	if (!atomic_is_lock_free(&p->write) || !atomic_is_lock_free(&p->read) ||
 		!atomic_is_lock_free(&p->fault)) { free(p); return -ENOTSUP; }
 	p->request = *request;
+	p->eligible_mask = request->eligible_target_mask ? request->eligible_target_mask : UINT8_MAX;
 	p->visits = calloc((size_t)request->geometry.dwell_count, sizeof(*p->visits));
 	if (!p->visits) { free(p); return -ENOMEM; }
 	c = &request->policy;
@@ -101,6 +106,7 @@ int spf_hop_adaptive_policy_offer(struct spf_hop_adaptive_policy *p,
 		o->rx != (p->request.host.enabled ? p->request.host.rx : 1) ||
 		o->rate_hz != p->request.geometry.sample_rate_hz ||
 		o->visit >= p->request.geometry.dwell_count || o->target >= SPF_HOP_PROFILE_COUNT ||
+		!(p->eligible_mask & (UINT32_C(1) << o->target)) ||
 		o->outcome > LEO_ADAPTIVE_NOT_DETECTED || o->healthy > 1 ||
 		(!o->healthy && o->outcome != LEO_ADAPTIVE_UNKNOWN) ||
 		o->valid_end <= o->valid_start ||
@@ -116,6 +122,93 @@ int spf_hop_adaptive_policy_offer(struct spf_hop_adaptive_policy *p,
 	}
 	p->feedback[w % FEEDBACK_CAPACITY] = *o;
 	atomic_store_explicit(&p->write, w + 1, memory_order_release);
+	return 0;
+}
+
+static uint32_t next_eligible(const struct spf_hop_adaptive_policy *p, uint32_t cursor)
+{
+	uint32_t j;
+	for (j = 0; j < SPF_HOP_PROFILE_COUNT; ++j) {
+		uint32_t target = (cursor + j) % SPF_HOP_PROFILE_COUNT;
+		if (p->eligible_mask & (UINT32_C(1) << target)) return target;
+	}
+	return SPF_HOP_PROFILE_COUNT;
+}
+
+static uint32_t eligible_count(const struct spf_hop_adaptive_policy *p)
+{
+	uint32_t mask = p->eligible_mask, count = 0;
+	while (mask) { count += mask & 1U; mask >>= 1; }
+	return count;
+}
+
+static uint64_t policy_samples(const struct spf_hop_adaptive_policy *p, uint32_t ms)
+{
+	return p->request.geometry.sample_rate_hz * ms / 1000;
+}
+
+static int choose_eligible(struct spf_hop_adaptive_policy *p, uint64_t now,
+	const leo_adaptive_choice_v1 *base, leo_adaptive_choice_v1 *out)
+{
+	uint32_t active = base->active_mask & p->eligible_mask;
+	uint32_t quiet = base->quiet_mask & p->eligible_mask;
+	uint32_t reason = LEO_ADAPTIVE_WEIGHTED, selected;
+	leo_adaptive_target_v1 target;
+
+	if (p->eligible_mask == UINT8_MAX) { *out = *base; return 0; }
+	selected = next_eligible(p, p->eligible_cursor);
+	if (selected >= SPF_HOP_PROFILE_COUNT) return -EINVAL;
+	p->eligible_pending_total = 0;
+	if (base->reason == LEO_ADAPTIVE_FAULT_FALLBACK)
+		reason = LEO_ADAPTIVE_FAULT_FALLBACK;
+	else if (p->committed < p->request.policy.warmup_visits * eligible_count(p))
+		reason = LEO_ADAPTIVE_WARMUP;
+	else if (!active)
+		reason = LEO_ADAPTIVE_NONE_ACTIVE;
+
+	if (reason != LEO_ADAPTIVE_WEIGHTED) {
+		memset(p->eligible_credits, 0, sizeof(p->eligible_credits));
+	} else {
+		int32_t total = 0;
+		uint64_t oldest_age = 0;
+		uint32_t overdue = SPF_HOP_PROFILE_COUNT, j;
+		for (j = 0; j < SPF_HOP_PROFILE_COUNT; ++j) {
+			uint32_t i = (p->eligible_cursor + j) % SPF_HOP_PROFILE_COUNT;
+			int32_t weight;
+			uint64_t age;
+			leo_adaptive_target_v1 state;
+			if (!(p->eligible_mask & (UINT32_C(1) << i))) continue;
+			if (leo_adaptive_target(p->scan, i, &state)) return -EINVAL;
+			weight = quiet & (UINT32_C(1) << i) ?
+				(int32_t)p->request.policy.quiet_weight :
+				(int32_t)p->request.policy.active_weight;
+			p->eligible_credits[i] += weight; total += weight;
+			if (p->eligible_credits[i] > p->eligible_credits[selected]) selected = i;
+			age = now - state.last_visit_start;
+			if (age >= policy_samples(p, p->request.policy.maximum_revisit_ms -
+				p->request.policy.hop_budget_ms) &&
+				(overdue == SPF_HOP_PROFILE_COUNT || age > oldest_age)) {
+				overdue = i; oldest_age = age;
+			}
+		}
+		if (overdue < SPF_HOP_PROFILE_COUNT) {
+			selected = overdue; reason = LEO_ADAPTIVE_EXPLORATION;
+		}
+		p->eligible_pending_total = (uint32_t)total;
+	}
+	if (leo_adaptive_target(p->scan, selected, &target)) return -EINVAL;
+	*out = *base;
+	out->target = selected;
+	out->reason = reason;
+	out->active_mask = active;
+	out->quiet_mask = quiet;
+	out->consecutive_misses = target.consecutive_misses;
+	out->cooldown_remaining_samples = 0;
+	if (target.has_detection && now - target.last_detection_end <
+		policy_samples(p, p->request.policy.cooldown_ms))
+		out->cooldown_remaining_samples =
+			policy_samples(p, p->request.policy.cooldown_ms) -
+			(now - target.last_detection_end);
 	return 0;
 }
 
@@ -213,6 +306,12 @@ static int choose(void *opaque, uint64_t visit, uint64_t now, struct spf_hop_cho
 	}
 	ret = leo_adaptive_choose(p->scan, now, &choice);
 	if (ret) return ret;
+	{
+		leo_adaptive_choice_v1 eligible;
+		ret = choose_eligible(p, now, &choice, &eligible);
+		if (ret) return ret;
+		choice = eligible;
+	}
 	*out = (struct spf_hop_choice_v2){choice.decision_counter, choice.basis_visit,
 		choice.cooldown_remaining_samples, p->request.policy.generation, choice.target,
 		choice.reason, choice.active_mask, choice.quiet_mask, choice.consecutive_misses,
@@ -228,9 +327,22 @@ static int commit(void *opaque, const struct spf_hop_device_event_v2 *e,
 	if (!p || !e || e->device.dwell_index != p->committed ||
 		p->committed >= p->request.geometry.dwell_count ||
 		e->choice.generation != p->request.policy.generation ||
+		!(p->eligible_mask & (UINT32_C(1) << e->device.to_profile)) ||
+		!(p->eligible_mask & (UINT32_C(1) << e->choice.proposed_target)) ||
 		e->choice.mode != p->request.policy.mode) return -EINVAL;
 	ret = leo_adaptive_commit_actual(p->scan, e->device.to_profile, start, end);
 	if (ret) return ret;
+	if (p->eligible_pending_total) {
+		int32_t total = (int32_t)p->eligible_pending_total;
+		uint32_t i;
+		p->eligible_credits[e->device.to_profile] -= total;
+		for (i = 0; i < SPF_HOP_PROFILE_COUNT; ++i) {
+			if (p->eligible_credits[i] > total) p->eligible_credits[i] = total;
+			if (p->eligible_credits[i] < -total) p->eligible_credits[i] = -total;
+		}
+	}
+	p->eligible_cursor = (e->device.to_profile + 1) % SPF_HOP_PROFILE_COUNT;
+	p->eligible_pending_total = 0;
 	p->visits[p->committed++] = (struct committed_visit){start, end, e->device.to_profile};
 	atomic_store_explicit(&p->visible_committed,p->committed,memory_order_release);
 	return 0;

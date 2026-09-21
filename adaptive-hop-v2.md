@@ -40,6 +40,20 @@ HOPT offsets 4/8 hold version/features. Reserved fields stay zero.
 | 40 / 44 | u32 / u32 | Maximum result age in milliseconds / unhealthy-result limit |
 | 48–63 | bytes | Reserved, zero |
 
+The additive eligible-target extension keeps this 352-byte wire major. It sets
+request feature bit `0x40` (`features=0x7f`), stores one nonzero uint8
+eligibility bitmap at policy offset 48, and leaves offsets 49–63 zero. Legacy
+V2 maps to `0xff` and retains its byte-exact `0x3f`/zero-reserved encoding. The
+extension is adaptive-mode only and is advertised separately as
+`iio,buffer-adaptive-hop-eligible-targets=1`.
+
+`spf_hop_request_mask_v2_encode` and `spf_hop_request_mask_v2_decode` own the
+extended record. Startup and every policy reason select only original profile
+indices in the bitmap; active and quiet classifier masks are intersected before
+selection and publication. The scheduler independently checks the bitmap
+before a recall, so no excluded index can be used as an alias for an eligible
+frequency.
+
 The complete request must be retained, not just the generation number. OPENM
 requires the policy generation to match the GLRT request generation and the
 explicit positive-only detector profile. Generation alone is not a
