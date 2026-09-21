@@ -178,6 +178,7 @@ void mock_spf_hop_scheduler_v1_destroy(void *device_context)
 
 #ifdef IIOD_HAS_SCANNER_ADAPTIVE_HOP
 static unsigned mock_adaptive_creates, mock_adaptive_destroys;
+static uint8_t mock_adaptive_mask;
 static const struct spf_hop_device_ops_v2 mock_adaptive_ops = {0};
 int mock_spf_hop_scheduler_v2_create(const struct spf_hop_request_v2 *r,
 	const struct spf_hop_scheduler_io_v1 *ops, void *io,
@@ -185,6 +186,7 @@ int mock_spf_hop_scheduler_v2_create(const struct spf_hop_request_v2 *r,
 	void **output, const struct spf_hop_device_ops_v2 **device_ops)
 {
 	assert(r->policy.generation == 9 && r->policy.mode == SPF_HOP_ADAPTIVE);
+	assert(r->eligible_target_mask == mock_adaptive_mask);
 	assert(ops == &userspace_io && io && policy && policy_context);
 	++mock_adaptive_creates;
 	*output = io; *device_ops = &mock_adaptive_ops;
@@ -227,6 +229,8 @@ static void test_adaptive_factory_validates_before_creating_scheduler(void)
 		&r, &context, &ops) == -EINVAL);
 	assert(!context && !mock_save_writes && !mock_adaptive_creates);
 	r.policy.generation = 9;
+	r.eligible_target_mask = 0x0f;
+	mock_adaptive_mask = 0x0f;
 	r.geometry.profiles[4].profile_crc32 ^= 1;
 	assert(spf_hop_device_userspace_v2_open(rx, phy, &tandem, &lock, &r, &policy,
 		&r, &context, &ops) == -ESTALE);
@@ -238,6 +242,23 @@ static void test_adaptive_factory_validates_before_creating_scheduler(void)
 	assert(mock_save_writes == 13 && !mock_frequency_writes);
 	spf_hop_device_userspace_v2_destroy(context);
 	assert(mock_adaptive_destroys == 1);
+
+	/* The upper-edge request must validate the same first eligible LO that
+	 * scheduler submit subsequently requires.  A profile-0 pre-tune is stale. */
+	r.eligible_target_mask = 0xf0;
+	mock_adaptive_mask = 0xf0;
+	mock_frequency = (long long)r.geometry.profiles[0].lo_frequency_hz;
+	context = NULL; ops = NULL;
+	assert(spf_hop_device_userspace_v2_open(rx, phy, &tandem, &lock, &r, &policy,
+		&r, &context, &ops) == -ESTALE);
+	assert(!context && mock_adaptive_creates == 1);
+	mock_frequency = (long long)r.geometry.profiles[4].lo_frequency_hz;
+	assert(!spf_hop_device_userspace_v2_open(rx, phy, &tandem, &lock, &r, &policy,
+		&r, &context, &ops));
+	assert(context && ops == &mock_adaptive_ops && mock_adaptive_creates == 2);
+	assert(mock_save_writes == 21 && !mock_frequency_writes);
+	spf_hop_device_userspace_v2_destroy(context);
+	assert(mock_adaptive_destroys == 2);
 	mock_profiles_enabled = false;
 	assert(!pthread_mutex_destroy(&lock));
 }

@@ -80,7 +80,8 @@ static int parse_fastlock_profile(const char *text, uint32_t expected_slot,
 }
 
 static int validate_profiles(const struct iio_device *phy,
-	const struct spf_hop_request_v1 *request, struct iio_channel **lo_out)
+	const struct spf_hop_request_v1 *request, uint8_t initial_profile,
+	struct iio_channel **lo_out)
 {
 	struct iio_channel *lo;
 	uint8_t values[16];
@@ -90,6 +91,8 @@ static int validate_profiles(const struct iio_device *phy,
 	ssize_t bytes;
 	int ret;
 
+	if (initial_profile >= SPF_HOP_PROFILE_COUNT)
+		return -EINVAL;
 	lo = iio_device_find_channel(phy, "altvoltage0", true);
 	if (!lo || !iio_channel_find_attr(lo, "frequency") ||
 		!iio_channel_find_attr(lo, "fastlock_save") ||
@@ -99,11 +102,11 @@ static int validate_profiles(const struct iio_device *phy,
 	}
 	ret = iio_channel_attr_read_longlong(lo, "frequency", &actual_lo);
 	if (ret || actual_lo <= 0 || (uint64_t)actual_lo !=
-			request->profiles[0].lo_frequency_hz) {
+			request->profiles[initial_profile].lo_frequency_hz) {
 		fprintf(stderr,
 			"SPF userspace hop initial LO mismatch: actual=%lld expected=%llu "
 			"error=%d\n", actual_lo,
-			(unsigned long long)request->profiles[0].lo_frequency_hz, ret);
+			(unsigned long long)request->profiles[initial_profile].lo_frequency_hz, ret);
 		return ret ? ret : -ESTALE;
 	}
 	for (i = 0; i < SPF_HOP_PROFILE_COUNT; i++) {
@@ -468,7 +471,8 @@ out:
 static int prepare_userspace_io(const struct iio_device *rx,
 	const struct iio_device *phy, struct spf_tandem_session *tandem,
 	pthread_mutex_t *tandem_lock,
-	const struct spf_hop_request_v1 *request, struct spf_userspace_hop_io **output)
+	const struct spf_hop_request_v1 *request, uint8_t initial_profile,
+	struct spf_userspace_hop_io **output)
 {
 	const struct iio_context *context;
 	const char *context_name;
@@ -483,7 +487,7 @@ static int prepare_userspace_io(const struct iio_device *rx,
 	context_name = context ? iio_context_get_name(context) : NULL;
 	if (!context_name || strcmp(context_name, "local"))
 		return -EOPNOTSUPP;
-	ret = validate_profiles(phy, request, &lo);
+	ret = validate_profiles(phy, request, initial_profile, &lo);
 	if (ret)
 		return ret;
 	io = calloc(1, sizeof(*io));
@@ -505,7 +509,7 @@ int spf_hop_device_v1_open(const struct iio_device *rx,
 	struct spf_userspace_hop_io *io;
 	int ret;
 	if (!device_context || !ops) return -EINVAL;
-	ret = prepare_userspace_io(rx, phy, tandem, tandem_lock, request, &io);
+	ret = prepare_userspace_io(rx, phy, tandem, tandem_lock, request, 0, &io);
 	if (ret) return ret;
 	ret = spf_hop_scheduler_v1_create(request, &userspace_io, io,
 		device_context, ops);
@@ -527,11 +531,20 @@ int spf_hop_device_userspace_v2_open(const struct iio_device *rx, const struct i
 {
 	struct spf_userspace_hop_io *io;
 	uint8_t wire[SPF_HOP_HOST_REQUEST_BYTES];
+	uint8_t initial_profile;
 	int ret;
 	if (!device_context || !ops || !policy || !policy->choose || !policy->commit) return -EINVAL;
 	ret = spf_hop_adaptive_configuration(wire, sizeof(wire), request);
 	if (ret) return ret;
-	ret = prepare_userspace_io(rx, phy, tandem, tandem_lock, &request->geometry, &io);
+	for (initial_profile = 0; initial_profile < SPF_HOP_PROFILE_COUNT;
+			initial_profile++)
+		if (request->eligible_target_mask &
+				(UINT32_C(1) << initial_profile))
+			break;
+	if (initial_profile == SPF_HOP_PROFILE_COUNT)
+		return -EINVAL;
+	ret = prepare_userspace_io(rx, phy, tandem, tandem_lock,
+		&request->geometry, initial_profile, &io);
 	if (ret) return ret;
 	ret = spf_hop_scheduler_v2_create(request, &userspace_io, io, policy, policy_context,
 		device_context, ops);

@@ -178,15 +178,20 @@ static int choose(void *p, uint64_t visit, uint64_t now, struct spf_hop_choice_v
 #ifdef SPF_HOP_TEST_NATIVE_POLICY
 	return spf_hop_adaptive_policy_ports()->choose(f->policy, visit, now, c);
 #else
+	uint32_t eligible = f->request.eligible_target_mask ?
+		f->request.eligible_target_mask : UINT32_C(0xff);
+	uint32_t proposed = visit < 24 ? visit % 8 : sequence[(visit - 24) % 10];
 	memset(c, 0, sizeof(*c));
 	c->decision_counter = now;
 	c->basis_visit = visit ? visit - 1 : UINT64_MAX;
 	c->generation = f->request.policy.generation;
 	c->mode = f->request.policy.mode;
-	c->proposed_target = visit < 24 ? visit % 8 : sequence[(visit - 24) % 10];
+	while (!(eligible & (UINT32_C(1) << proposed)))
+		proposed = (proposed + 1) % SPF_HOP_PROFILE_COUNT;
+	c->proposed_target = proposed;
 	c->reason = visit < 24 ? SPF_HOP_CHOICE_WARMUP : SPF_HOP_CHOICE_WEIGHTED;
-	c->active_mask = 13;
-	c->quiet_mask = 242;
+	c->active_mask = 13 & eligible;
+	c->quiet_mask = 242 & eligible;
 	return 0;
 #endif
 }
