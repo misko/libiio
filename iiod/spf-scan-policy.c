@@ -22,7 +22,6 @@ struct spf_scan_policy {
 	uint64_t rng, last_now, visit_count, max_visits;
 	uint64_t last_start[SPF_SCAN_TARGETS], boost_time[SPF_SCAN_TARGETS];
 	uint32_t boost[SPF_SCAN_TARGETS];
-	bool active[SPF_SCAN_TARGETS];
 	uint64_t channel_sequence[SPF_SCAN_TARGETS], highest_sequence, seen;
 	struct pending_feedback pending[SPF_SCAN_TARGETS];
 	struct spf_scan_ack acks[SPF_SCAN_ACK_CAPACITY];
@@ -44,7 +43,7 @@ int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
 	if (!c || !c->session || !c->generation || !c->seed ||
 		!c->targets || c->targets > SPF_SCAN_TARGETS ||
 		!c->duration_ms || c->duration_ms > 300000 ||
-		(c->protocol_version == 3 ?
+		(c->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION ?
 		 (c->dwell_ms != 120 && c->dwell_ms != 240 && c->dwell_ms != 360) :
 		 (c->dwell_ms < 20 || c->dwell_ms > 240)) ||
 		!c->transition_budget_ms || c->transition_budget_ms > 100 ||
@@ -54,10 +53,14 @@ int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
 		!c->decay_ms || c->decay_ms > 60000 ||
 		c->maximum_boost < 1 || c->maximum_boost > 16)
 		return -EINVAL;
-	if (c->protocol_version > 3 ||
-	    (c->protocol_version == 3 && c->source_rate_hz != 2500000 &&
-	     c->source_rate_hz != 10000000) ||
-	    (c->protocol_version != 3 && !spf_scan_rate_valid(c->source_rate_hz)))
+	if ((c->protocol_version != 0 &&
+	     c->protocol_version != SPF_SCAN_PROTOCOL_VERSION &&
+	     c->protocol_version != SPF_SCAN_RUNTIME_RATE_VERSION &&
+	     c->protocol_version != SPF_SCAN_FIXED_DWELL_VERSION) ||
+	    (c->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION &&
+	     c->source_rate_hz != 2500000) ||
+	    (c->protocol_version != SPF_SCAN_FIXED_DWELL_VERSION &&
+	     !spf_scan_rate_valid(c->source_rate_hz)))
 		return -EOPNOTSUPP;
 	for (i = 0; i < sizeof(c->analysis_digest); i++)
 		digest |= c->analysis_digest[i];
@@ -99,8 +102,7 @@ int spf_scan_policy_create(struct spf_scan_policy **out,
 	p->delay = ticks(c, c->application_delay_ms);
 	p->decay = ticks(c, c->decay_ms);
 	p->rng = c->seed;
-	p->max_visits = c->duration_ms /
-		(c->protocol_version == 3 ? 120U : c->dwell_ms) + 1;
+	p->max_visits = c->duration_ms / c->dwell_ms + 1;
 	if (p->max_visits > SPF_SCAN_MAX_VISITS) {
 		free(p);
 		return -E2BIG;
@@ -133,11 +135,6 @@ static uint32_t decayed(const struct spf_scan_policy *p, unsigned target, uint64
 		return SPF_SCAN_WEIGHT_ONE;
 	return SPF_SCAN_WEIGHT_ONE + (uint32_t)((uint64_t)
 		(p->boost[target] - SPF_SCAN_WEIGHT_ONE) * (p->decay - elapsed) / p->decay);
-}
-
-static bool active_at(const struct spf_scan_policy *p, unsigned target, uint64_t now)
-{
-	return p->active[target] && now - p->boost_time[target] < p->decay;
 }
 
 static void terminal_ack(struct spf_scan_policy *p, unsigned target,
@@ -206,9 +203,7 @@ int spf_scan_policy_select(struct spf_scan_policy *p, uint64_t now,
 		return -EBUSY;
 	if (now < p->last_now || (p->visit_count && now < p->visits[p->visit_count - 1].end))
 		return -ERANGE;
-	if (now >= p->end || p->end - now <
-	    (p->config.protocol_version == 3 ? ticks(&p->config, 120U) : p->dwell) +
-	    p->transition)
+	if (now >= p->end || p->end - now < p->dwell + p->transition)
 		return -ENODATA;
 	if (p->visit_count >= p->max_visits)
 		return -EOVERFLOW;
@@ -229,9 +224,6 @@ int spf_scan_policy_select(struct spf_scan_policy *p, uint64_t now,
 					after = p->config.maximum_boost * SPF_SCAN_WEIGHT_ONE;
 				else if (f->value.outcome == SPF_SCAN_QUIET)
 					after = SPF_SCAN_WEIGHT_ONE + (before - SPF_SCAN_WEIGHT_ONE) / 2;
-				if (p->config.protocol_version == 3 &&
-				    f->value.outcome != SPF_SCAN_UNKNOWN)
-					p->active[i] = f->value.outcome == SPF_SCAN_ACTIVE;
 				/* UNKNOWN does not refresh a decaying boost. */
 				if (f->value.outcome != SPF_SCAN_UNKNOWN) {
 					p->boost[i] = after;
@@ -256,8 +248,7 @@ int spf_scan_policy_select(struct spf_scan_policy *p, uint64_t now,
 	p->selection = (struct spf_scan_choice){
 		.visit = p->visit_count, .selection_counter = now, .target = chosen,
 		.eligible_mask = mask, .effective_weight = (uint32_t)weights[chosen],
-		.dwell_ms = p->config.protocol_version == 3 && !active_at(p, chosen, now) ?
-			120U : p->config.dwell_ms,
+		.dwell_ms = p->config.dwell_ms,
 		.deadline_forced = (mask & (mask - 1U)) == 0 && p->config.targets > 1,
 	};
 	if (p->end - now < ticks(&p->config, p->selection.dwell_ms) + p->transition)

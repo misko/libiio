@@ -176,24 +176,26 @@ static void feed_blocks(struct spf_scan_session *session, uint64_t first,
 					     samples) == 0);
 }
 
-static void test_v3_active_360_ms_visit_is_captured(void)
+static void test_v4_fixed_360_ms_visit_is_captured(void)
 {
 	const uint64_t base = UINT64_C(0x1afff0000);
 	struct spf_scan_session_runtime runtime = {
 		.block_count = 64, .headroom_blocks = 2, .block_samples = 100000,
-		.bytes_per_sample = 4, .drain_bytes_per_second = 1000000000,
+		.bytes_per_sample = 8, .drain_bytes_per_second = 1000000000,
 		.release_block = release_block,
 	};
 	struct spf_scan_setup request = setup();
 	struct spf_scan_session *session;
 	struct spf_scan_radio radio;
 	struct spf_scan_choice choice;
-	struct spf_scan_feedback feedback;
-	struct spf_scan_session_output first, active;
+	struct spf_scan_session_output output;
 	uint64_t boundary;
 	uintptr_t token = 40;
 
-	request.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
+	request.protocol_version = SPF_SCAN_FIXED_DWELL_VERSION;
+	request.source_rate_hz = 2500000;
+	request.analog_bandwidth_hz = 2000000;
+	request.rx_mask = SPF_SCAN_RX1_RX2;
 	request.dwell_ms = 360;
 	request.duration_ms = 1000;
 	request.transition_budget_ms = 10;
@@ -203,33 +205,14 @@ static void test_v3_active_360_ms_visit_is_captured(void)
 	mock_now = base;
 	assert(spf_scan_session_create(&session, &request, &runtime, &radio, base) == 0);
 	assert(spf_scan_session_schedule(session, base, base, &choice) == 0);
-	assert(choice.dwell_ms == 120);
-	feed_blocks(session, base, &token, 13, 100000);
-	assert(spf_scan_session_next_boundary(session, &boundary) == 0);
-	mock_now = boundary;
-	assert(spf_scan_session_schedule(session, mock_now, mock_now, &choice) == 0);
-	first = take_complete_bytes(session, 0, UINT64_C(1200000) * 4);
-	feedback = (struct spf_scan_feedback) {
-		.session = request.session, .generation = request.generation,
-		.sequence = 1, .visit = 0, .valid_start = first.record.valid_start,
-		.valid_end = first.record.valid_end, .target = first.record.target,
-		.outcome = SPF_SCAN_ACTIVE,
-	};
-	memcpy(feedback.analysis_digest, request.analysis_digest, 32);
-	assert(spf_scan_session_feedback(session, &feedback, mock_now) ==
-		SPF_SCAN_ACCEPTED);
-	feed_blocks(session, base + 1300000, &token, 12, 100000);
-	assert(spf_scan_session_next_boundary(session, &boundary) == 0);
-	mock_now = boundary;
-	assert(spf_scan_session_schedule(session, mock_now, mock_now, &choice) == 0);
 	assert(choice.dwell_ms == 360);
-	(void)take_complete_bytes(session, 1, UINT64_C(1200000) * 4);
-	feed_blocks(session, base + 2500000, &token, 37, 100000);
+	feed_blocks(session, base, &token, 10, 100000);
 	assert(spf_scan_session_next_boundary(session, &boundary) == 0);
 	mock_now = boundary;
 	assert(spf_scan_session_stop(session, mock_now) == 0);
-	active = take_complete_bytes(session, 2, UINT64_C(3600000) * 4);
-	assert(active.record.valid_end - active.record.valid_start == 3600000);
+	output = take_complete_bytes(session, 0, UINT64_C(900000) * 8);
+	assert(output.record.protocol_version == SPF_SCAN_FIXED_DWELL_VERSION);
+	assert(output.record.valid_end - output.record.valid_start == 900000);
 	assert(spf_scan_session_destroy(session) == 0);
 }
 
@@ -641,7 +624,7 @@ static void test_runtime_rates_and_rejected_clock(void)
 
 int main(void)
 {
-	test_v3_active_360_ms_visit_is_captured();
+	test_v4_fixed_360_ms_visit_is_captured();
 	test_three_visits_feedback_and_early_restore();
 	test_recall_failure_cancels_and_restores();
 	test_dual_rx_uses_one_shared_recall_and_eight_byte_frames();

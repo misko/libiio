@@ -9,6 +9,9 @@
 #define SPF_SCAN_MAX_VISITS 16384U
 #define SPF_SCAN_ACK_CAPACITY 64U
 #define SPF_SCAN_WEIGHT_ONE 65536U
+#define SPF_SCAN_PROTOCOL_VERSION UINT16_C(1)
+#define SPF_SCAN_RUNTIME_RATE_VERSION UINT16_C(2)
+#define SPF_SCAN_FIXED_DWELL_VERSION UINT16_C(4)
 
 /* Policy is transport-independent. One session mutex must serialize its API.
  * All times are uint64 source-clock ticks, never host timestamps or doubles.

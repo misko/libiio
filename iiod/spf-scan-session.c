@@ -130,7 +130,7 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	struct spf_scan_radio_release_receipt ignored;
 	size_t capacity;
 	unsigned i;
-	uint64_t actual_start;
+	uint64_t actual_start, visit_samples, visit_bytes, required_blocks;
 	int ret;
 
 	if (!out || !setup || !runtime || !radio || !runtime->release_block ||
@@ -139,9 +139,20 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	ret = spf_scan_setup_validate(setup);
 	if (ret)
 		return ret;
-	capacity = setup->duration_ms /
-		(setup->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ? 120U :
-		 setup->dwell_ms) + 1U;
+	if (setup->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION) {
+		if (!runtime->block_samples || runtime->block_count < 4 ||
+		    !runtime->headroom_blocks ||
+		    runtime->headroom_blocks >= runtime->block_count)
+			return -EINVAL;
+		visit_samples = spf_scan_ticks(setup->source_rate_hz, setup->dwell_ms);
+		visit_bytes = visit_samples * runtime->bytes_per_sample;
+		required_blocks = (visit_samples + runtime->block_samples - 1) /
+			runtime->block_samples + 1;
+		if (visit_bytes > setup->maximum_queue_bytes ||
+		    required_blocks > runtime->block_count - runtime->headroom_blocks)
+			return -ENOSPC;
+	}
+	capacity = setup->duration_ms / setup->dwell_ms + 1U;
 	if (capacity > SPF_SCAN_MAX_VISITS)
 		return -E2BIG;
 	session = calloc(1, sizeof(*session));
@@ -192,7 +203,7 @@ int spf_scan_session_create(struct spf_scan_session **out,
 			setup->maximum_queue_age_ms / 1000,
 		.drain_bytes_per_second = runtime->drain_bytes_per_second,
 		.maximum_visit_ms = setup->protocol_version ==
-			SPF_SCAN_RANDOM_DWELL_VERSION ? 360U : 240U,
+			SPF_SCAN_FIXED_DWELL_VERSION ? 360U : 240U,
 	};
 	ret = spf_visit_queue_create(&session->queue, &queue_config,
 				     runtime->release_block,

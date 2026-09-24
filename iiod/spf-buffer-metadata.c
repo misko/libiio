@@ -1396,10 +1396,10 @@ int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, uint16_t ve
 	if (ret)
 		return ret;
 	spf_scan_caps_default(&caps);
-	if (version == SPF_SCAN_RANDOM_DWELL_VERSION) {
-		caps.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
+	if (version == SPF_SCAN_FIXED_DWELL_VERSION) {
+		caps.protocol_version = SPF_SCAN_FIXED_DWELL_VERSION;
 		caps.rate_mode = 0;
-		caps.rate_mask = SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_10M;
+		caps.rate_mask = SPF_SCAN_RATE_2P5M;
 		caps.minimum_rate_hz = 0;
 		caps.maximum_rate_hz = 0;
 		caps.minimum_dwell_ms = 120;

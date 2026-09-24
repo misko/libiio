@@ -103,8 +103,8 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 <INITIAL>SCANCAPS2|scancaps2 {
 	return SCANCAPS2;
 }
-<INITIAL>SCANCAPS3|scancaps3 {
-	return SCANCAPS3;
+<INITIAL>SCANCAPS4|scancaps4 {
+	return SCANCAPS4;
 }
 
 <INITIAL>SCANFEEDBACK|scanfeedback {
