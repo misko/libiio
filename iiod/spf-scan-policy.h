@@ -17,6 +17,7 @@ struct spf_scan_policy;
 
 struct spf_scan_policy_config {
 	uint64_t session, generation, seed;
+	uint16_t protocol_version;
 	uint32_t source_rate_hz, targets, duration_ms, dwell_ms;
 	uint32_t transition_budget_ms, maximum_revisit_ms;
 	uint32_t feedback_age_ms, application_delay_ms, decay_ms;
@@ -45,7 +46,7 @@ struct spf_scan_ack {
 
 struct spf_scan_choice {
 	uint64_t visit, selection_counter;
-	uint32_t target, eligible_mask, effective_weight;
+	uint32_t target, eligible_mask, effective_weight, dwell_ms;
 	bool deadline_forced;
 };
 

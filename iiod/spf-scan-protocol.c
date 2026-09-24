@@ -79,7 +79,8 @@ static int check(const uint8_t *p, size_t actual, size_t expected,
 	if (get32(p) != magic ||
 	    ((uint16_t)(p[4] | p[5] << 8) != SPF_SCAN_PROTOCOL_VERSION &&
 	     !((magic == MAGIC_CAPS || magic == MAGIC_SETUP || magic == MAGIC_VISIT) &&
-	       (uint16_t)(p[4] | p[5] << 8) == SPF_SCAN_RUNTIME_RATE_VERSION)) ||
+	       ((uint16_t)(p[4] | p[5] << 8) == SPF_SCAN_RUNTIME_RATE_VERSION ||
+	        (uint16_t)(p[4] | p[5] << 8) == SPF_SCAN_RANDOM_DWELL_VERSION))) ||
 	    (uint16_t)(p[6] | p[7] << 8) != expected)
 		return -EPROTONOSUPPORT;
 	if (get32(p + 8) != SPF_SCAN_PROTOCOL_FEATURES || get32(p + 12) != flags ||
@@ -182,6 +183,8 @@ static bool rate_valid(uint32_t rate, uint16_t version)
 {
 	if (!version || version == SPF_SCAN_PROTOCOL_VERSION)
 		return rate_flag(rate) != 0;
+	if (version == SPF_SCAN_RANDOM_DWELL_VERSION)
+		return rate == 2500000 || rate == 10000000;
 	return version == SPF_SCAN_RUNTIME_RATE_VERSION && spf_scan_rate_valid(rate);
 }
 
@@ -224,7 +227,12 @@ static int caps_validate(const struct spf_scan_caps *caps)
 {
 	if (!caps)
 		return -EINVAL;
-	if (caps->protocol_version == SPF_SCAN_RUNTIME_RATE_VERSION) {
+	if (caps->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION) {
+		if (caps->rate_mode || caps->minimum_rate_hz || caps->maximum_rate_hz ||
+		    caps->rate_mask != (SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_10M) ||
+		    caps->minimum_dwell_ms != 120 || caps->maximum_dwell_ms != 360)
+			return -EINVAL;
+	} else if (caps->protocol_version == SPF_SCAN_RUNTIME_RATE_VERSION) {
 		if (caps->rate_mode != SPF_SCAN_RATE_MODE_SETUP_VALIDATED ||
 		    caps->minimum_rate_hz < SPF_SCAN_RATE_MIN ||
 		    caps->maximum_rate_hz > SPF_SCAN_RATE_MAX ||
@@ -235,11 +243,13 @@ static int caps_validate(const struct spf_scan_caps *caps)
 		   caps->rate_mode || caps->minimum_rate_hz || caps->maximum_rate_hz) {
 		return -EINVAL;
 	}
-	if (!caps || caps->rate_mask != SPF_SCAN_RATE_MASK_FIXED ||
+	if (!caps || (caps->protocol_version != SPF_SCAN_RANDOM_DWELL_VERSION &&
+	    caps->rate_mask != SPF_SCAN_RATE_MASK_FIXED) ||
 	    caps->rx_mask != SPF_SCAN_RX1_RX2 || caps->formats != SPF_SCAN_FORMAT_CI16 ||
 	    caps->maximum_targets != SPF_SCAN_TARGETS ||
 	    caps->maximum_fastlock_profiles != SPF_SCAN_TARGETS ||
-	    caps->minimum_dwell_ms != 20 || caps->maximum_dwell_ms != 240 ||
+	    (caps->protocol_version != SPF_SCAN_RANDOM_DWELL_VERSION &&
+	     (caps->minimum_dwell_ms != 20 || caps->maximum_dwell_ms != 240)) ||
 	    caps->maximum_duration_ms != 300000 ||
 	    caps->maximum_queue_bytes != UINT64_C(200000000) ||
 	    caps->maximum_queue_age_ms != 10000 ||
@@ -261,6 +271,7 @@ int spf_scan_setup_policy(const struct spf_scan_setup *setup,
 		return -EINVAL;
 	memset(policy, 0, sizeof(*policy));
 	policy->session = setup->session;
+	policy->protocol_version = setup->protocol_version;
 	policy->generation = setup->generation;
 	policy->seed = setup->seed;
 	policy->source_rate_hz = setup->source_rate_hz;

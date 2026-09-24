@@ -139,7 +139,9 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	ret = spf_scan_setup_validate(setup);
 	if (ret)
 		return ret;
-	capacity = setup->duration_ms / setup->dwell_ms + 1U;
+	capacity = setup->duration_ms /
+		(setup->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ? 120U :
+		 setup->dwell_ms) + 1U;
 	if (capacity > SPF_SCAN_MAX_VISITS)
 		return -E2BIG;
 	session = calloc(1, sizeof(*session));
@@ -280,7 +282,7 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 	entry = &session->ledger[session->ledger_count++];
 	memset(entry, 0, sizeof(*entry));
 	entry->choice = selected;
-	samples = (uint32_t)ticks(session, session->setup.dwell_ms);
+	samples = (uint32_t)ticks(session, selected.dwell_ms);
 	ret = spf_visit_queue_reserve(session->queue, selected.visit, samples,
 				      now, &admission);
 	if (ret) {

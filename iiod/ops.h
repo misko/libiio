@@ -124,7 +124,7 @@ ssize_t read_buffer_metadata_status(struct parser_pdata *pdata,
 ssize_t read_adaptive_scan(struct parser_pdata *pdata,
 		struct iio_device *dev);
 ssize_t read_adaptive_scan_capabilities(struct parser_pdata *pdata,
-		size_t capacity, bool runtime_rates);
+					 size_t capacity, uint16_t version);
 ssize_t read_adaptive_scan_time(struct parser_pdata *, struct iio_device *, size_t);
 void read_adaptive_scan_time_capabilities(struct parser_pdata *);
 ssize_t submit_adaptive_scan_feedback(struct parser_pdata *pdata,
