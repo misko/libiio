@@ -17,3 +17,20 @@ accounting use that exact interval. Feedback, acknowledgements, terminal
 records, and counter observations remain v1. Firmware without `SCANCAPS3`
 cannot admit a v3 setup, so clients must fail closed instead of falling back to
 a fixed-duration protocol.
+
+The reviewed ARM artifact uses the feature-103 toolchain, the v9-30 Buildroot
+host/sysroot and metadata sources, and this tree's metadata provider. Its build
+shape is:
+
+```sh
+PLUTO_TOOLCHAIN_ROOT=$BUILDROOT/output/host cmake -S . -B build-arm-v3 \
+  -DCMAKE_TOOLCHAIN_FILE=$FIRMWARE/scripts/issue97/arm-toolchain.cmake \
+  -DHAVE_DNS_SD=OFF -DWITH_IIOD=ON -DWITH_IIOD_SERIAL=OFF \
+  -DWITH_IIOD_USBD=OFF -DWITH_LOCAL_BACKEND=ON \
+  -DWITH_NETWORK_BACKEND=ON -DWITH_USB_BACKEND=OFF -DWITH_TESTS=OFF \
+  -DIIOD_BUFFER_METADATA_PROVIDER=$PWD/iiod/spf-buffer-metadata.c \
+  -DIIOD_BUFFER_METADATA_PROVIDER_EXTRA_SOURCES="$EXTRA_SOURCES" \
+  -DIIOD_BUFFER_METADATA_INCLUDE_DIRS=$METADATA_SOURCE
+PLUTO_TOOLCHAIN_ROOT=$BUILDROOT/output/host \
+  cmake --build build-arm-v3 --target iiod -j2
+```
