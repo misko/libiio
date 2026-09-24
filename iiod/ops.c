@@ -3887,7 +3887,7 @@ static void scan_control_entry_put(struct DevEntry *entry)
 }
 
 ssize_t read_adaptive_scan_capabilities(struct parser_pdata *pdata,
-		size_t capacity, bool runtime_rates)
+					 size_t capacity, uint16_t version)
 {
 	uint8_t wire[SPF_SCAN_CAPS_BYTES];
 	ssize_t ret;
@@ -3895,7 +3895,7 @@ ssize_t read_adaptive_scan_capabilities(struct parser_pdata *pdata,
 	if (capacity < sizeof(wire))
 		ret = -ENOSPC;
 	else
-		ret = iiod_buffer_metadata_scan_capabilities(wire, sizeof(wire), runtime_rates);
+		ret = iiod_buffer_metadata_scan_capabilities(wire, sizeof(wire), version);
 	if (ret) {
 		print_value(pdata, ret);
 		return ret;

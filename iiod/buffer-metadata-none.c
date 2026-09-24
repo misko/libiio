@@ -190,11 +190,11 @@ int iiod_buffer_metadata_scan_time(void *provider_context,
 	return -EOPNOTSUPP;
 }
 
-int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, bool runtime_rates)
+int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, uint16_t version)
 {
 	(void)wire;
 	(void)bytes;
-	(void)runtime_rates;
+	(void)version;
 	return -EOPNOTSUPP;
 }
 

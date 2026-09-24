@@ -121,6 +121,44 @@ static void test_commit_after_transition_budget_is_valid(void)
 	spf_scan_policy_destroy(p);
 }
 
+static void test_v3_active_base_and_quiet_probe_durations(void)
+{
+	struct spf_scan_policy_config c = config();
+	struct spf_scan_policy *p = NULL;
+	struct spf_scan_choice choice;
+	struct spf_scan_feedback f;
+	uint64_t now = 0, start;
+
+	c.protocol_version = 3;
+	c.source_rate_hz = 2500000;
+	c.targets = 1;
+	c.dwell_ms = 360;
+	memset(c.baseline, 0, sizeof(c.baseline));
+	c.baseline[0] = 1;
+	assert(!spf_scan_policy_create(&p, &c, 0));
+	assert(!spf_scan_policy_select(p, now, &choice));
+	assert(choice.dwell_ms == 120);
+	start = now + dt(&c, 10);
+	assert(!spf_scan_policy_commit(p, start));
+	assert(!spf_scan_policy_finish_visit(p, choice.visit, true));
+	f = observation(&c, &choice, start, 1, SPF_SCAN_ACTIVE);
+	f.valid_end = start + dt(&c, choice.dwell_ms);
+	now = f.valid_end;
+	assert(spf_scan_policy_feedback(p, &f, now) == SPF_SCAN_ACCEPTED);
+	assert(!spf_scan_policy_select(p, now, &choice));
+	assert(choice.dwell_ms == 360);
+	start = now + dt(&c, 10);
+	assert(!spf_scan_policy_commit(p, start));
+	assert(!spf_scan_policy_finish_visit(p, choice.visit, true));
+	f = observation(&c, &choice, start, 2, SPF_SCAN_QUIET);
+	f.valid_end = start + dt(&c, choice.dwell_ms);
+	now = f.valid_end;
+	assert(spf_scan_policy_feedback(p, &f, now) == SPF_SCAN_ACCEPTED);
+	assert(!spf_scan_policy_select(p, now, &choice));
+	assert(choice.dwell_ms == 120);
+	spf_scan_policy_destroy(p);
+}
+
 static void test_mailbox_reservation(void)
 {
 	struct spf_scan_policy_config c = config();
@@ -265,6 +303,7 @@ int main(void)
 	test_admission();
 	test_feedback_and_terminal();
 	test_commit_after_transition_budget_is_valid();
+	test_v3_active_base_and_quiet_probe_durations();
 	test_mailbox_reservation();
 	test_order_expiry_and_invalid_capture();
 	test_weighted_replay_and_deadlines();
