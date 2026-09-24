@@ -46,6 +46,7 @@ int spf_visit_queue_create(struct spf_visit_queue **out,
 		!c->block_samples || c->block_samples > 1000000 ||
 		!spf_scan_rate_valid(c->source_rate_hz) ||
 		(c->bytes_per_sample != 4 && c->bytes_per_sample != 8) ||
+		!c->maximum_visit_ms || c->maximum_visit_ms > 360 ||
 		!c->maximum_bytes || c->maximum_bytes > UINT64_C(200000000) ||
 		!c->maximum_age_ticks || c->maximum_age_ticks > (uint64_t)c->source_rate_hz * 10 ||
 		!c->drain_bytes_per_second || c->drain_bytes_per_second > UINT64_C(1000000000))
@@ -92,7 +93,8 @@ int spf_visit_queue_reserve(struct spf_visit_queue *q, uint64_t id,
 		ticks_to_drain, oldest_age = 0;
 	unsigned blocks;
 	struct visit *v;
-	if (!q || !result || !samples || samples > (uint64_t)q->config.source_rate_hz * 240 / 1000)
+	if (!q || !result || !samples || samples >
+	    (uint64_t)q->config.source_rate_hz * q->config.maximum_visit_ms / 1000)
 		return -EINVAL;
 	if (q->cancelled) return -ESHUTDOWN;
 	if (q->have_id && id <= q->last_reserved_id) return -ERANGE;
