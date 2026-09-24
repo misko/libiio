@@ -191,6 +191,8 @@ int spf_scan_session_create(struct spf_scan_session **out,
 		.maximum_age_ticks = (uint64_t)setup->source_rate_hz *
 			setup->maximum_queue_age_ms / 1000,
 		.drain_bytes_per_second = runtime->drain_bytes_per_second,
+		.maximum_visit_ms = setup->protocol_version ==
+			SPF_SCAN_RANDOM_DWELL_VERSION ? 360U : 240U,
 	};
 	ret = spf_visit_queue_create(&session->queue, &queue_config,
 				     runtime->release_block,
