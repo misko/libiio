@@ -206,7 +206,9 @@ int spf_scan_policy_select(struct spf_scan_policy *p, uint64_t now,
 		return -EBUSY;
 	if (now < p->last_now || (p->visit_count && now < p->visits[p->visit_count - 1].end))
 		return -ERANGE;
-	if (now >= p->end)
+	if (now >= p->end || p->end - now <
+	    (p->config.protocol_version == 3 ? ticks(&p->config, 120U) : p->dwell) +
+	    p->transition)
 		return -ENODATA;
 	if (p->visit_count >= p->max_visits)
 		return -EOVERFLOW;
