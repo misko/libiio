@@ -137,6 +137,8 @@ static void *scheduler_worker(void *opaque)
 
 	for (index = 0; index < scheduler->request.dwell_count; index++) {
 		uint8_t profile = (uint8_t)(index % SPF_HOP_PROFILE_COUNT);
+		uint64_t decision_counter;
+		bool no_recall;
 
 		if (index) {
 			if (next_invalid_start < startup_invalid_start ||
@@ -151,14 +153,14 @@ static void *scheduler_worker(void *opaque)
 			break;
 		}
 		memset(&adaptive_event, 0, sizeof(adaptive_event));
+		no_recall = false;
 		if (scheduler->adaptive) {
-			uint64_t now;
-			ret = scheduler->io.get_counter(scheduler->io_context, &now);
+			ret = scheduler->io.get_counter(scheduler->io_context, &decision_counter);
 			if (ret) { ret = ret > 0 ? -EIO : ret; break; }
-			ret = scheduler->policy.choose(scheduler->policy_context, index, now,
+			ret = scheduler->policy.choose(scheduler->policy_context, index, decision_counter,
 				&adaptive_event.choice);
 			if (ret) { ret = ret > 0 ? -EIO : ret; break; }
-			if (adaptive_event.choice.decision_counter != now ||
+			if (adaptive_event.choice.decision_counter != decision_counter ||
 				adaptive_event.choice.generation != scheduler->adaptive_request.policy.generation ||
 				adaptive_event.choice.mode != scheduler->adaptive_request.policy.mode ||
 				adaptive_event.choice.proposed_target >= SPF_HOP_PROFILE_COUNT) {
@@ -169,20 +171,29 @@ static void *scheduler_worker(void *opaque)
 		}
 
 		memset(&transition, 0, sizeof(transition));
-		ret = scheduler->io.recall(scheduler->io_context,
-			scheduler->request.profiles[profile].fastlock_slot,
-			scheduler->request.profiles[profile].lo_frequency_hz,
-			&transition);
-		if (ret) {
-			ret = ret > 0 ? -EIO : ret;
-			break;
+		no_recall = scheduler->adaptive && index && profile == previous_profile;
+		if (no_recall) {
+			transition.transition_before = decision_counter;
+			transition.transition_after = decision_counter;
+			transition.actual_lo_frequency_hz =
+				scheduler->request.profiles[profile].lo_frequency_hz;
+			transition.active_profile = scheduler->request.profiles[profile].fastlock_slot;
+		} else {
+			ret = scheduler->io.recall(scheduler->io_context,
+				scheduler->request.profiles[profile].fastlock_slot,
+				scheduler->request.profiles[profile].lo_frequency_hz,
+				&transition);
+			if (ret) {
+				ret = ret > 0 ? -EIO : ret;
+				break;
+			}
 		}
 		if (transition.transition_before > transition.transition_after ||
 			transition.actual_lo_frequency_hz !=
 				scheduler->request.profiles[profile].lo_frequency_hz ||
 			transition.active_profile !=
 				scheduler->request.profiles[profile].fastlock_slot ||
-			!transition.device_event_id) {
+			(!no_recall && !transition.device_event_id)) {
 			ret = -EBADMSG;
 			break;
 		}
@@ -197,19 +208,20 @@ static void *scheduler_worker(void *opaque)
 		event.from_profile = previous_profile;
 		event.to_profile = profile;
 		event.kind = index ? SPF_HOP_EVENT_RETUNE : SPF_HOP_EVENT_STARTUP;
-		event.flags = SPF_HOP_EVENT_FLAGS_V1;
+		event.flags = SPF_HOP_EVENT_FLAGS_V1 |
+			(no_recall ? SPF_HOP_EVENT_NO_RECALL : 0);
 		event.fastlock_slot =
 			scheduler->request.profiles[profile].fastlock_slot;
-		if (transition.transition_after > UINT64_MAX -
+		if (!no_recall && (transition.transition_after > UINT64_MAX -
 				scheduler->request.transition_guard_samples ||
 			transition.transition_after +
 				scheduler->request.transition_guard_samples >
-				UINT64_MAX - scheduler->request.dwell_samples) {
+				UINT64_MAX - scheduler->request.dwell_samples)) {
 			ret = -EOVERFLOW;
 			break;
 		}
 		next_invalid_start = transition.transition_after +
-			scheduler->request.transition_guard_samples +
+			(no_recall ? 0 : scheduler->request.transition_guard_samples) +
 			scheduler->request.dwell_samples;
 		adaptive_event.device = event;
 		if (scheduler->adaptive) {

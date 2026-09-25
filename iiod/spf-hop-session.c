@@ -190,6 +190,7 @@ static int validate_device_event(struct spf_hop_session_v1 *session,
 {
 	const struct spf_hop_profile_v1 *profile;
 	uint8_t expected_from;
+	bool no_recall;
 
 	if (device->event_sequence != session->status.next_event_sequence ||
 		device->dwell_index != session->status.visits_started ||
@@ -205,14 +206,19 @@ static int validate_device_event(struct spf_hop_session_v1 *session,
 		if (device->kind != SPF_HOP_EVENT_RETUNE)
 			return -EILSEQ;
 	}
+	no_recall = device->flags & SPF_HOP_EVENT_NO_RECALL;
 	if (device->from_profile != expected_from ||
 		device->to_profile >= SPF_HOP_PROFILE_COUNT ||
 		(!choice && device->to_profile != device->dwell_index % SPF_HOP_PROFILE_COUNT) ||
-		device->flags != SPF_HOP_EVENT_FLAGS_V1 ||
-		!device->device_event_id ||
+		(device->flags & ~SPF_HOP_EVENT_FLAGS_ALLOWED_V1) ||
+		(device->flags & SPF_HOP_EVENT_FLAGS_V1) != SPF_HOP_EVENT_FLAGS_V1 ||
+		(!no_recall && !device->device_event_id) ||
+		(no_recall && (device->kind != SPF_HOP_EVENT_RETUNE ||
+		 device->from_profile != device->to_profile || device->device_event_id ||
+		 device->transition_before != device->transition_after)) ||
 		device->transition_before > device->transition_after ||
-		device->transition_after > UINT64_MAX -
-			session->request.transition_guard_samples)
+		(!no_recall && device->transition_after > UINT64_MAX -
+			session->request.transition_guard_samples))
 		return -EBADMSG;
 	if (session->have_last_event &&
 		session->last_event.invalid_end > UINT64_MAX -
@@ -234,8 +240,8 @@ static int validate_device_event(struct spf_hop_session_v1 *session,
 	event->invalid_start = session->have_last_event ?
 		session->last_event.invalid_end + session->request.dwell_samples :
 		device->transition_before;
-	event->invalid_end = device->transition_after +
-		session->request.transition_guard_samples;
+	event->invalid_end = no_recall ? event->invalid_start :
+		device->transition_after + session->request.transition_guard_samples;
 	if (choice && (!policy || choice->generation != policy->generation ||
 		choice->mode != policy->mode || spf_hop_choice_v2_validate(choice, event) ||
 		choice->consecutive_misses > policy->missed_dwells ||
@@ -245,8 +251,8 @@ static int validate_device_event(struct spf_hop_session_v1 *session,
 		return -EBADMSG;
 	if (session->have_last_event) {
 		if (event->invalid_start < session->last_event.invalid_end ||
-			device->transition_before < event->invalid_start ||
-			device->device_event_id <= session->last_device_event_id)
+			(!no_recall && device->transition_before < event->invalid_start) ||
+			(!no_recall && device->device_event_id <= session->last_device_event_id))
 			return -ERANGE;
 		/* The previous visit reached the requested capture envelope.  The
 		 * provider was required to stop rather than activate another visit. */
@@ -266,7 +272,8 @@ static void accept_event(struct spf_hop_session_v1 *session,
 	const struct spf_hop_event_v1 *event)
 {
 	session->last_event = *event;
-	session->last_device_event_id = event->device.device_event_id;
+	if (event->device.device_event_id)
+		session->last_device_event_id = event->device.device_event_id;
 	session->have_last_event = 1;
 	session->status.next_event_sequence++;
 	session->status.visits_started++;

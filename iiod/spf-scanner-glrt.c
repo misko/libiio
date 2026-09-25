@@ -77,7 +77,7 @@ int spf_scanner_glrt_validate(const leo_scanner_glrt_request_v1 *request,
 	uint64_t maximum;
 	unsigned int profile;
 
-	if (!request || !hop || !request->generation || !hop->session_id || request->rx != 1 ||
+	if (!request || !hop || !request->generation || !hop->session_id || request->rx != 0 ||
 		(hop->sample_rate_hz != 2500000 && hop->sample_rate_hz != 5000000) ||
 		hop->rf_bandwidth_hz != hop->sample_rate_hz || hop->initial_profile != 0 ||
 		hop->dwell_samples != hop->sample_rate_hz / 50 * 6 ||

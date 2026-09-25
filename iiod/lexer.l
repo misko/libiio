@@ -100,12 +100,28 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 <INITIAL>SCANCAPS|scancaps {
 	return SCANCAPS;
 }
+<INITIAL>SCANCAPS2|scancaps2 {
+	return SCANCAPS2;
+}
+<INITIAL>SCANCAPS3|scancaps3 {
+	return SCANCAPS3;
+}
+<INITIAL>SCANCAPS4|scancaps4 {
+	return SCANCAPS4;
+}
 
 <INITIAL>SCANFEEDBACK|scanfeedback {
 	BEGIN(WANT_DEVICE);
 	return SCANFEEDBACK;
 }
 
+<INITIAL>SCANTIME|scantime {
+	BEGIN(WANT_DEVICE);
+	return SCANTIME;
+}
+<INITIAL>SCANTIMECAPS|scantimecaps {
+	return SCANTIMECAPS;
+}
 <INITIAL>SCANACK|scanack {
 	BEGIN(WANT_DEVICE);
 	return SCANACK;

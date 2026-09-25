@@ -12,7 +12,7 @@ struct spf_scan_session;
 
 struct spf_scan_session_runtime {
 	unsigned block_count, headroom_blocks;
-	uint32_t block_samples;
+	uint32_t block_samples, bytes_per_sample;
 	uint64_t drain_bytes_per_second;
 	int (*release_block)(void *context, uintptr_t token);
 	void *release_context;

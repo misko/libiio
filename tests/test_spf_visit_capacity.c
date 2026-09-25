@@ -134,6 +134,8 @@ static struct result simulate(uint32_t rate, uint32_t dwell_ms,
 		.maximum_bytes = 200000000,
 		.maximum_age_ticks = (uint64_t)rate * 5,
 		.drain_bytes_per_second = drain_bytes_per_second,
+		.maximum_visit_ms = 240,
+		.bytes_per_sample = 4,
 	};
 	struct simulation simulation = {
 		.rate = rate,

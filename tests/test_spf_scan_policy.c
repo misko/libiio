@@ -37,12 +37,15 @@ static void test_admission(void)
 {
 	struct spf_scan_policy_config c = config(), bad;
 	struct spf_scan_policy *p = NULL;
-	unsigned rates[] = {10000000, 15000000, 20000000, 30000000}, i;
-	for (i = 0; i < 4; i++) {
+	unsigned rates[] = {520833, 2500000, 5000000, 7500000, 8000000,
+		12345679, 10000000, 15000000, 20000000, 30000000, 61440000}, i;
+	for (i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
 		c.source_rate_hz = rates[i];
 		assert(!spf_scan_policy_validate(&c));
 	}
-	bad = c; bad.source_rate_hz = 60000000;
+	bad = c; bad.source_rate_hz = 61440001;
+	assert(spf_scan_policy_validate(&bad) == -EOPNOTSUPP);
+	bad = c; bad.source_rate_hz = 520832;
 	assert(spf_scan_policy_validate(&bad) == -EOPNOTSUPP);
 	bad = c; bad.maximum_revisit_ms = 1039;
 	assert(spf_scan_policy_validate(&bad) == -ERANGE);
@@ -99,6 +102,121 @@ static void test_feedback_and_terminal(void)
 	assert(ack.result == SPF_SCAN_CANCELLED && ack.first_visit == UINT64_MAX);
 	assert(spf_scan_policy_take_ack(p, &ack) == -EAGAIN);
 	assert(spf_scan_policy_select(p, f.valid_end, &choice) == -ESHUTDOWN);
+	spf_scan_policy_destroy(p);
+}
+
+static void test_commit_after_transition_budget_is_valid(void)
+{
+	struct spf_scan_policy_config c = config();
+	struct spf_scan_policy *p = NULL;
+	struct spf_scan_choice choice;
+	uint64_t start = dt(&c, 25);
+
+	assert(!spf_scan_policy_create(&p, &c, 0));
+	assert(!spf_scan_policy_select(p, 0, &choice));
+	assert(start > choice.selection_counter + dt(&c, c.transition_budget_ms));
+	assert(!spf_scan_policy_commit(p, start));
+	assert(!spf_scan_policy_finish_visit(p, choice.visit, true));
+	spf_scan_policy_stop(p, start + dt(&c, c.dwell_ms));
+	spf_scan_policy_destroy(p);
+}
+
+static void test_v4_feedback_never_changes_dwell(void)
+{
+	const uint32_t dwells[] = {120, 240, 360};
+	unsigned i;
+
+	for (i = 0; i < sizeof(dwells) / sizeof(dwells[0]); i++) {
+		struct spf_scan_policy_config c = config();
+		struct spf_scan_policy *p = NULL;
+		struct spf_scan_choice choice;
+		struct spf_scan_feedback f;
+		uint64_t now = 0, start;
+
+		c.protocol_version = SPF_SCAN_FIXED_DWELL_VERSION;
+		c.source_rate_hz = 2500000;
+		c.targets = 1;
+		c.dwell_ms = dwells[i];
+		memset(c.baseline, 0, sizeof(c.baseline));
+		c.baseline[0] = 1;
+		assert(!spf_scan_policy_create(&p, &c, 0));
+		assert(!spf_scan_policy_select(p, now, &choice));
+		assert(choice.dwell_ms == dwells[i]);
+		start = now + dt(&c, 10);
+		assert(!spf_scan_policy_commit(p, start));
+		assert(!spf_scan_policy_finish_visit(p, choice.visit, true));
+		f = observation(&c, &choice, start, 1, SPF_SCAN_ACTIVE);
+		f.valid_end = start + dt(&c, choice.dwell_ms);
+		now = f.valid_end;
+		assert(spf_scan_policy_feedback(p, &f, now) == SPF_SCAN_ACCEPTED);
+		assert(!spf_scan_policy_select(p, now, &choice));
+		assert(choice.dwell_ms == dwells[i]);
+		start = now + dt(&c, 10);
+		assert(!spf_scan_policy_commit(p, start));
+		assert(!spf_scan_policy_finish_visit(p, choice.visit, true));
+		f = observation(&c, &choice, start, 2, SPF_SCAN_QUIET);
+		f.valid_end = start + dt(&c, choice.dwell_ms);
+		now = f.valid_end;
+		assert(spf_scan_policy_feedback(p, &f, now) == SPF_SCAN_ACCEPTED);
+		assert(!spf_scan_policy_select(p, now, &choice));
+		assert(choice.dwell_ms == dwells[i]);
+		spf_scan_policy_destroy(p);
+	}
+}
+
+static void test_v3_activity_latch_is_independent_of_boost_decay(void)
+{
+	struct spf_scan_policy_config c = config();
+	struct spf_scan_policy *p = NULL;
+	struct spf_scan_choice choice;
+	struct spf_scan_feedback f;
+	uint64_t now = 0, start;
+
+	c.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
+	c.source_rate_hz = 10000000;
+	c.targets = 1;
+	c.dwell_ms = 360;
+	c.maximum_revisit_ms = 10000;
+	memset(c.baseline, 0, sizeof(c.baseline));
+	c.baseline[0] = 1;
+	assert(!spf_scan_policy_create(&p, &c, 0));
+	assert(!spf_scan_policy_select(p, now, &choice));
+	assert(choice.dwell_ms == 120);
+	start = now + dt(&c, 10);
+	assert(!spf_scan_policy_commit(p, start));
+	assert(!spf_scan_policy_finish_visit(p, choice.visit, true));
+	f = observation(&c, &choice, start, 1, SPF_SCAN_ACTIVE);
+	f.valid_end = start + dt(&c, choice.dwell_ms);
+	now = f.valid_end;
+	assert(spf_scan_policy_feedback(p, &f, now) == SPF_SCAN_ACCEPTED);
+	assert(!spf_scan_policy_select(p, now, &choice));
+	assert(choice.dwell_ms == 360);
+	start = now + dt(&c, 10);
+	assert(!spf_scan_policy_commit(p, start));
+	assert(!spf_scan_policy_finish_visit(p, choice.visit, true));
+
+	/* Weight decay changes selection weight only; it cannot clear activity. */
+	now = start + dt(&c, c.decay_ms + 1);
+	assert(!spf_scan_policy_select(p, now, &choice));
+	assert(choice.dwell_ms == 360);
+	start = now + dt(&c, 10);
+	assert(!spf_scan_policy_commit(p, start));
+	assert(!spf_scan_policy_finish_visit(p, choice.visit, true));
+	f = observation(&c, &choice, start, 2, SPF_SCAN_UNKNOWN);
+	f.valid_end = start + dt(&c, choice.dwell_ms);
+	now = f.valid_end;
+	assert(spf_scan_policy_feedback(p, &f, now) == SPF_SCAN_ACCEPTED);
+	assert(!spf_scan_policy_select(p, now, &choice));
+	assert(choice.dwell_ms == 360);
+	start = now + dt(&c, 10);
+	assert(!spf_scan_policy_commit(p, start));
+	assert(!spf_scan_policy_finish_visit(p, choice.visit, true));
+	f = observation(&c, &choice, start, 3, SPF_SCAN_QUIET);
+	f.valid_end = start + dt(&c, choice.dwell_ms);
+	now = f.valid_end;
+	assert(spf_scan_policy_feedback(p, &f, now) == SPF_SCAN_ACCEPTED);
+	assert(!spf_scan_policy_select(p, now, &choice));
+	assert(choice.dwell_ms == 120);
 	spf_scan_policy_destroy(p);
 }
 
@@ -245,6 +363,9 @@ int main(void)
 {
 	test_admission();
 	test_feedback_and_terminal();
+	test_commit_after_transition_budget_is_valid();
+	test_v4_feedback_never_changes_dwell();
+	test_v3_activity_latch_is_independent_of_boost_decay();
 	test_mailbox_reservation();
 	test_order_expiry_and_invalid_capture();
 	test_weighted_replay_and_deadlines();

@@ -114,7 +114,35 @@ struct spf_iiod_metadata_context {
 	struct spf_scan_radio scan_radio;
 	struct spf_scan_session *scan_session;
 	uint64_t scan_counter_anchor;
+	uint64_t scan_clock_epoch;
+	uint8_t scan_boot_id[16];
 };
+
+static uint64_t scan_monotonic_ns(void)
+{
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts)) return 0;
+	return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + ts.tv_nsec;
+}
+
+static void scan_clock_identity(struct spf_iiod_metadata_context *ctx)
+{
+	FILE *file = fopen("/proc/sys/kernel/random/boot_id", "r");
+	char uuid[37];
+	unsigned i, j = 0, value;
+	ctx->scan_clock_epoch = scan_monotonic_ns();
+	if (!file) return;
+	if (fscanf(file, "%36s", uuid) == 1 && strlen(uuid) == 36) {
+		for (i = 0; i < 36 && j < 16;) {
+			if (uuid[i] == '-') { ++i; continue; }
+			if (sscanf(uuid + i, "%2x", &value) != 1) break;
+			ctx->scan_boot_id[j++] = (uint8_t)value;
+			i += 2;
+		}
+	}
+	if (j != 16) memset(ctx->scan_boot_id, 0, 16);
+	fclose(file);
+}
 
 static int scan_release_block(void *context, uintptr_t token)
 {
@@ -143,7 +171,8 @@ static int scan_open(const struct iio_device *dev, size_t samples_count,
 					&layout);
 	if (ret)
 		return ret;
-	if (layout.enabled_scan_mask != 3 || layout.receiver_count != 1)
+	if ((layout.enabled_scan_mask != 3 && layout.enabled_scan_mask != 0x0f) ||
+	    (layout.receiver_count != 1 && layout.receiver_count != 2))
 		return -EINVAL;
 	ctx = calloc(1, sizeof(*ctx));
 	if (!ctx)
@@ -153,6 +182,11 @@ static int scan_open(const struct iio_device *dev, size_t samples_count,
 		goto error;
 	ctx->rx = (struct iio_device *)dev;
 	ctx->layout = layout;
+	if ((ctx->scan_setup.rx_mask == SPF_SCAN_RX1 && layout.enabled_scan_mask != 3) ||
+	    (ctx->scan_setup.rx_mask == SPF_SCAN_RX1_RX2 && layout.enabled_scan_mask != 0x0f)) {
+		ret = -EINVAL;
+		goto error;
+	}
 	ctx->samples_per_channel = (uint32_t)samples_count;
 	iio_ctx = iio_device_get_context(dev);
 	ctx->phy = iio_context_find_device(iio_ctx, "ad9361-phy");
@@ -180,8 +214,14 @@ static int scan_open(const struct iio_device *dev, size_t samples_count,
 		goto error_close;
 	runtime = (struct spf_scan_session_runtime) {
 		.block_count = buffers,
-		.headroom_blocks = 2,
+		/* A Pluto's ADC DMA queue has four blocks.  A full dwell reserves
+		 * its data block plus the conservative boundary block, so retaining
+		 * two blocks as headroom leaves no forward-progress slot once the
+		 * first dwell is queued.  Larger queues retain the two-block margin;
+		 * the native four-block queue retains one rearm block. */
+		.headroom_blocks = buffers == 4 ? 1 : 2,
 		.block_samples = (uint32_t)samples_count,
+		.bytes_per_sample = layout.iq_bytes_per_sample,
 		.drain_bytes_per_second = UINT64_C(60000000),
 		.release_block = scan_release_block,
 	};
@@ -199,6 +239,7 @@ static int scan_open(const struct iio_device *dev, size_t samples_count,
 		goto error_session;
 	}
 	ctx->scan_enabled = true;
+	scan_clock_identity(ctx);
 	ctx->scan_kernel_buffers = buffers;
 	*provider_context = ctx;
 	*extra_samples = layout.extra_samples;
@@ -1251,6 +1292,46 @@ enum spf_scan_feedback_result iiod_buffer_metadata_scan_feedback(
 	return result;
 }
 
+int iiod_buffer_metadata_scan_time(void *provider_context,
+		const struct spf_scan_time_query *query, struct spf_scan_time *result)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	struct spf_scan_radio radio;
+	uint64_t counter, before, after;
+	int ret;
+	if (!ctx || !ctx->scan_enabled || !query || !result) return -EOPNOTSUPP;
+	/* Do not stall the capture scheduler for an optional timing observation. */
+	if (pthread_mutex_trylock(&ctx->scan_lock)) return -EAGAIN;
+	if (query->session != ctx->scan_setup.session ||
+	    query->generation != ctx->scan_setup.generation) ret = -ESTALE;
+	else if (!ctx->scan_thread_live) ret = -EAGAIN;
+	else if (ctx->scan_finished || ctx->scan_cancel_requested) ret = -ESHUTDOWN;
+	else {
+		/* Query failure must not set the capture owner's faulted flag. */
+		radio = ctx->scan_radio;
+		before = scan_monotonic_ns();
+		ret = spf_scan_radio_snapshot(&radio, ctx->scan_counter_anchor, &counter);
+		after = scan_monotonic_ns();
+		if (!ret && (!before || after < before ||
+		    counter - ctx->scan_counter_anchor >= (UINT64_C(1) << 31))) ret = -ERANGE;
+		if (!ret) {
+			memset(result, 0, sizeof(*result));
+			result->identity = *query;
+			memcpy(result->boot_id, ctx->scan_boot_id, 16);
+			result->epoch = ctx->scan_clock_epoch;
+			result->counter = counter;
+			result->monotonic_before_ns = before;
+			result->monotonic_after_ns = after;
+			result->sample_rate_hz = ctx->scan_setup.source_rate_hz;
+			/* The current kernel ABI attests coherence, not snapshot age.
+			 * Never invent a latency guarantee for an unidentified bitstream. */
+			result->maximum_snapshot_age_ns = UINT64_MAX;
+		}
+	}
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return ret;
+}
+
 int iiod_buffer_metadata_scan_take_ack(void *provider_context,
 		struct spf_scan_ack *ack)
 {
@@ -1301,7 +1382,7 @@ int iiod_buffer_metadata_scan_cancel(void *provider_context)
 	return 0;
 }
 
-int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes)
+int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, uint16_t version)
 {
 	struct spf_scan_caps caps;
 	struct spf_scan_radio radio;
@@ -1315,6 +1396,28 @@ int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes)
 	if (ret)
 		return ret;
 	spf_scan_caps_default(&caps);
+	if (version == SPF_SCAN_RANDOM_DWELL_VERSION) {
+		caps.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
+		caps.rate_mode = 0;
+		caps.rate_mask = SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_10M;
+		caps.minimum_rate_hz = 0;
+		caps.maximum_rate_hz = 0;
+		caps.minimum_dwell_ms = 120;
+		caps.maximum_dwell_ms = 360;
+	} else if (version == SPF_SCAN_FIXED_DWELL_VERSION) {
+		caps.protocol_version = SPF_SCAN_FIXED_DWELL_VERSION;
+		caps.rate_mode = 0;
+		caps.rate_mask = SPF_SCAN_RATE_2P5M;
+		caps.minimum_rate_hz = 0;
+		caps.maximum_rate_hz = 0;
+		caps.minimum_dwell_ms = 120;
+		caps.maximum_dwell_ms = 360;
+	} else if (version == SPF_SCAN_RUNTIME_RATE_VERSION) {
+		caps.protocol_version = SPF_SCAN_RUNTIME_RATE_VERSION;
+		caps.rate_mode = SPF_SCAN_RATE_MODE_SETUP_VALIDATED;
+		caps.minimum_rate_hz = SPF_SCAN_RATE_MIN;
+		caps.maximum_rate_hz = SPF_SCAN_RATE_MAX;
+	}
 	return spf_scan_caps_encode(wire, bytes, &caps);
 }
 

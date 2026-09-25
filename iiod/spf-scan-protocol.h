@@ -8,7 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SPF_SCAN_PROTOCOL_VERSION UINT16_C(1)
+#include "spf-scan-rate.h"
+#define SPF_SCAN_RATE_MODE_SETUP_VALIDATED UINT32_C(1)
 #define SPF_SCAN_PROTOCOL_FEATURES UINT32_C(0x000000ff)
 #define SPF_SCAN_SETUP_FLAGS UINT32_C(0x00000001)
 #define SPF_SCAN_VISIT_FLAGS UINT32_C(0x00000001)
@@ -17,12 +18,22 @@
 	(SPF_SCAN_VISIT_FLAGS | SPF_SCAN_VISIT_DEADLINE_FORCED)
 #define SPF_SCAN_TERMINAL_FLAGS UINT32_C(0x00000001)
 #define SPF_SCAN_FORMAT_CI16 UINT32_C(1)
+/* v1 originally allocated bits 0..3 to 10/15/20/30 MS/s.  2.5 MS/s is an
+ * extension and must append bit 4; renumbering would make an old client read
+ * a 10 MS/s-only endpoint as 2.5 MS/s capable. */
 #define SPF_SCAN_RATE_10M (UINT32_C(1) << 0)
 #define SPF_SCAN_RATE_15M (UINT32_C(1) << 1)
 #define SPF_SCAN_RATE_20M (UINT32_C(1) << 2)
 #define SPF_SCAN_RATE_30M (UINT32_C(1) << 3)
+#define SPF_SCAN_RATE_2P5M (UINT32_C(1) << 4)
 #define SPF_SCAN_RATE_MASK_FIXED \
-	(SPF_SCAN_RATE_10M | SPF_SCAN_RATE_15M | SPF_SCAN_RATE_20M | SPF_SCAN_RATE_30M)
+	(SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_10M | SPF_SCAN_RATE_15M | \
+	 SPF_SCAN_RATE_20M | SPF_SCAN_RATE_30M)
+
+/* RX1 is the classifier source.  RX2 may only be added as a synchronous
+ * capture stream; there is never a per-receiver tuning decision. */
+#define SPF_SCAN_RX1 UINT32_C(1)
+#define SPF_SCAN_RX1_RX2 (SPF_SCAN_RX1 | UINT32_C(2))
 
 #define SPF_SCAN_CAPS_BYTES 96U
 #define SPF_SCAN_SETUP_BYTES 352U
@@ -30,6 +41,25 @@
 #define SPF_SCAN_FEEDBACK_BYTES 112U
 #define SPF_SCAN_ACK_BYTES 96U
 #define SPF_SCAN_TERMINAL_BYTES 128U
+#define SPF_SCAN_TIME_QUERY_BYTES 48U
+#define SPF_SCAN_TIME_BYTES 128U
+
+/* Separate opt-in command; existing published scan records are unchanged.
+ * UINT64_MAX snapshot age means unknown, never zero uncertainty. */
+struct spf_scan_time_query {
+	uint64_t request, session, generation;
+};
+struct spf_scan_time {
+	struct spf_scan_time_query identity;
+	uint8_t boot_id[16];
+	uint64_t epoch, counter, monotonic_before_ns, monotonic_after_ns;
+	uint32_t sample_rate_hz;
+	uint64_t maximum_snapshot_age_ns;
+};
+int spf_scan_time_query_encode(void *, size_t, const struct spf_scan_time_query *);
+int spf_scan_time_query_decode(struct spf_scan_time_query *, const void *, size_t);
+int spf_scan_time_encode(void *, size_t, const struct spf_scan_time *);
+int spf_scan_time_decode(struct spf_scan_time *, const void *, size_t);
 
 enum spf_scan_terminal_state {
 	SPF_SCAN_TERMINAL_COMPLETED = 1,
@@ -38,6 +68,8 @@ enum spf_scan_terminal_state {
 };
 
 struct spf_scan_caps {
+	uint16_t protocol_version; /* zero initializes the legacy version */
+	uint32_t rate_mode, minimum_rate_hz, maximum_rate_hz;
 	uint32_t rate_mask, rx_mask, formats, maximum_targets;
 	uint32_t maximum_fastlock_profiles, minimum_dwell_ms, maximum_dwell_ms;
 	uint32_t maximum_duration_ms;
@@ -54,6 +86,7 @@ struct spf_scan_target {
 };
 
 struct spf_scan_setup {
+	uint16_t protocol_version;
 	uint64_t session, generation, seed;
 	uint32_t source_rate_hz, analog_bandwidth_hz;
 	uint32_t duration_ms, dwell_ms, transition_budget_ms;
@@ -67,6 +100,7 @@ struct spf_scan_setup {
 };
 
 struct spf_scan_visit_record {
+	uint16_t protocol_version;
 	uint64_t session, generation, visit, selection_counter;
 	uint64_t transition_before, transition_after, valid_start, valid_end;
 	uint64_t frequency_hz, iq_bytes, missing_samples_before;

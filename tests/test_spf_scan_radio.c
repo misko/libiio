@@ -54,6 +54,7 @@ static int mock_ioctl(int fd, unsigned long request, void *argument)
 		assert(acquire->magic == ADI_RX_COUNTER_MAGIC);
 		assert(acquire->sample_rate_hz == 10000000);
 		assert(acquire->samples_per_channel == 1000000);
+		assert(acquire->scan_mask == ADI_RX_COUNTER_SCAN_MASK_RX1);
 		return 0;
 	}
 	if (request == ADI_RX_COUNTER_IOC_RECALL) {
@@ -121,7 +122,8 @@ int main(void)
 
 	assert(spf_scan_radio_init(&radio, 17, mock_ioctl) == 0);
 	assert(radio.features == ADI_RX_COUNTER_SCAN_FEATURES);
-	assert(spf_scan_radio_acquire(&radio, 10000000, 1000000) == 0);
+	assert(spf_scan_radio_acquire(&radio, 10000000, 1000000,
+		ADI_RX_COUNTER_SCAN_MASK_RX1) == 0);
 	assert(spf_scan_radio_configure(&radio, duplicate, 2) == -EINVAL);
 	assert(spf_scan_radio_configure(&radio, profiles, 2) == 0);
 	assert(observed_config.magic == ADI_RX_COUNTER_MAGIC);
@@ -147,7 +149,8 @@ int main(void)
 				      &release_receipt) == -EINVAL);
 
 	assert(spf_scan_radio_init(&radio, 17, mock_ioctl) == 0);
-	assert(spf_scan_radio_acquire(&radio, 10000000, 1000000) == 0);
+	assert(spf_scan_radio_acquire(&radio, 10000000, 1000000,
+		ADI_RX_COUNTER_SCAN_MASK_RX1) == 0);
 	assert(spf_scan_radio_configure(&radio, profiles, 2) == 0);
 	result_frequency += 10;
 	assert(spf_scan_radio_recall(&radio, 3, receipt.counter_after,
@@ -156,7 +159,8 @@ int main(void)
 	assert(spf_scan_radio_recall(&radio, 3, 0, &receipt) == -EINVAL);
 
 	assert(spf_scan_radio_init(&radio, 17, mock_ioctl) == 0);
-	assert(spf_scan_radio_acquire(&radio, 10000000, 1000000) == 0);
+	assert(spf_scan_radio_acquire(&radio, 10000000, 1000000,
+		ADI_RX_COUNTER_SCAN_MASK_RX1) == 0);
 	assert(spf_scan_radio_configure(&radio, profiles, 2) == 0);
 	result_frequency = profiles[0].frequency_hz;
 	fail_recall = 1;

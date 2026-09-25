@@ -190,19 +190,26 @@ int spf_hop_request_v1_encode(void *wire, size_t wire_bytes,
 static int validate_event(const struct spf_hop_event_v1 *event)
 {
 	const struct spf_hop_device_event_v1 *device;
+	bool no_recall;
 
 	if (!event)
 		return -EINVAL;
 	device = &event->device;
-	if (device->flags != SPF_HOP_EVENT_FLAGS_V1 ||
+	no_recall = device->flags & SPF_HOP_EVENT_NO_RECALL;
+	if ((device->flags & ~SPF_HOP_EVENT_FLAGS_ALLOWED_V1) ||
+		(device->flags & SPF_HOP_EVENT_FLAGS_V1) != SPF_HOP_EVENT_FLAGS_V1 ||
 		(device->kind != SPF_HOP_EVENT_STARTUP &&
 		 device->kind != SPF_HOP_EVENT_RETUNE) ||
 		device->to_profile >= SPF_HOP_PROFILE_COUNT ||
 		device->fastlock_slot >= SPF_HOP_PROFILE_COUNT ||
-		!device->device_event_id ||
 		device->transition_before > device->transition_after ||
-		event->invalid_start > device->transition_before ||
-		event->invalid_end < device->transition_after)
+		(!no_recall && (!device->device_event_id ||
+		 event->invalid_start > device->transition_before ||
+		 event->invalid_end < device->transition_after)) ||
+		(no_recall && (device->kind != SPF_HOP_EVENT_RETUNE ||
+		 device->from_profile != device->to_profile || device->device_event_id ||
+		 device->transition_before != device->transition_after ||
+		 event->invalid_start != event->invalid_end)))
 		return -EINVAL;
 	return 0;
 }

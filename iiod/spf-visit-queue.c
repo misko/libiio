@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "spf-visit-queue.h"
+#include "spf-scan-rate.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,11 +41,12 @@ int spf_visit_queue_create(struct spf_visit_queue **out,
 {
 	struct spf_visit_queue *q;
 	if (!out || !c || !release || c->block_count < 4 || c->block_count > 64 ||
-		c->headroom_blocks < 2 || c->headroom_blocks >= c->block_count ||
+		!c->headroom_blocks || c->headroom_blocks >= c->block_count ||
 		!c->maximum_visits || c->maximum_visits > SPF_VISIT_QUEUE_MAX_VISITS ||
 		!c->block_samples || c->block_samples > 1000000 ||
-		(c->source_rate_hz != 10000000 && c->source_rate_hz != 15000000 &&
-		 c->source_rate_hz != 20000000 && c->source_rate_hz != 30000000) ||
+		!spf_scan_rate_valid(c->source_rate_hz) ||
+		(c->bytes_per_sample != 4 && c->bytes_per_sample != 8) ||
+		!c->maximum_visit_ms || c->maximum_visit_ms > 360 ||
 		!c->maximum_bytes || c->maximum_bytes > UINT64_C(200000000) ||
 		!c->maximum_age_ticks || c->maximum_age_ticks > (uint64_t)c->source_rate_hz * 10 ||
 		!c->drain_bytes_per_second || c->drain_bytes_per_second > UINT64_C(1000000000))
@@ -87,10 +89,12 @@ static void discard(struct spf_visit_queue *q, struct visit *v, enum spf_visit_r
 int spf_visit_queue_reserve(struct spf_visit_queue *q, uint64_t id,
 	uint32_t samples, uint64_t now, enum spf_visit_result *result)
 {
-	uint64_t bytes = (uint64_t)samples * 4, ticks_to_drain, oldest_age = 0;
+	uint64_t bytes = (uint64_t)samples * q->config.bytes_per_sample,
+		ticks_to_drain, oldest_age = 0;
 	unsigned blocks;
 	struct visit *v;
-	if (!q || !result || !samples || samples > (uint64_t)q->config.source_rate_hz * 240 / 1000)
+	if (!q || !result || !samples || samples >
+	    (uint64_t)q->config.source_rate_hz * q->config.maximum_visit_ms / 1000)
 		return -EINVAL;
 	if (q->cancelled) return -ESHUTDOWN;
 	if (q->have_id && id <= q->last_reserved_id) return -ERANGE;
@@ -186,7 +190,8 @@ int spf_visit_queue_feed(struct spf_visit_queue *q, uintptr_t token,
 		s = v->slice_count++;
 		v->block[s] = slot;
 		v->slices[s] = (struct spf_visit_slice){token, data,
-			(size_t)(a - first) * 4, (size_t)(b - a) * 4};
+			(size_t)(a - first) * q->config.bytes_per_sample,
+			(size_t)(b - a) * q->config.bytes_per_sample};
 		++q->blocks[slot].refs;
 		--v->remaining_blocks; --q->stats.reserved_blocks;
 		v->next = b;

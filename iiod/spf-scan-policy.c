@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "spf-scan-policy.h"
+#include "spf-scan-rate.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,7 @@ struct spf_scan_policy {
 	uint64_t rng, last_now, visit_count, max_visits;
 	uint64_t last_start[SPF_SCAN_TARGETS], boost_time[SPF_SCAN_TARGETS];
 	uint32_t boost[SPF_SCAN_TARGETS];
+	bool active[SPF_SCAN_TARGETS];
 	uint64_t channel_sequence[SPF_SCAN_TARGETS], highest_sequence, seen;
 	struct pending_feedback pending[SPF_SCAN_TARGETS];
 	struct spf_scan_ack acks[SPF_SCAN_ACK_CAPACITY];
@@ -31,7 +33,7 @@ struct spf_scan_policy {
 
 static uint64_t ticks(const struct spf_scan_policy_config *c, uint32_t ms)
 {
-	return (uint64_t)c->source_rate_hz * ms / 1000;
+	return spf_scan_ticks(c->source_rate_hz, ms);
 }
 
 int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
@@ -42,7 +44,10 @@ int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
 	if (!c || !c->session || !c->generation || !c->seed ||
 		!c->targets || c->targets > SPF_SCAN_TARGETS ||
 		!c->duration_ms || c->duration_ms > 300000 ||
-		c->dwell_ms < 20 || c->dwell_ms > 240 ||
+		(c->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ||
+		 c->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION ?
+		 (c->dwell_ms != 120 && c->dwell_ms != 240 && c->dwell_ms != 360) :
+		 (c->dwell_ms < 20 || c->dwell_ms > 240)) ||
 		!c->transition_budget_ms || c->transition_budget_ms > 100 ||
 		!c->maximum_revisit_ms || c->maximum_revisit_ms > 10000 ||
 		!c->feedback_age_ms || c->feedback_age_ms > 10000 ||
@@ -50,8 +55,18 @@ int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
 		!c->decay_ms || c->decay_ms > 60000 ||
 		c->maximum_boost < 1 || c->maximum_boost > 16)
 		return -EINVAL;
-	if (c->source_rate_hz != 10000000 && c->source_rate_hz != 15000000 &&
-		c->source_rate_hz != 20000000 && c->source_rate_hz != 30000000)
+	if ((c->protocol_version != 0 &&
+	     c->protocol_version != SPF_SCAN_PROTOCOL_VERSION &&
+	     c->protocol_version != SPF_SCAN_RUNTIME_RATE_VERSION &&
+	     c->protocol_version != SPF_SCAN_RANDOM_DWELL_VERSION &&
+	     c->protocol_version != SPF_SCAN_FIXED_DWELL_VERSION) ||
+	    (c->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION &&
+	     c->source_rate_hz != 2500000) ||
+	    (c->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION &&
+	     c->source_rate_hz != 2500000 && c->source_rate_hz != 10000000) ||
+	    (c->protocol_version != SPF_SCAN_RANDOM_DWELL_VERSION &&
+	     c->protocol_version != SPF_SCAN_FIXED_DWELL_VERSION &&
+	     !spf_scan_rate_valid(c->source_rate_hz)))
 		return -EOPNOTSUPP;
 	for (i = 0; i < sizeof(c->analysis_digest); i++)
 		digest |= c->analysis_digest[i];
@@ -93,7 +108,8 @@ int spf_scan_policy_create(struct spf_scan_policy **out,
 	p->delay = ticks(c, c->application_delay_ms);
 	p->decay = ticks(c, c->decay_ms);
 	p->rng = c->seed;
-	p->max_visits = c->duration_ms / c->dwell_ms + 1;
+	p->max_visits = c->duration_ms /
+		(c->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ? 120U : c->dwell_ms) + 1;
 	if (p->max_visits > SPF_SCAN_MAX_VISITS) {
 		free(p);
 		return -E2BIG;
@@ -194,7 +210,9 @@ int spf_scan_policy_select(struct spf_scan_policy *p, uint64_t now,
 		return -EBUSY;
 	if (now < p->last_now || (p->visit_count && now < p->visits[p->visit_count - 1].end))
 		return -ERANGE;
-	if (now >= p->end || p->end - now < p->dwell + p->transition)
+	if (now >= p->end || p->end - now <
+	    (p->config.protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ?
+	     ticks(&p->config, 120U) : p->dwell) + p->transition)
 		return -ENODATA;
 	if (p->visit_count >= p->max_visits)
 		return -EOVERFLOW;
@@ -215,6 +233,9 @@ int spf_scan_policy_select(struct spf_scan_policy *p, uint64_t now,
 					after = p->config.maximum_boost * SPF_SCAN_WEIGHT_ONE;
 				else if (f->value.outcome == SPF_SCAN_QUIET)
 					after = SPF_SCAN_WEIGHT_ONE + (before - SPF_SCAN_WEIGHT_ONE) / 2;
+				if (p->config.protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION &&
+				    f->value.outcome != SPF_SCAN_UNKNOWN)
+					p->active[i] = f->value.outcome == SPF_SCAN_ACTIVE;
 				/* UNKNOWN does not refresh a decaying boost. */
 				if (f->value.outcome != SPF_SCAN_UNKNOWN) {
 					p->boost[i] = after;
@@ -236,8 +257,15 @@ int spf_scan_policy_select(struct spf_scan_policy *p, uint64_t now,
 		if (draw < weights[i]) { chosen = i; break; }
 		draw -= weights[i];
 	}
-	p->selection = (struct spf_scan_choice){p->visit_count, now, chosen, mask,
-		(uint32_t)weights[chosen], (mask & (mask - 1U)) == 0 && p->config.targets > 1};
+	p->selection = (struct spf_scan_choice){
+		.visit = p->visit_count, .selection_counter = now, .target = chosen,
+		.eligible_mask = mask, .effective_weight = (uint32_t)weights[chosen],
+		.dwell_ms = p->config.protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION &&
+			!p->active[chosen] ? 120U : p->config.dwell_ms,
+		.deadline_forced = (mask & (mask - 1U)) == 0 && p->config.targets > 1,
+	};
+	if (p->end - now < ticks(&p->config, p->selection.dwell_ms) + p->transition)
+		return -ENODATA;
 	p->last_now = now;
 	p->selected = true;
 	*choice = p->selection;
@@ -249,12 +277,16 @@ int spf_scan_policy_commit(struct spf_scan_policy *p, uint64_t start)
 	struct scan_visit *v;
 	if (!p || !p->selected || p->stopped)
 		return -EINVAL;
-	if (start < p->selection.selection_counter ||
-		start - p->selection.selection_counter > p->transition ||
-		start > p->end || p->end - start < p->dwell)
+	/* transition is the required settling minimum, not an expiry.  A PHY
+	 * Fast-Lock ioctl may begin after the snapshot used for selection; callers
+	 * then commit at its measured completion plus transition. */
+	if (start < p->selection.selection_counter || start > p->end ||
+		p->end - start < ticks(&p->config, p->selection.dwell_ms))
 		return -ETIME;
 	v = &p->visits[p->visit_count++];
-	*v = (struct scan_visit){start, start + p->dwell, p->selection.target, false, false};
+	*v = (struct scan_visit){start,
+		start + ticks(&p->config, p->selection.dwell_ms),
+		p->selection.target, false, false};
 	p->last_start[v->target] = start;
 	p->selected = false;
 	p->last_now = start;

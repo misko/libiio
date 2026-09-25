@@ -48,6 +48,146 @@ static struct spf_scan_setup setup(void)
 	return value;
 }
 
+static void runtime_rates(void)
+{
+	const uint32_t rates[] = {520833, 2500000, 5000000, 7500000,
+		8000000, 12345679, 61440000};
+	struct spf_scan_setup request = setup(), decoded;
+	struct spf_scan_caps caps, decoded_caps;
+	uint8_t wire[SPF_SCAN_SETUP_BYTES];
+	unsigned i, rx;
+	spf_scan_caps_default(&caps);
+	assert(!spf_scan_caps_encode(wire, sizeof(wire), &caps));
+	assert(wire[4] == 1);
+	for (i = 80; i < 92; i++) assert(!wire[i]);
+	caps.protocol_version = 2;
+	caps.rate_mode = SPF_SCAN_RATE_MODE_SETUP_VALIDATED;
+	caps.minimum_rate_hz = SPF_SCAN_RATE_MIN;
+	caps.maximum_rate_hz = SPF_SCAN_RATE_MAX;
+	assert(!spf_scan_caps_encode(wire, sizeof(wire), &caps));
+	assert(!spf_scan_caps_decode(&decoded_caps, wire, SPF_SCAN_CAPS_BYTES));
+	assert(decoded_caps.protocol_version == 2 && decoded_caps.rate_mask == 0x1f);
+	assert(decoded_caps.minimum_rate_hz == 520833 &&
+	       decoded_caps.maximum_rate_hz == 61440000);
+	request.analog_bandwidth_hz = 200000;
+	for (i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
+		for (rx = 1; rx <= 3; rx++) {
+			request.source_rate_hz = rates[i];
+			request.rx_mask = rx;
+			request.protocol_version = 2;
+			if (rx == 2) {
+				assert(spf_scan_setup_encode(wire, sizeof(wire), &request));
+				continue;
+			}
+			assert(!spf_scan_setup_encode(wire, sizeof(wire), &request));
+			assert(!spf_scan_setup_decode(&decoded, wire, SPF_SCAN_SETUP_BYTES));
+			assert(decoded.source_rate_hz == rates[i] && decoded.protocol_version == 2);
+		}
+	}
+	request.source_rate_hz = 7500000;
+	request.protocol_version = 1;
+	assert(spf_scan_setup_encode(wire, sizeof(wire), &request));
+	request.protocol_version = 2;
+	request.source_rate_hz = 520832;
+	assert(spf_scan_setup_encode(wire, sizeof(wire), &request));
+	request.source_rate_hz = 61440001;
+	assert(spf_scan_setup_encode(wire, sizeof(wire), &request));
+	assert(spf_scan_ticks(7500000, 120) == 900000);
+	assert(spf_scan_ticks(12345679, 120) == 1481481);
+}
+
+static void fixed_dwell_v4(void)
+{
+	struct spf_scan_caps caps, decoded_caps;
+	struct spf_scan_setup request = setup(), decoded;
+	uint8_t wire[SPF_SCAN_SETUP_BYTES];
+
+	spf_scan_caps_default(&caps);
+	caps.protocol_version = SPF_SCAN_FIXED_DWELL_VERSION;
+	caps.rate_mask = SPF_SCAN_RATE_2P5M;
+	caps.minimum_dwell_ms = 120;
+	caps.maximum_dwell_ms = 360;
+	assert(!spf_scan_caps_encode(wire, sizeof(wire), &caps));
+	assert(!spf_scan_caps_decode(&decoded_caps, wire, SPF_SCAN_CAPS_BYTES));
+	assert(decoded_caps.protocol_version == SPF_SCAN_FIXED_DWELL_VERSION);
+	assert(decoded_caps.rate_mask == SPF_SCAN_RATE_2P5M);
+	request.protocol_version = SPF_SCAN_FIXED_DWELL_VERSION;
+	request.source_rate_hz = 2500000;
+	request.analog_bandwidth_hz = 2000000;
+	request.rx_mask = SPF_SCAN_RX1_RX2;
+	request.dwell_ms = 360;
+	assert(!spf_scan_setup_encode(wire, sizeof(wire), &request));
+	assert(!spf_scan_setup_decode(&decoded, wire, SPF_SCAN_SETUP_BYTES));
+	assert(decoded.protocol_version == SPF_SCAN_FIXED_DWELL_VERSION &&
+	       decoded.dwell_ms == 360);
+	request.dwell_ms = 20;
+	assert(spf_scan_setup_encode(wire, sizeof(wire), &request) == -EINVAL);
+	request.dwell_ms = 120;
+	request.source_rate_hz = 10000000;
+	assert(spf_scan_setup_encode(wire, sizeof(wire), &request) == -EINVAL);
+	request.source_rate_hz = 2500000;
+	request.rx_mask = SPF_SCAN_RX1;
+	assert(spf_scan_setup_encode(wire, sizeof(wire), &request) == -EINVAL);
+}
+
+static void random_dwell_v3(void)
+{
+	struct spf_scan_caps caps, decoded_caps;
+	struct spf_scan_setup request = setup(), decoded;
+	uint8_t wire[SPF_SCAN_SETUP_BYTES];
+
+	spf_scan_caps_default(&caps);
+	caps.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
+	caps.rate_mask = SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_10M;
+	caps.minimum_dwell_ms = 120;
+	caps.maximum_dwell_ms = 360;
+	assert(!spf_scan_caps_encode(wire, sizeof(wire), &caps));
+	assert(!spf_scan_caps_decode(&decoded_caps, wire, SPF_SCAN_CAPS_BYTES));
+	assert(decoded_caps.protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION);
+	request.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
+	request.source_rate_hz = 10000000;
+	request.analog_bandwidth_hz = 8000000;
+	request.rx_mask = SPF_SCAN_RX1_RX2;
+	request.dwell_ms = 240;
+	assert(!spf_scan_setup_encode(wire, sizeof(wire), &request));
+	assert(!spf_scan_setup_decode(&decoded, wire, SPF_SCAN_SETUP_BYTES));
+	assert(decoded.protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION &&
+	       decoded.dwell_ms == 240);
+	request.dwell_ms = 20;
+	assert(spf_scan_setup_encode(wire, sizeof(wire), &request) == -EINVAL);
+	request.dwell_ms = 120;
+	request.source_rate_hz = 15000000;
+	assert(spf_scan_setup_encode(wire, sizeof(wire), &request) == -EINVAL);
+}
+
+static void time_protocol(void)
+{
+	uint8_t wire[SPF_SCAN_TIME_BYTES];
+	struct spf_scan_time_query q = {1, 2, 3}, decoded_q;
+	struct spf_scan_time t = {
+		.identity = {1, 2, 3}, .boot_id = {1}, .epoch = 7,
+		.counter = UINT64_C(0x100000010), .monotonic_before_ns = 100,
+		.monotonic_after_ns = 120, .sample_rate_hz = 20000000,
+		.maximum_snapshot_age_ns = UINT64_MAX,
+	}, decoded;
+	unsigned i;
+	assert(!spf_scan_time_query_encode(wire, sizeof(wire), &q));
+	assert(!spf_scan_time_query_decode(&decoded_q, wire, SPF_SCAN_TIME_QUERY_BYTES));
+	assert(!memcmp(&q, &decoded_q, sizeof(q)));
+	q.request = 0;
+	assert(spf_scan_time_query_encode(wire, sizeof(wire), &q) == -EINVAL);
+	assert(!spf_scan_time_encode(wire, sizeof(wire), &t));
+	assert(!spf_scan_time_decode(&decoded, wire, sizeof(wire)));
+	assert(decoded.counter == t.counter && decoded.maximum_snapshot_age_ns == UINT64_MAX);
+	for (i = 0; i < sizeof(wire); ++i) {
+		wire[i] ^= 1;
+		assert(spf_scan_time_decode(&decoded, wire, sizeof(wire)) < 0);
+		wire[i] ^= 1;
+	}
+	t.monotonic_after_ns = 99;
+	assert(spf_scan_time_encode(wire, sizeof(wire), &t) == -EINVAL);
+}
+
 static void corruption(void *wire, size_t bytes,
 			int (*decode)(void *, const void *, size_t), size_t output_bytes)
 {
@@ -123,6 +263,8 @@ int main(int argc, char **argv)
 		.reason = 1, .flags = SPF_SCAN_TERMINAL_FLAGS,
 	}, terminal_out;
 	FILE *golden;
+	fixed_dwell_v4();
+	random_dwell_v3();
 
 	memcpy(feedback.analysis_digest, request.analysis_digest, 32);
 	spf_scan_caps_default(&caps);
@@ -143,6 +285,13 @@ int main(int argc, char **argv)
 	assert(spf_scan_visit_decode(&visit_out, wire, SPF_SCAN_VISIT_BYTES) == 0);
 	assert(!memcmp(&visit, &visit_out, sizeof(visit)));
 	corruption(wire, SPF_SCAN_VISIT_BYTES, decode_visit, sizeof(visit_out));
+	visit.iq_bytes = (visit.valid_end - visit.valid_start) * 8;
+	assert(spf_scan_visit_encode(wire, sizeof(wire), &visit) == 0);
+	assert(spf_scan_visit_decode(&visit_out, wire, SPF_SCAN_VISIT_BYTES) == 0);
+	assert(!memcmp(&visit, &visit_out, sizeof(visit)));
+	visit.iq_bytes = (visit.valid_end - visit.valid_start) * 6;
+	assert(spf_scan_visit_encode(wire, sizeof(wire), &visit) == -EINVAL);
+	visit.iq_bytes = (visit.valid_end - visit.valid_start) * 4;
 
 	assert(spf_scan_feedback_encode(wire, sizeof(wire), &feedback) == 0);
 	assert(spf_scan_feedback_decode(&feedback_out, wire,
@@ -170,6 +319,21 @@ int main(int argc, char **argv)
 		assert(fwrite(wire, 1, SPF_SCAN_SETUP_BYTES, golden) ==
 		       SPF_SCAN_SETUP_BYTES);
 		assert(fclose(golden) == 0);
+	}
+	runtime_rates();
+	time_protocol();
+	if (argc == 3 && !strcmp(argv[1], "--time-golden")) {
+		struct spf_scan_time t = {
+			.identity = {1, 2, 3}, .boot_id = {1}, .epoch = 7,
+			.counter = UINT64_C(0x100000010), .monotonic_before_ns = 100,
+			.monotonic_after_ns = 120, .sample_rate_hz = 20000000,
+			.maximum_snapshot_age_ns = UINT64_MAX,
+		};
+		golden = fopen(argv[2], "wb");
+		assert(golden);
+		assert(!spf_scan_time_encode(wire, sizeof(wire), &t));
+		assert(fwrite(wire, 1, SPF_SCAN_TIME_BYTES, golden) == SPF_SCAN_TIME_BYTES);
+		assert(!fclose(golden));
 	}
 	puts("PASS: scan protocol round trips, strict reserved fields and per-byte CRC rejection");
 	return 0;
