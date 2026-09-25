@@ -11,6 +11,7 @@
 #define SPF_SCAN_WEIGHT_ONE 65536U
 #define SPF_SCAN_PROTOCOL_VERSION UINT16_C(1)
 #define SPF_SCAN_RUNTIME_RATE_VERSION UINT16_C(2)
+#define SPF_SCAN_RANDOM_DWELL_VERSION UINT16_C(3)
 #define SPF_SCAN_FIXED_DWELL_VERSION UINT16_C(4)
 
 /* Policy is transport-independent. One session mutex must serialize its API.

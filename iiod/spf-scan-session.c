@@ -139,7 +139,8 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	ret = spf_scan_setup_validate(setup);
 	if (ret)
 		return ret;
-	if (setup->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION) {
+	if (setup->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ||
+	    setup->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION) {
 		if (!runtime->block_samples || runtime->block_count < 4 ||
 		    !runtime->headroom_blocks ||
 		    runtime->headroom_blocks >= runtime->block_count)
@@ -152,7 +153,9 @@ int spf_scan_session_create(struct spf_scan_session **out,
 		    required_blocks > runtime->block_count - runtime->headroom_blocks)
 			return -ENOSPC;
 	}
-	capacity = setup->duration_ms / setup->dwell_ms + 1U;
+	capacity = setup->duration_ms /
+		(setup->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ?
+		 120U : setup->dwell_ms) + 1U;
 	if (capacity > SPF_SCAN_MAX_VISITS)
 		return -E2BIG;
 	session = calloc(1, sizeof(*session));
@@ -202,8 +205,8 @@ int spf_scan_session_create(struct spf_scan_session **out,
 		.maximum_age_ticks = (uint64_t)setup->source_rate_hz *
 			setup->maximum_queue_age_ms / 1000,
 		.drain_bytes_per_second = runtime->drain_bytes_per_second,
-		.maximum_visit_ms = setup->protocol_version ==
-			SPF_SCAN_FIXED_DWELL_VERSION ? 360U : 240U,
+		.maximum_visit_ms = setup->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ||
+			setup->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION ? 360U : 240U,
 	};
 	ret = spf_visit_queue_create(&session->queue, &queue_config,
 				     runtime->release_block,
