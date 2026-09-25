@@ -116,6 +116,8 @@ struct spf_iiod_metadata_context {
 	uint64_t scan_counter_anchor;
 	uint64_t scan_clock_epoch;
 	uint8_t scan_boot_id[16];
+	uint64_t scan_active_visit;
+	bool scan_active_visit_valid;
 };
 
 static uint64_t scan_monotonic_ns(void)
@@ -1096,6 +1098,34 @@ static void *scan_scheduler(void *opaque)
 		}
 		if (!boundary || now >= boundary) {
 			struct spf_scan_choice choice;
+			spf_gain_pair_t gain;
+			struct spf_scan_gain_observation observation;
+
+			if (!ctx->scan_active_visit_valid) {
+				ret = -EIO;
+				(void)spf_scan_session_fail(ctx->scan_session, now, ret);
+				ctx->scan_error = ret;
+				ctx->scan_finished = true;
+				pthread_mutex_unlock(&ctx->scan_lock);
+				break;
+			}
+			gain = spf_gain_read_pair(ctx->phy);
+			observation = (struct spf_scan_gain_observation) {
+				.counter = now,
+				.read_duration_ns = gain.duration_ns,
+				.rx1_gain_index = gain.rx1,
+				.rx2_gain_index = gain.rx2,
+				.valid = gain.valid,
+			};
+			ret = gain.valid ? spf_scan_session_observe_gain(
+				ctx->scan_session, ctx->scan_active_visit, &observation) : -EIO;
+			if (ret) {
+				(void)spf_scan_session_fail(ctx->scan_session, now, ret);
+				ctx->scan_error = ret;
+				ctx->scan_finished = true;
+				pthread_mutex_unlock(&ctx->scan_lock);
+				break;
+			}
 
 			ret = spf_scan_session_schedule(ctx->scan_session, now, now,
 							&choice);
@@ -1112,6 +1142,8 @@ static void *scan_scheduler(void *opaque)
 				pthread_mutex_unlock(&ctx->scan_lock);
 				break;
 			}
+			ctx->scan_active_visit = choice.visit;
+			ctx->scan_active_visit_valid = true;
 			ret = spf_scan_session_next_boundary(ctx->scan_session,
 							     &boundary);
 			if (ret) {
@@ -1196,6 +1228,10 @@ int iiod_buffer_metadata_scan_feed(void *provider_context,
 			ret = spf_scan_session_schedule(ctx->scan_session,
 				ctx->scan_counter_anchor, ctx->scan_counter_anchor,
 				&first_choice);
+		if (!ret) {
+			ctx->scan_active_visit = first_choice.visit;
+			ctx->scan_active_visit_valid = true;
+		}
 		if (!ret)
 			ret = spf_scan_session_feed(ctx->scan_session,
 				(uintptr_t)block, raw + 8, first,
@@ -1398,8 +1434,8 @@ int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, uint16_t ve
 	spf_scan_caps_default(&caps);
 	if (version == SPF_SCAN_RANDOM_DWELL_VERSION) {
 		caps.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
-		caps.rate_mode = 0;
-		caps.rate_mask = SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_10M;
+		caps.rate_mode = SPF_SCAN_RATE_MODE_GAIN_OBSERVATION;
+		caps.rate_mask = SPF_SCAN_RATE_MASK_RANDOM_DWELL;
 		caps.minimum_rate_hz = 0;
 		caps.maximum_rate_hz = 0;
 		caps.minimum_dwell_ms = 120;

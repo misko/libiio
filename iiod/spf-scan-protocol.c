@@ -172,6 +172,9 @@ static uint32_t rate_flag(uint32_t rate)
 {
 	switch (rate) {
 	case 2500000: return SPF_SCAN_RATE_2P5M;
+	case 5000000: return SPF_SCAN_RATE_5M;
+	case 7500000: return SPF_SCAN_RATE_7P5M;
+	case 8000000: return SPF_SCAN_RATE_8M;
 	case 10000000: return SPF_SCAN_RATE_10M;
 	case 15000000: return SPF_SCAN_RATE_15M;
 	case 20000000: return SPF_SCAN_RATE_20M;
@@ -183,9 +186,9 @@ static uint32_t rate_flag(uint32_t rate)
 static bool rate_valid(uint32_t rate, uint16_t version)
 {
 	if (!version || version == SPF_SCAN_PROTOCOL_VERSION)
-		return rate_flag(rate) != 0;
+		return (rate_flag(rate) & SPF_SCAN_RATE_MASK_FIXED) != 0;
 	if (version == SPF_SCAN_RANDOM_DWELL_VERSION)
-		return rate == 2500000 || rate == 10000000;
+		return (rate_flag(rate) & SPF_SCAN_RATE_MASK_RANDOM_DWELL) != 0;
 	if (version == SPF_SCAN_FIXED_DWELL_VERSION)
 		return rate == 2500000;
 	return version == SPF_SCAN_RUNTIME_RATE_VERSION && spf_scan_rate_valid(rate);
@@ -231,8 +234,9 @@ static int caps_validate(const struct spf_scan_caps *caps)
 	if (!caps)
 		return -EINVAL;
 	if (caps->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION) {
-		if (caps->rate_mode || caps->minimum_rate_hz || caps->maximum_rate_hz ||
-		    caps->rate_mask != (SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_10M) ||
+		if (caps->rate_mode != SPF_SCAN_RATE_MODE_GAIN_OBSERVATION ||
+		    caps->minimum_rate_hz || caps->maximum_rate_hz ||
+		    caps->rate_mask != SPF_SCAN_RATE_MASK_RANDOM_DWELL ||
 		    caps->minimum_dwell_ms != 120 || caps->maximum_dwell_ms != 360)
 			return -EINVAL;
 	} else if (caps->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION) {
@@ -519,7 +523,15 @@ static int visit_validate(const struct spf_scan_visit_record *visit)
 		return -EINVAL;
 	if ((visit->result == SPF_VISIT_COMPLETE) != !!visit->iq_bytes ||
 	    (visit->result == SPF_VISIT_COMPLETE &&
-	     visit->iq_bytes != samples * 4 && visit->iq_bytes != samples * 8))
+	     visit->iq_bytes != samples * 4 && visit->iq_bytes != samples * 8) ||
+	    (visit->gain_valid &&
+	     (visit->protocol_version != SPF_SCAN_RANDOM_DWELL_VERSION ||
+	      visit->gain_counter < visit->valid_end ||
+	      visit->rx1_gain_index > UINT8_C(0x7f) ||
+	      visit->rx2_gain_index > UINT8_C(0x7f))) ||
+	    (!visit->gain_valid &&
+	     (visit->gain_counter || visit->gain_read_duration_ns ||
+	      visit->rx1_gain_index || visit->rx2_gain_index)))
 		return -EINVAL;
 	return 0;
 }
@@ -545,7 +557,11 @@ int spf_scan_visit_encode(void *wire, size_t bytes,
 	put32(p + 112, visit->target); put32(p + 116, visit->profile);
 	put32(p + 120, visit->result); put32(p + 124, visit->eligible_mask);
 	put32(p + 128, visit->effective_weight); put32(p + 132, visit->profile_crc32);
-	put32(p + 136, visit->flags); put32(p + 156, crc32(p, 156));
+	put32(p + 136, visit->flags);
+	put64(p + 140, visit->gain_counter);
+	p[148] = visit->rx1_gain_index; p[149] = visit->rx2_gain_index;
+	p[150] = visit->gain_valid; put32(p + 152, visit->gain_read_duration_ns);
+	put32(p + 156, crc32(p, 156));
 	memcpy(wire, p, sizeof(p));
 	return 0;
 }
@@ -564,8 +580,6 @@ int spf_scan_visit_decode(struct spf_scan_visit_record *visit,
 	ret = check(p, bytes, SPF_SCAN_VISIT_BYTES, MAGIC_VISIT, get32(p + 12));
 	if (ret)
 		return ret;
-	if (!all_zero(p + 140, 16))
-		return -EBADMSG;
 	out.protocol_version = rate_version(p);
 	out.session = get64(p + 16); out.generation = get64(p + 24);
 	out.visit = get64(p + 32); out.selection_counter = get64(p + 40);
@@ -578,6 +592,11 @@ int spf_scan_visit_decode(struct spf_scan_visit_record *visit,
 	out.result = get32(p + 120); out.eligible_mask = get32(p + 124);
 	out.effective_weight = get32(p + 128); out.profile_crc32 = get32(p + 132);
 	out.flags = get32(p + 136);
+	out.gain_counter = get64(p + 140);
+	out.rx1_gain_index = p[148]; out.rx2_gain_index = p[149];
+	out.gain_valid = p[150]; out.gain_read_duration_ns = get32(p + 152);
+	if (p[151] || out.gain_valid > 1)
+		return -EBADMSG;
 	if (out.flags != get32(p + 12) || visit_validate(&out))
 		return -EBADMSG;
 	*visit = out;

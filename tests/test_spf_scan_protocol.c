@@ -132,31 +132,37 @@ static void fixed_dwell_v4(void)
 
 static void random_dwell_v3(void)
 {
+	const uint32_t rates[] = {2500000, 5000000, 7500000, 10000000};
 	struct spf_scan_caps caps, decoded_caps;
 	struct spf_scan_setup request = setup(), decoded;
 	uint8_t wire[SPF_SCAN_SETUP_BYTES];
+	unsigned i;
 
 	spf_scan_caps_default(&caps);
 	caps.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
-	caps.rate_mask = SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_10M;
+	caps.rate_mode = SPF_SCAN_RATE_MODE_GAIN_OBSERVATION;
+	caps.rate_mask = SPF_SCAN_RATE_MASK_RANDOM_DWELL;
 	caps.minimum_dwell_ms = 120;
 	caps.maximum_dwell_ms = 360;
 	assert(!spf_scan_caps_encode(wire, sizeof(wire), &caps));
 	assert(!spf_scan_caps_decode(&decoded_caps, wire, SPF_SCAN_CAPS_BYTES));
 	assert(decoded_caps.protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION);
+	assert(decoded_caps.rate_mode == SPF_SCAN_RATE_MODE_GAIN_OBSERVATION);
 	request.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
-	request.source_rate_hz = 10000000;
-	request.analog_bandwidth_hz = 8000000;
 	request.rx_mask = SPF_SCAN_RX1_RX2;
 	request.dwell_ms = 240;
-	assert(!spf_scan_setup_encode(wire, sizeof(wire), &request));
-	assert(!spf_scan_setup_decode(&decoded, wire, SPF_SCAN_SETUP_BYTES));
-	assert(decoded.protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION &&
-	       decoded.dwell_ms == 240);
+	for (i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
+		request.source_rate_hz = rates[i];
+		request.analog_bandwidth_hz = rates[i];
+		assert(!spf_scan_setup_encode(wire, sizeof(wire), &request));
+		assert(!spf_scan_setup_decode(&decoded, wire, SPF_SCAN_SETUP_BYTES));
+		assert(decoded.protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION &&
+		       decoded.source_rate_hz == rates[i] && decoded.dwell_ms == 240);
+	}
 	request.dwell_ms = 20;
 	assert(spf_scan_setup_encode(wire, sizeof(wire), &request) == -EINVAL);
 	request.dwell_ms = 120;
-	request.source_rate_hz = 15000000;
+	request.source_rate_hz = 8000000;
 	assert(spf_scan_setup_encode(wire, sizeof(wire), &request) == -EINVAL);
 }
 
@@ -292,6 +298,20 @@ int main(int argc, char **argv)
 	visit.iq_bytes = (visit.valid_end - visit.valid_start) * 6;
 	assert(spf_scan_visit_encode(wire, sizeof(wire), &visit) == -EINVAL);
 	visit.iq_bytes = (visit.valid_end - visit.valid_start) * 4;
+	visit.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
+	visit.source_rate_hz = 5000000;
+	visit.analog_bandwidth_hz = 5000000;
+	visit.gain_counter = visit.valid_end + 2500;
+	visit.gain_read_duration_ns = 42000;
+	visit.rx1_gain_index = 31;
+	visit.rx2_gain_index = 47;
+	visit.gain_valid = 1;
+	assert(spf_scan_visit_encode(wire, sizeof(wire), &visit) == 0);
+	assert(spf_scan_visit_decode(&visit_out, wire, SPF_SCAN_VISIT_BYTES) == 0);
+	assert(!memcmp(&visit, &visit_out, sizeof(visit)));
+	visit.gain_counter = visit.valid_end - 1;
+	assert(spf_scan_visit_encode(wire, sizeof(wire), &visit) == -EINVAL);
+	visit = (struct spf_scan_visit_record) {0};
 
 	assert(spf_scan_feedback_encode(wire, sizeof(wire), &feedback) == 0);
 	assert(spf_scan_feedback_decode(&feedback_out, wire,
