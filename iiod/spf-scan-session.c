@@ -21,6 +21,7 @@ struct ledger_entry {
 	struct spf_scan_radio_receipt recall;
 	uint64_t valid_start, valid_end;
 	enum spf_visit_result admission;
+	struct spf_scan_gain_observation gain;
 	bool closed, queued;
 };
 
@@ -402,6 +403,24 @@ int spf_scan_session_next_boundary(const struct spf_scan_session *session,
 	return 0;
 }
 
+int spf_scan_session_observe_gain(struct spf_scan_session *session,
+	uint64_t visit, const struct spf_scan_gain_observation *observation)
+{
+	struct ledger_entry *entry;
+
+	if (!session || !observation || visit >= session->ledger_count ||
+	    visit != session->active)
+		return -EINVAL;
+	entry = &session->ledger[visit];
+	if (observation->counter < entry->valid_end ||
+	    (observation->valid &&
+	     (observation->rx1_gain_index > UINT8_C(0x7f) ||
+	      observation->rx2_gain_index > UINT8_C(0x7f))))
+		return -ERANGE;
+	entry->gain = *observation;
+	return 0;
+}
+
 int spf_scan_session_counter(const struct spf_scan_session *session,
 	uint64_t *counter)
 {
@@ -478,6 +497,12 @@ static void make_record(const struct spf_scan_session *session,
 		.eligible_mask = entry->choice.eligible_mask,
 		.effective_weight = entry->choice.effective_weight,
 		.profile_crc32 = entry->recall.profile_crc32,
+		.gain_counter = entry->gain.valid ? entry->gain.counter : 0,
+		.gain_read_duration_ns = entry->gain.valid ?
+			entry->gain.read_duration_ns : 0,
+		.rx1_gain_index = entry->gain.valid ? entry->gain.rx1_gain_index : 0,
+		.rx2_gain_index = entry->gain.valid ? entry->gain.rx2_gain_index : 0,
+		.gain_valid = entry->gain.valid,
 		.flags = SPF_SCAN_VISIT_FLAGS |
 			(entry->choice.deadline_forced ?
 			 SPF_SCAN_VISIT_DEADLINE_FORCED : 0),

@@ -10,6 +10,7 @@
 
 #include "spf-scan-rate.h"
 #define SPF_SCAN_RATE_MODE_SETUP_VALIDATED UINT32_C(1)
+#define SPF_SCAN_RATE_MODE_GAIN_OBSERVATION UINT32_C(2)
 #define SPF_SCAN_PROTOCOL_FEATURES UINT32_C(0x000000ff)
 #define SPF_SCAN_SETUP_FLAGS UINT32_C(0x00000001)
 #define SPF_SCAN_VISIT_FLAGS UINT32_C(0x00000001)
@@ -26,9 +27,15 @@
 #define SPF_SCAN_RATE_20M (UINT32_C(1) << 2)
 #define SPF_SCAN_RATE_30M (UINT32_C(1) << 3)
 #define SPF_SCAN_RATE_2P5M (UINT32_C(1) << 4)
+#define SPF_SCAN_RATE_5M (UINT32_C(1) << 5)
+#define SPF_SCAN_RATE_7P5M (UINT32_C(1) << 6)
+#define SPF_SCAN_RATE_8M (UINT32_C(1) << 7)
 #define SPF_SCAN_RATE_MASK_FIXED \
 	(SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_10M | SPF_SCAN_RATE_15M | \
 	 SPF_SCAN_RATE_20M | SPF_SCAN_RATE_30M)
+#define SPF_SCAN_RATE_MASK_RANDOM_DWELL \
+	(SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_5M | SPF_SCAN_RATE_7P5M | \
+	 SPF_SCAN_RATE_10M)
 
 /* RX1 is the classifier source.  RX2 may only be added as a synchronous
  * capture stream; there is never a per-receiver tuning decision. */
@@ -107,6 +114,9 @@ struct spf_scan_visit_record {
 	uint32_t analog_bandwidth_hz, source_rate_hz;
 	uint32_t target, profile, result, eligible_mask, effective_weight;
 	uint32_t profile_crc32, flags;
+	uint64_t gain_counter;
+	uint32_t gain_read_duration_ns;
+	uint8_t rx1_gain_index, rx2_gain_index, gain_valid;
 };
 
 struct spf_scan_terminal {

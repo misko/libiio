@@ -24,6 +24,13 @@ struct spf_scan_session_output {
 	struct spf_visit_slice slices[SPF_VISIT_QUEUE_MAX_BLOCKS];
 };
 
+struct spf_scan_gain_observation {
+	uint64_t counter;
+	uint32_t read_duration_ns;
+	uint8_t rx1_gain_index, rx2_gain_index;
+	bool valid;
+};
+
 int spf_scan_session_create(struct spf_scan_session **out,
 	const struct spf_scan_setup *setup,
 	const struct spf_scan_session_runtime *runtime,
@@ -35,6 +42,8 @@ int spf_scan_session_rebase(struct spf_scan_session *session,
 	uint64_t full_counter_anchor);
 int spf_scan_session_schedule(struct spf_scan_session *session,
 	uint64_t now, uint64_t counter_anchor, struct spf_scan_choice *choice);
+int spf_scan_session_observe_gain(struct spf_scan_session *session,
+	uint64_t visit, const struct spf_scan_gain_observation *observation);
 int spf_scan_session_next_boundary(const struct spf_scan_session *session,
 	uint64_t *counter);
 int spf_scan_session_counter(const struct spf_scan_session *session,

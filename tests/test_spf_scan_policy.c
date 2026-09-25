@@ -39,6 +39,7 @@ static void test_admission(void)
 	struct spf_scan_policy *p = NULL;
 	unsigned rates[] = {520833, 2500000, 5000000, 7500000, 8000000,
 		12345679, 10000000, 15000000, 20000000, 30000000, 61440000}, i;
+	unsigned v3_rates[] = {2500000, 5000000, 7500000, 10000000};
 	for (i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
 		c.source_rate_hz = rates[i];
 		assert(!spf_scan_policy_validate(&c));
@@ -57,6 +58,17 @@ static void test_admission(void)
 	assert(spf_scan_policy_validate(&bad) == -EINVAL);
 	bad = c; memset(bad.analysis_digest, 0, 32);
 	assert(spf_scan_policy_validate(&bad) == -EINVAL);
+	c.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
+	c.dwell_ms = 240;
+	for (i = 0; i < sizeof(v3_rates) / sizeof(v3_rates[0]); i++) {
+		c.source_rate_hz = v3_rates[i];
+		assert(!spf_scan_policy_validate(&c));
+	}
+	c.source_rate_hz = 8000000;
+	assert(spf_scan_policy_validate(&c) == -EOPNOTSUPP);
+	c.protocol_version = SPF_SCAN_PROTOCOL_VERSION;
+	c.dwell_ms = 120;
+	c.source_rate_hz = 61440000;
 	assert(spf_scan_policy_create(&p, &c, UINT64_MAX - 10) == -EOVERFLOW);
 	assert(p == NULL);
 }
