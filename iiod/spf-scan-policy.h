@@ -59,7 +59,8 @@ int spf_scan_policy_create(struct spf_scan_policy **out,
 	const struct spf_scan_policy_config *config, uint64_t start_counter);
 void spf_scan_policy_destroy(struct spf_scan_policy *policy);
 /* A successful select must be followed by commit or stop, never another select.
- * commit records actual post-settling start; hardware lateness fails closed. */
+ * commit records actual post-settling start; -ENODATA means the final dwell
+ * no longer fits and must be followed by stop. Backward time is -ETIME. */
 int spf_scan_policy_select(struct spf_scan_policy *policy, uint64_t now,
 	struct spf_scan_choice *choice);
 int spf_scan_policy_commit(struct spf_scan_policy *policy, uint64_t valid_start);
