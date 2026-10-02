@@ -685,9 +685,56 @@ static void test_native_low_rate_and_stalled_final_dma(void)
 	}
 }
 
+static void test_last_recall_deadline_preserves_completed_visit(void)
+{
+	const uint64_t base = UINT64_C(0x1afff0000);
+	struct spf_scan_session_runtime runtime = {
+		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.bytes_per_sample = 4, .drain_bytes_per_second = 60000000,
+		.release_block = release_block,
+	};
+	struct spf_scan_setup request = setup();
+	struct spf_scan_session *session;
+	struct spf_scan_radio radio;
+	struct spf_scan_choice choice;
+	struct spf_scan_terminal terminal;
+	uintptr_t token = 1200;
+	unsigned before;
+
+	request.duration_ms = 60;
+	request.maximum_revisit_ms = 60;
+	assert(spf_scan_radio_init(&radio, 29, mock_ioctl) == 0);
+	mock_now = base;
+	assert(!spf_scan_session_create(&session, &request, &runtime, &radio, base));
+	assert(!spf_scan_session_schedule(session, base, base, &choice));
+	feed_three(session, base, &token);
+	/* The first visit is complete but intentionally not drained. The next
+	 * selection fits nominally; successful attestation pushes it past end. */
+	mock_now = base + 300000;
+	recall_before_offset = 100;
+	recall_after_offset = 150000;
+	before = recall_count;
+	assert(spf_scan_session_schedule(session, mock_now, mock_now, &choice) == -ENODATA);
+	assert(recall_count == before + 1);
+	mock_now += recall_after_offset;
+	recall_after_offset = 1000;
+	/* The scheduler supplies its pre-recall snapshot to stop. */
+	assert(!spf_scan_session_stop(session, base + 300000));
+	assert(radio.released);
+	(void)take_complete(session, 0);
+	assert(!spf_scan_session_terminal(session, &terminal));
+	assert(terminal.state == SPF_SCAN_TERMINAL_COMPLETED && !terminal.error);
+	assert(terminal.planned == 1 && terminal.delivered == 1);
+	assert(!terminal.invalid && !terminal.skipped && !terminal.cancelled);
+	assert(terminal.final_counter == base + 450000);
+	assert(terminal.restore_before >= terminal.final_counter);
+	assert(!spf_scan_session_destroy(session));
+}
+
 int main(void)
 {
 	test_native_low_rate_and_stalled_final_dma();
+	test_last_recall_deadline_preserves_completed_visit();
 	test_v4_fixed_360_ms_visit_is_captured();
 	test_three_visits_feedback_and_early_restore();
 	test_recall_failure_cancels_and_restores();

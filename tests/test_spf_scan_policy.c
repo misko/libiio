@@ -371,8 +371,29 @@ static void test_weighted_replay_and_deadlines(void)
 	}
 }
 
+
+static void test_commit_deadline_is_distinct_from_backward_time(void)
+{
+	struct spf_scan_policy_config c = config();
+	struct spf_scan_policy *p;
+	struct spf_scan_choice choice;
+	uint64_t now = 1000;
+	c.duration_ms = 130;
+	assert(!spf_scan_policy_create(&p, &c, now));
+	assert(!spf_scan_policy_select(p, now, &choice));
+	assert(spf_scan_policy_commit(p, now - 1) == -ETIME);
+	assert(spf_scan_policy_commit(p, now + dt(&c, 10) + 1) == -ENODATA);
+	assert(spf_scan_policy_commit(p, now + dt(&c, 131)) == -ENODATA);
+	/* Exact fit remains admissible. Failed commits did not add a visit. */
+	assert(!spf_scan_policy_commit(p, now + dt(&c, 10)));
+	assert(!spf_scan_policy_finish_visit(p, 0, true));
+	spf_scan_policy_stop(p, now + dt(&c, 130));
+	spf_scan_policy_destroy(p);
+}
+
 int main(void)
 {
+	test_commit_deadline_is_distinct_from_backward_time();
 	test_admission();
 	test_feedback_and_terminal();
 	test_commit_after_transition_budget_is_valid();
