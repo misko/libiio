@@ -282,9 +282,13 @@ int spf_scan_policy_commit(struct spf_scan_policy *p, uint64_t start)
 	/* transition is the required settling minimum, not an expiry.  A PHY
 	 * Fast-Lock ioctl may begin after the snapshot used for selection; callers
 	 * then commit at its measured completion plus transition. */
-	if (start < p->selection.selection_counter || start > p->end ||
-		p->end - start < ticks(&p->config, p->selection.dwell_ms))
+	if (start < p->selection.selection_counter)
 		return -ETIME;
+	/* The selection fitted before recall, but measured hardware completion
+	 * can consume the final dwell. No IQ window has been committed yet. */
+	if (start > p->end ||
+	    p->end - start < ticks(&p->config, p->selection.dwell_ms))
+		return -ENODATA;
 	v = &p->visits[p->visit_count++];
 	*v = (struct scan_visit){start,
 		start + ticks(&p->config, p->selection.dwell_ms),

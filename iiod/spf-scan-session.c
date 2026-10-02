@@ -302,14 +302,6 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 	memset(entry, 0, sizeof(*entry));
 	entry->choice = selected;
 	samples = (uint32_t)ticks(session, selected.dwell_ms);
-	ret = spf_visit_queue_reserve(session->queue, selected.visit, samples,
-				      now, &admission);
-	if (ret) {
-		make_failed_entry_coherent(session, entry, now, false);
-		return fail_session(session, ret, now);
-	}
-	entry->admission = admission;
-	entry->queued = admission == SPF_VISIT_ADMITTED;
 	if (session->current_profile_valid &&
 	    session->current_profile == session->setup.targets[selected.target].profile) {
 		/* The shared LO is already at this target.  Do not manufacture an
@@ -366,6 +358,18 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 		valid_start = recall.counter_after + transition;
 	}
 	ret = spf_scan_policy_commit(session->policy, valid_start);
+	if (ret == -ENODATA && session->ledger_count > 1) {
+		/* Recall succeeded, but there is no room for another complete dwell.
+		 * Keep earlier windows drainable and exclude this uncommitted choice
+		 * from the ledger. The caller takes the normal end-of-scan path. */
+		session->ledger_count--;
+		if (recall.counter_after > session->latest_counter)
+			session->latest_counter = recall.counter_after;
+		return -ENODATA;
+	}
+	/* A session that cannot capture even its first dwell still fails closed. */
+	if (ret == -ENODATA)
+		ret = -ETIME;
 	if (ret) {
 		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session_reason(session, ret, recall.counter_after,
@@ -375,6 +379,15 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session(session, -EOVERFLOW, recall.counter_after);
 	}
+	/* Reserve only after the measured window fits the session deadline. */
+	ret = spf_visit_queue_reserve(session->queue, selected.visit, samples,
+				      now, &admission);
+	if (ret) {
+		make_failed_entry_coherent(session, entry, now, false);
+		return fail_session(session, ret, now);
+	}
+	entry->admission = admission;
+	entry->queued = admission == SPF_VISIT_ADMITTED;
 	entry->valid_start = valid_start;
 	entry->valid_end = valid_start + samples;
 	if (entry->queued) {
@@ -626,6 +639,8 @@ int spf_scan_session_stop(struct spf_scan_session *session,
 
 	if (!session || session->stopping)
 		return -EINVAL;
+	if (final_counter < session->latest_counter)
+		final_counter = session->latest_counter;
 	ret = close_active(session, final_counter);
 	if (ret)
 		return fail_session(session, ret, final_counter);
