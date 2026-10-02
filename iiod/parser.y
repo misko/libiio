@@ -412,9 +412,12 @@ Line:
 	| READSCAN SPACE DEVICE END {
 		struct parser_pdata *pdata = yyget_extra(scanner);
 		ssize_t ret = read_adaptive_scan(pdata, $3);
-		if (ret < 0)
+		if (ret < 0) {
+			char response[32];
+			int length = snprintf(response, sizeof(response), "%ld\n", (long)ret);
+			write_all(pdata, response, length);
 			YYABORT;
-		else
+		} else
 			YYACCEPT;
 	}
 	| CANCELBUFM SPACE DEVICE END {

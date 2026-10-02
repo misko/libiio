@@ -132,7 +132,7 @@ static void fixed_dwell_v4(void)
 
 static void random_dwell_v3(void)
 {
-	const uint32_t rates[] = {2500000, 5000000, 7500000, 10000000};
+	const uint32_t rates[] = {1250000, 2500000, 5000000, 7500000, 10000000};
 	struct spf_scan_caps caps, decoded_caps;
 	struct spf_scan_setup request = setup(), decoded;
 	uint8_t wire[SPF_SCAN_SETUP_BYTES];
@@ -142,12 +142,19 @@ static void random_dwell_v3(void)
 	caps.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
 	caps.rate_mode = SPF_SCAN_RATE_MODE_GAIN_OBSERVATION;
 	caps.rate_mask = SPF_SCAN_RATE_MASK_RANDOM_DWELL;
+	assert(caps.rate_mask == UINT32_C(0x171));
 	caps.minimum_dwell_ms = 120;
 	caps.maximum_dwell_ms = 360;
 	assert(!spf_scan_caps_encode(wire, sizeof(wire), &caps));
 	assert(!spf_scan_caps_decode(&decoded_caps, wire, SPF_SCAN_CAPS_BYTES));
 	assert(decoded_caps.protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION);
 	assert(decoded_caps.rate_mode == SPF_SCAN_RATE_MODE_GAIN_OBSERVATION);
+	/* Existing v3 endpoints retain their original mask; the added bit is
+	 * negotiated, not a reason for a new decoder to reject those endpoints. */
+	caps.rate_mask &= ~SPF_SCAN_RATE_1P25M;
+	assert(!spf_scan_caps_encode(wire, sizeof(wire), &caps));
+	assert(!spf_scan_caps_decode(&decoded_caps, wire, SPF_SCAN_CAPS_BYTES));
+	assert(decoded_caps.rate_mask == UINT32_C(0x71));
 	request.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
 	request.rx_mask = SPF_SCAN_RX1_RX2;
 	request.dwell_ms = 240;

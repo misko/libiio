@@ -63,6 +63,7 @@ int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
 	    (c->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION &&
 	     c->source_rate_hz != 2500000) ||
 	    (c->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION &&
+	     c->source_rate_hz != 1250000 &&
 	     c->source_rate_hz != 2500000 && c->source_rate_hz != 5000000 &&
 	     c->source_rate_hz != 7500000 && c->source_rate_hz != 10000000) ||
 	    (c->protocol_version != SPF_SCAN_RANDOM_DWELL_VERSION &&

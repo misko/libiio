@@ -171,6 +171,7 @@ int spf_scan_time_decode(struct spf_scan_time *t, const void *wire, size_t bytes
 static uint32_t rate_flag(uint32_t rate)
 {
 	switch (rate) {
+	case 1250000: return SPF_SCAN_RATE_1P25M;
 	case 2500000: return SPF_SCAN_RATE_2P5M;
 	case 5000000: return SPF_SCAN_RATE_5M;
 	case 7500000: return SPF_SCAN_RATE_7P5M;
@@ -236,7 +237,8 @@ static int caps_validate(const struct spf_scan_caps *caps)
 	if (caps->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION) {
 		if (caps->rate_mode != SPF_SCAN_RATE_MODE_GAIN_OBSERVATION ||
 		    caps->minimum_rate_hz || caps->maximum_rate_hz ||
-		    caps->rate_mask != SPF_SCAN_RATE_MASK_RANDOM_DWELL ||
+		    (caps->rate_mask != SPF_SCAN_RATE_MASK_RANDOM_DWELL &&
+		     caps->rate_mask != (SPF_SCAN_RATE_MASK_RANDOM_DWELL & ~SPF_SCAN_RATE_1P25M)) ||
 		    caps->minimum_dwell_ms != 120 || caps->maximum_dwell_ms != 360)
 			return -EINVAL;
 	} else if (caps->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION) {

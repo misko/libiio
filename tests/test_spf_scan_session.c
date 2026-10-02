@@ -560,7 +560,7 @@ static void test_reservation_failure_never_serializes_admitted_placeholder(void)
 
 static void test_runtime_rates_and_rejected_clock(void)
 {
-	const uint32_t rates[] = {5000000, 7500000, 8000000, 12345679, 61440000};
+	const uint32_t rates[] = {1250000, 2500000, 5000000, 7500000, 8000000, 12345679, 61440000};
 	const uint64_t base = UINT64_C(0x7ffff0000);
 	unsigned i, bytes;
 	for (i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
@@ -597,6 +597,14 @@ static void test_runtime_rates_and_rejected_clock(void)
 			for (at = base; at < boundary; at += 1000000)
 				assert(!spf_scan_session_feed(session, token++, data, at, 1000000));
 			mock_now = boundary;
+			/* The provider observes gain at every dwell boundary. Legacy
+			 * protocols must still produce encodable records with reserved
+			 * gain bytes zero, even when an observation is supplied. */
+			struct spf_scan_gain_observation gain = {
+				.counter = boundary, .read_duration_ns = 100,
+				.rx1_gain_index = 40, .rx2_gain_index = 40, .valid = true,
+			};
+			assert(!spf_scan_session_observe_gain(session, choice.visit, &gain));
 			assert(!spf_scan_session_stop(session, boundary));
 			assert(!spf_scan_session_take_output(session, &output));
 			assert(output.record.result == SPF_VISIT_COMPLETE);
@@ -622,8 +630,64 @@ static void test_runtime_rates_and_rejected_clock(void)
 	}
 }
 
+static void test_native_low_rate_and_stalled_final_dma(void)
+{
+	const uint64_t base = UINT64_C(0x800000000);
+	for (unsigned stall = 0; stall < 2; stall++) {
+		struct spf_scan_setup request = setup();
+		struct spf_scan_session_runtime runtime = {
+			.block_count = 16, .headroom_blocks = 2, .block_samples = 1000000,
+			.bytes_per_sample = 8, .drain_bytes_per_second = 60000000,
+			.release_block = release_block,
+		};
+		struct spf_scan_session *session;
+		struct spf_scan_radio radio;
+		struct spf_scan_choice choice;
+		struct spf_scan_session_output output;
+		struct spf_scan_terminal terminal;
+		uint8_t wire[SPF_SCAN_VISIT_BYTES];
+		static uint8_t data[8000000];
+		uint64_t boundary;
+		request.protocol_version = 3;
+		request.source_rate_hz = request.analog_bandwidth_hz = 1250000;
+		request.rx_mask = 3;
+		request.dwell_ms = 120;
+		request.maximum_revisit_ms = 1000;
+		mock_now = base;
+		assert(!spf_scan_radio_init(&radio, 29, mock_ioctl));
+		assert(!spf_scan_session_create(&session, &request, &runtime, &radio, base));
+		assert(!spf_scan_session_schedule(session, base, base, &choice));
+		assert(!spf_scan_session_next_boundary(session, &boundary));
+		struct spf_scan_gain_observation gain = {
+			.counter = boundary, .read_duration_ns = 100,
+			.rx1_gain_index = 40, .rx2_gain_index = 41, .valid = true,
+		};
+		assert(!spf_scan_session_observe_gain(session, choice.visit, &gain));
+		if (!stall)
+			assert(!spf_scan_session_feed(session, 99, data, base, 1000000));
+		mock_now = boundary;
+		assert(!spf_scan_session_stop(session, boundary));
+		if (stall) {
+			assert(spf_scan_session_terminal(session, &terminal) == -EAGAIN);
+			assert(spf_scan_session_fail(session, boundary, -ETIMEDOUT) == -ETIMEDOUT);
+		}
+		assert(!spf_scan_session_take_output(session, &output));
+		assert(!spf_scan_visit_encode(wire, sizeof(wire), &output.record));
+		assert(output.record.gain_valid && output.record.rx2_gain_index == 41);
+		assert(output.record.valid_end - output.record.valid_start == 150000);
+		assert(output.record.iq_bytes == (stall ? 0 : 1200000));
+		assert(!spf_scan_session_complete_output(session, choice.visit));
+		assert(!spf_scan_session_terminal(session, &terminal));
+		assert(terminal.flags & 1);
+		assert(terminal.error == (stall ? -ETIMEDOUT : 0));
+		assert(terminal.state == (stall ? SPF_SCAN_TERMINAL_FAILED : SPF_SCAN_TERMINAL_COMPLETED));
+		assert(!spf_scan_session_destroy(session));
+	}
+}
+
 int main(void)
 {
+	test_native_low_rate_and_stalled_final_dma();
 	test_v4_fixed_360_ms_visit_is_captured();
 	test_three_visits_feedback_and_early_restore();
 	test_recall_failure_cancels_and_restores();

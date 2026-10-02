@@ -114,6 +114,7 @@ struct spf_iiod_metadata_context {
 	struct spf_scan_radio scan_radio;
 	struct spf_scan_session *scan_session;
 	uint64_t scan_counter_anchor;
+	uint64_t scan_last_dma_ns;
 	uint64_t scan_clock_epoch;
 	uint8_t scan_boot_id[16];
 	uint64_t scan_active_visit;
@@ -1077,6 +1078,10 @@ static void *scan_scheduler(void *opaque)
 
 	for (;;) {
 		pthread_mutex_lock(&ctx->scan_lock);
+		if (ctx->scan_finished) {
+			pthread_mutex_unlock(&ctx->scan_lock);
+			break;
+		}
 		ret = spf_scan_radio_snapshot(&ctx->scan_radio,
 					      ctx->scan_counter_anchor, &now);
 		if (!ret)
@@ -1109,22 +1114,24 @@ static void *scan_scheduler(void *opaque)
 				pthread_mutex_unlock(&ctx->scan_lock);
 				break;
 			}
-			gain = spf_gain_read_pair(ctx->phy);
-			observation = (struct spf_scan_gain_observation) {
-				.counter = now,
-				.read_duration_ns = gain.duration_ns,
-				.rx1_gain_index = gain.rx1,
-				.rx2_gain_index = gain.rx2,
-				.valid = gain.valid,
-			};
-			ret = gain.valid ? spf_scan_session_observe_gain(
-				ctx->scan_session, ctx->scan_active_visit, &observation) : -EIO;
-			if (ret) {
-				(void)spf_scan_session_fail(ctx->scan_session, now, ret);
-				ctx->scan_error = ret;
-				ctx->scan_finished = true;
-				pthread_mutex_unlock(&ctx->scan_lock);
-				break;
+			if (ctx->scan_setup.protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION) {
+				gain = spf_gain_read_pair(ctx->phy);
+				observation = (struct spf_scan_gain_observation) {
+					.counter = now,
+					.read_duration_ns = gain.duration_ns,
+					.rx1_gain_index = gain.rx1,
+					.rx2_gain_index = gain.rx2,
+					.valid = gain.valid,
+				};
+				ret = gain.valid ? spf_scan_session_observe_gain(
+					ctx->scan_session, ctx->scan_active_visit, &observation) : -EIO;
+				if (ret) {
+					(void)spf_scan_session_fail(ctx->scan_session, now, ret);
+					ctx->scan_error = ret;
+					ctx->scan_finished = true;
+					pthread_mutex_unlock(&ctx->scan_lock);
+					break;
+				}
 			}
 
 			ret = spf_scan_session_schedule(ctx->scan_session, now, now,
@@ -1179,6 +1186,7 @@ int iiod_buffer_metadata_scan_start(void *provider_context)
 		return -EALREADY;
 	}
 	ctx->scan_started = true;
+	ctx->scan_last_dma_ns = scan_monotonic_ns();
 	pthread_mutex_unlock(&ctx->scan_lock);
 	return 0;
 }
@@ -1257,6 +1265,8 @@ int iiod_buffer_metadata_scan_feed(void *provider_context,
 				raw + 8, first, ctx->samples_per_channel);
 	if (!ret && !sequence_committed)
 		spf_buffer_sequence_commit(&ctx->sequence, &sequence);
+	if (!ret)
+		ctx->scan_last_dma_ns = scan_monotonic_ns();
 	pthread_mutex_unlock(&ctx->scan_lock);
 	return ret;
 }
@@ -1270,6 +1280,27 @@ int iiod_buffer_metadata_scan_take(void *provider_context,
 	if (!ctx || !ctx->scan_enabled)
 		return -EOPNOTSUPP;
 	pthread_mutex_lock(&ctx->scan_lock);
+	/* READSCAN must terminate even if DMA never supplies its first block or
+	 * stops mid-visit. Allow two full blocks plus two seconds, at least five
+	 * seconds, so large blocks at low native rates are not false timeouts.
+	 * The consumer polls here independently of a blocked DMA producer. */
+	if (ctx->scan_started &&
+	    (!ctx->scan_finished || !spf_scan_session_capture_complete(ctx->scan_session)) &&
+	    !ctx->scan_cancel_requested) {
+		uint64_t now = scan_monotonic_ns();
+		uint64_t limit = UINT64_C(2000000000) +
+			UINT64_C(2000000000) * ctx->samples_per_channel /
+			ctx->scan_setup.source_rate_hz;
+		if (limit < UINT64_C(5000000000))
+			limit = UINT64_C(5000000000);
+		if (!now || now - ctx->scan_last_dma_ns >= limit) {
+			ctx->scan_error = -ETIMEDOUT;
+			ctx->scan_finished = true;
+			ctx->scan_cancel_requested = true;
+			(void)spf_scan_session_fail(ctx->scan_session,
+				ctx->scan_counter_anchor, -ETIMEDOUT);
+		}
+	}
 	ret = spf_scan_session_take_output(ctx->scan_session, output);
 	pthread_mutex_unlock(&ctx->scan_lock);
 	return ret;
@@ -1392,6 +1423,23 @@ int iiod_buffer_metadata_scan_terminal(void *provider_context,
 		return -EOPNOTSUPP;
 	pthread_mutex_lock(&ctx->scan_lock);
 	ret = spf_scan_session_terminal(ctx->scan_session, terminal);
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return ret;
+}
+
+int iiod_buffer_metadata_scan_fail(void *provider_context, int error)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	int ret;
+
+	if (!ctx || !ctx->scan_enabled || error >= 0)
+		return -EINVAL;
+	pthread_mutex_lock(&ctx->scan_lock);
+	ret = spf_scan_session_fail(ctx->scan_session,
+		ctx->scan_counter_anchor, error);
+	ctx->scan_error = error;
+	ctx->scan_finished = true;
+	ctx->scan_cancel_requested = true;
 	pthread_mutex_unlock(&ctx->scan_lock);
 	return ret;
 }

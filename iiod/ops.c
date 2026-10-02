@@ -2279,8 +2279,8 @@ release:
 		break;
 	}
 	if (error)
-		(void)iiod_buffer_metadata_scan_cancel(
-			entry->metadata_provider_context);
+		(void)iiod_buffer_metadata_scan_fail(
+			entry->metadata_provider_context, error);
 	pthread_mutex_lock(&entry->ring_lock);
 	entry->scan.error = error;
 	entry->scan.producer_exited = true;
