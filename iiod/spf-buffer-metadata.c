@@ -1423,6 +1423,12 @@ int iiod_buffer_metadata_scan_terminal(void *provider_context,
 		return -EOPNOTSUPP;
 	pthread_mutex_lock(&ctx->scan_lock);
 	ret = spf_scan_session_terminal(ctx->scan_session, terminal);
+	/* A failed restoration cannot produce a truthful RESTORED terminal.
+	 * Once all capture work is done, return the error instead of polling
+	 * forever for a terminal the session is deliberately refusing to emit. */
+	if (ret == -EAGAIN && ctx->scan_finished && ctx->scan_error &&
+	    spf_scan_session_capture_complete(ctx->scan_session))
+		ret = ctx->scan_error;
 	pthread_mutex_unlock(&ctx->scan_lock);
 	return ret;
 }

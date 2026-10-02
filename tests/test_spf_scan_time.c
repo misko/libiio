@@ -11,6 +11,14 @@ static int fail_ioctl;
 static int capture_error;
 static bool capture_complete;
 
+int spf_scan_session_terminal(struct spf_scan_session *session,
+	struct spf_scan_terminal *terminal)
+{
+	(void)session;
+	(void)terminal;
+	return -EAGAIN;
+}
+
 bool spf_scan_session_capture_complete(const struct spf_scan_session *session)
 {
 	(void)session;
@@ -102,6 +110,11 @@ int main(void)
 	ctx.scan_finished = ctx.scan_cancel_requested = false;
 	assert(iiod_buffer_metadata_scan_fail(&ctx, -EOVERFLOW) == -EOVERFLOW);
 	assert(capture_error == -EOVERFLOW && ctx.scan_finished);
+	struct spf_scan_terminal terminal;
+	capture_complete = true;
+	assert(iiod_buffer_metadata_scan_terminal(&ctx, &terminal) == -EOVERFLOW);
+	capture_complete = false;
+	assert(iiod_buffer_metadata_scan_terminal(&ctx, &terminal) == -EAGAIN);
 	assert(!pthread_mutex_destroy(&ctx.scan_lock));
 	puts("PASS: real counter query lifecycle, contention, wrap, stale identity and nonfatal errors");
 	return 0;
