@@ -154,6 +154,15 @@ int main(void)
 	SLIST_INSERT_HEAD(&fixture.parser.thdlist_head, &fixture.thread, parser_list_entry);
 	fixture.client = drain_test_client_new(&fixture, client_read, client_write);
 	assert(fixture.client);
+	/* A rejected READSCAN must put its errno on the wire, not silently
+	 * return to the parser and leave the client waiting for record size. */
+	{
+		const char *command = "READSCAN dev1\n";
+		client_write(&fixture, command, strlen(command));
+		assert(fixture.output_bytes == 3);
+		assert(!memcmp(fixture.output, "-9\n", 3));
+		fixture.output_offset = fixture.output_bytes;
+	}
 
 	fixture.active = true;
 	assert(drain(&fixture, result, sizeof(result)) == -EBUSY);

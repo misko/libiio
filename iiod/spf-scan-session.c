@@ -97,12 +97,14 @@ static int fail_session_reason(struct spf_scan_session *session, int error,
 	if (!session->stopping) {
 		(void)close_active(session, counter);
 		spf_scan_policy_stop(session->policy, counter);
-		(void)spf_visit_queue_cancel(session->queue);
 		for (size_t i = 0; i < session->ledger_count; i++)
 			session->ledger[i].closed = true;
 		session->stopping = true;
 		session->final_counter = counter;
 	}
+	/* A gracefully stopped session can still be waiting for its final DMA
+	 * block. Failure must abandon those leases too, or terminal waits forever. */
+	(void)spf_visit_queue_cancel(session->queue);
 	session->failed = true;
 	session->error = error < 0 ? error : -EIO;
 	if (reason)
@@ -411,6 +413,11 @@ int spf_scan_session_observe_gain(struct spf_scan_session *session,
 	if (!session || !observation || visit >= session->ledger_count ||
 	    visit != session->active)
 		return -EINVAL;
+	/* Gain telemetry was negotiated only by v3. In older protocols these
+	 * bytes are reserved; observing gain must not make a valid visit
+	 * impossible to encode (and strand READSCAN before its first record). */
+	if (session->setup.protocol_version != SPF_SCAN_RANDOM_DWELL_VERSION)
+		return 0;
 	entry = &session->ledger[visit];
 	if (observation->counter < entry->valid_end ||
 	    (observation->valid &&
@@ -656,7 +663,7 @@ int spf_scan_session_cancel(struct spf_scan_session *session,
 int spf_scan_session_fail(struct spf_scan_session *session,
 	uint64_t final_counter, int error)
 {
-	if (!session || session->stopping || !error)
+	if (!session || session->released || !error)
 		return -EINVAL;
 	return fail_session(session, error, final_counter);
 }

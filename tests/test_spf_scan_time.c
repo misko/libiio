@@ -8,6 +8,38 @@
 
 static uint32_t low = 16;
 static int fail_ioctl;
+static int capture_error;
+static bool capture_complete;
+
+int spf_scan_session_terminal(struct spf_scan_session *session,
+	struct spf_scan_terminal *terminal)
+{
+	(void)session;
+	(void)terminal;
+	return -EAGAIN;
+}
+
+bool spf_scan_session_capture_complete(const struct spf_scan_session *session)
+{
+	(void)session;
+	return capture_complete;
+}
+
+int spf_scan_session_fail(struct spf_scan_session *session, uint64_t counter, int error)
+{
+	(void)session;
+	(void)counter;
+	capture_error = error;
+	return error;
+}
+
+int spf_scan_session_take_output(struct spf_scan_session *session,
+	struct spf_scan_session_output *output)
+{
+	(void)session;
+	(void)output;
+	return -EAGAIN;
+}
 static int snapshot(int fd, unsigned long command, void *argument)
 {
 	struct adi_rx_counter_scan_snapshot *result = argument;
@@ -55,6 +87,34 @@ int main(void)
 	assert(!ctx.scan_radio.faulted);
 	ctx.scan_finished = true;
 	assert(iiod_buffer_metadata_scan_time(&ctx, &query, &result) == -ESHUTDOWN);
+	/* Exercise the real provider watchdog without sleeping or radio access. */
+	struct spf_scan_session_output output;
+	ctx.scan_finished = false;
+	ctx.scan_thread_live = false;
+	ctx.scan_setup.source_rate_hz = 1250000;
+	ctx.samples_per_channel = 1000000;
+	assert(!iiod_buffer_metadata_scan_start(&ctx));
+	assert(iiod_buffer_metadata_scan_take(&ctx, &output) == -EAGAIN);
+	assert(!capture_error);
+	ctx.scan_last_dma_ns = scan_monotonic_ns() - UINT64_C(6000000000);
+	assert(iiod_buffer_metadata_scan_take(&ctx, &output) == -EAGAIN);
+	assert(capture_error == -ETIMEDOUT && ctx.scan_finished);
+	ctx.scan_finished = ctx.scan_cancel_requested = false;
+	capture_error = 0;
+	ctx.samples_per_channel = 10000000; /* 8-second blocks remain valid. */
+	assert(iiod_buffer_metadata_scan_take(&ctx, &output) == -EAGAIN);
+	assert(!capture_error);
+	ctx.scan_last_dma_ns = scan_monotonic_ns() - UINT64_C(19000000000);
+	assert(iiod_buffer_metadata_scan_take(&ctx, &output) == -EAGAIN);
+	assert(capture_error == -ETIMEDOUT);
+	ctx.scan_finished = ctx.scan_cancel_requested = false;
+	assert(iiod_buffer_metadata_scan_fail(&ctx, -EOVERFLOW) == -EOVERFLOW);
+	assert(capture_error == -EOVERFLOW && ctx.scan_finished);
+	struct spf_scan_terminal terminal;
+	capture_complete = true;
+	assert(iiod_buffer_metadata_scan_terminal(&ctx, &terminal) == -EOVERFLOW);
+	capture_complete = false;
+	assert(iiod_buffer_metadata_scan_terminal(&ctx, &terminal) == -EAGAIN);
 	assert(!pthread_mutex_destroy(&ctx.scan_lock));
 	puts("PASS: real counter query lifecycle, contention, wrap, stale identity and nonfatal errors");
 	return 0;
