@@ -9,6 +9,17 @@
 #include <stdint.h>
 
 struct spf_scan_session;
+#define SPF_SCAN_DIAG_MAX_BYTES 32768U
+#define SPF_SCAN_STAGE_RECALL 1U
+#define SPF_SCAN_STAGE_RESTORE 3U
+#define SPF_SCAN_STAGE_DMA_WATCHDOG 4U
+#define SPF_SCAN_STAGE_PRODUCER 5U
+#define SPF_SCAN_STAGE_SESSION 6U
+#define SPF_SCAN_STAGE_TRANSPORT 7U
+int spf_scan_session_fail_stage(struct spf_scan_session *session,
+	uint64_t counter, int error, uint32_t stage);
+int spf_scan_session_diagnostics(struct spf_scan_session *session,
+	uint64_t identity, uint64_t generation, char *output, size_t capacity);
 
 struct spf_scan_session_runtime {
 	unsigned block_count, headroom_blocks;

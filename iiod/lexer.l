@@ -119,6 +119,10 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 	BEGIN(WANT_DEVICE);
 	return SCANTIME;
 }
+<INITIAL>SCANDIAG|scandiag {
+	BEGIN(WANT_DEVICE);
+	return SCANDIAG;
+}
 <INITIAL>SCANTIMECAPS|scantimecaps {
 	return SCANTIMECAPS;
 }

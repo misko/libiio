@@ -14,6 +14,7 @@ static uint64_t mock_now;
 static uint64_t configured_frequency[8];
 static unsigned released_blocks;
 static int fail_recall;
+static int fail_release;
 static unsigned recall_count;
 static uint32_t reject_rate, acquired_rate;
 static uint64_t recall_before_offset = 100;
@@ -22,6 +23,11 @@ static uint64_t recall_after_offset = 1000;
 static int mock_ioctl(int fd, unsigned long request, void *argument)
 {
 	assert(fd == 29);
+	if (request == ADI_RX_COUNTER_IOC_DIAG_CONTEXT ||
+	    request == ADI_RX_COUNTER_IOC_GET_DIAGNOSTICS) {
+		errno = ENOTTY;
+		return -1;
+	}
 	if (request == ADI_RX_COUNTER_IOC_GET_SCAN_CAPS) {
 		struct adi_rx_counter_scan_caps *caps = argument;
 
@@ -70,6 +76,10 @@ static int mock_ioctl(int fd, unsigned long request, void *argument)
 	}
 	if (request == ADI_RX_COUNTER_IOC_RELEASE_SCAN) {
 		struct adi_rx_counter_scan_release *release = argument;
+		if (fail_release) {
+			errno = EREMOTEIO;
+			return -1;
+		}
 
 		release->frequency_hz = UINT64_C(915000000);
 		release->counter_before = (uint32_t)(mock_now + 10);
@@ -309,6 +319,46 @@ static void test_recall_failure_cancels_and_restores(void)
 	assert(spf_scan_session_terminal(session, &terminal) == 0);
 	assert(terminal.state == SPF_SCAN_TERMINAL_FAILED && terminal.error == -EIO);
 	assert(terminal.cancelled == 1 && terminal.planned == 1);
+	{
+		char diagnostics[SPF_SCAN_DIAG_MAX_BYTES];
+		assert(spf_scan_session_diagnostics(session, 1, 2, diagnostics, sizeof(diagnostics)) > 0);
+		assert(strstr(diagnostics, "\"first_error\":-5"));
+		assert(strstr(diagnostics, "\"failure_stage\":1"));
+		assert(strstr(diagnostics, "\"restoration_error\":0"));
+		assert(spf_scan_session_diagnostics(session, 9, 2, diagnostics, sizeof(diagnostics)) == -ESTALE);
+		assert(spf_scan_session_diagnostics(session, 1, 2, diagnostics, 10) == -ENOSPC);
+	}
+	assert(spf_scan_session_destroy(session) == 0);
+}
+
+static void test_first_failure_survives_restoration_and_producer_errors(void)
+{
+	struct spf_scan_session_runtime runtime = {
+		.block_count = 8, .headroom_blocks = 2, .block_samples = 100000,
+		.bytes_per_sample = 4, .drain_bytes_per_second = 60000000,
+		.release_block = release_block,
+	};
+	struct spf_scan_session *session;
+	struct spf_scan_radio radio;
+	struct spf_scan_setup request = setup();
+	struct spf_scan_choice choice;
+	char diagnostics[SPF_SCAN_DIAG_MAX_BYTES];
+	mock_now = 0;
+	assert(spf_scan_radio_init(&radio, 29, mock_ioctl) == 0);
+	assert(spf_scan_session_create(&session, &request, &runtime, &radio, 0) == 0);
+	fail_recall = fail_release = 1;
+	assert(spf_scan_session_schedule(session, 0, 0, &choice) == -EIO);
+	assert(spf_scan_session_fail_stage(session, 100, -ETIMEDOUT, SPF_SCAN_STAGE_PRODUCER) == -EIO);
+	assert(spf_scan_session_diagnostics(session, 1, 2, diagnostics, sizeof(diagnostics)) > 0);
+	assert(strstr(diagnostics, "\"first_error\":-5"));
+	assert(strstr(diagnostics, "\"restoration_error\":-121"));
+	assert(strstr(diagnostics, "\"failure_stage\":1"));
+	fail_recall = fail_release = 0;
+	{
+		struct spf_scan_session_output output;
+		assert(spf_scan_session_take_output(session, &output) == 0);
+		assert(spf_scan_session_complete_output(session, output.record.visit) == 0);
+	}
 	assert(spf_scan_session_destroy(session) == 0);
 }
 
@@ -738,6 +788,7 @@ int main(void)
 	test_v4_fixed_360_ms_visit_is_captured();
 	test_three_visits_feedback_and_early_restore();
 	test_recall_failure_cancels_and_restores();
+	test_first_failure_survives_restoration_and_producer_errors();
 	test_dual_rx_uses_one_shared_recall_and_eight_byte_frames();
 	test_delayed_recall_moves_valid_start_without_failing_session();
 	test_transport_failure_cancels_current_and_remainder();

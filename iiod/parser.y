@@ -81,6 +81,7 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token SCANFEEDBACK
 %token SCANACK
 %token SCANTIME
+%token SCANDIAG
 %token SCANTIMECAPS
 %token CANCELBUFM
 %token DRAINBUFM
@@ -484,6 +485,14 @@ Line:
 		struct parser_pdata *pdata = yyget_extra(scanner);
 		read_adaptive_scan_time_capabilities(pdata);
 		YYACCEPT;
+	}
+	| SCANDIAG SPACE DEVICE SPACE WORD END {
+		char *size = $5;
+		size_t bytes = strcmp(size, "16") ? 0 : 16;
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = read_adaptive_scan_diagnostics(pdata, $3, bytes);
+		free(size);
+		if (ret < 0) YYABORT; else YYACCEPT;
 	}
 	| SCANFEEDBACK SPACE DEVICE SPACE WORD END {
 		char *size = $5;

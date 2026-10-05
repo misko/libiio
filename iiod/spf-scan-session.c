@@ -1,10 +1,14 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
+#define _POSIX_C_SOURCE 200809L
 #include "spf-scan-session.h"
 #include "spf-scan-rate.h"
 
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <time.h>
 
 #define NO_ACTIVE SIZE_MAX
 #define TERMINAL_FLAG_RESTORED UINT32_C(1)
@@ -39,6 +43,9 @@ struct spf_scan_session {
 	struct spf_scan_radio_release_receipt restoration;
 	enum spf_visit_result inflight_result;
 	int error;
+	int restoration_error;
+	uint32_t failure_stage;
+	uint64_t failure_counter, failure_ns, failure_visit;
 	uint32_t failure_reason;
 	bool stopping, failed, cancelled_session, released, output_inflight;
 	bool current_profile_valid;
@@ -81,8 +88,13 @@ static int maybe_release(struct spf_scan_session *session)
 	ret = spf_scan_radio_release(session->radio, session->latest_counter,
 				     &session->restoration);
 	if (ret) {
+		if (!session->restoration_error)
+			session->restoration_error = ret;
+		if (!session->failed) {
+			session->error = ret;
+			session->failure_stage = SPF_SCAN_STAGE_RESTORE;
+		}
 		session->failed = true;
-		session->error = ret;
 		return ret;
 	}
 	session->released = true;
@@ -105,10 +117,19 @@ static int fail_session_reason(struct spf_scan_session *session, int error,
 	/* A gracefully stopped session can still be waiting for its final DMA
 	 * block. Failure must abandon those leases too, or terminal waits forever. */
 	(void)spf_visit_queue_cancel(session->queue);
+	if (!session->failed) {
+		struct timespec timestamp;
+		session->error = error < 0 ? error : -EIO;
+		session->failure_counter = counter;
+		session->failure_visit = session->ledger_count ? session->ledger_count - 1 : UINT64_MAX;
+		if (!clock_gettime(CLOCK_MONOTONIC, &timestamp))
+			session->failure_ns = (uint64_t)timestamp.tv_sec * UINT64_C(1000000000) + timestamp.tv_nsec;
+		if (!session->failure_stage)
+			session->failure_stage = SPF_SCAN_STAGE_SESSION;
+		if (reason)
+			session->failure_reason = reason;
+	}
 	session->failed = true;
-	session->error = error < 0 ? error : -EIO;
-	if (reason)
-		session->failure_reason = reason;
 	if (counter > session->latest_counter)
 		session->latest_counter = counter;
 	(void)maybe_release(session);
@@ -184,6 +205,9 @@ int spf_scan_session_create(struct spf_scan_session **out,
 				     runtime->block_samples,
 				     setup->rx_mask == SPF_SCAN_RX1_RX2 ?
 				     UINT32_C(0x0f) : UINT32_C(0x03));
+	if (ret)
+		goto restore;
+	ret = spf_scan_radio_diag_context(radio, setup->session, UINT64_MAX);
 	if (ret)
 		goto restore;
 	ret = spf_scan_radio_configure(radio, profiles, setup->target_count);
@@ -314,12 +338,16 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 			.counter_after = counter_anchor,
 		};
 	} else {
-		ret = spf_scan_radio_recall(session->radio,
+		ret = spf_scan_radio_diag_context(session->radio,
+			session->setup.session, selected.visit);
+		if (!ret)
+			ret = spf_scan_radio_recall(session->radio,
 			session->setup.targets[selected.target].profile,
 			counter_anchor, &recall);
 		if (ret) {
 			make_failed_entry_coherent(session, entry, now, entry->queued);
-			return fail_session(session, ret, now);
+			return spf_scan_session_fail_stage(session, now, ret,
+						   SPF_SCAN_STAGE_RECALL);
 		}
 		session->current_profile = recall.profile;
 		session->current_profile_valid = true;
@@ -681,6 +709,85 @@ int spf_scan_session_fail(struct spf_scan_session *session,
 	if (!session || session->released || !error)
 		return -EINVAL;
 	return fail_session(session, error, final_counter);
+}
+
+int spf_scan_session_fail_stage(struct spf_scan_session *session,
+	uint64_t counter, int error, uint32_t stage)
+{
+	if (!session)
+		return -EINVAL;
+	if (!session->failed)
+		session->failure_stage = stage;
+	return spf_scan_session_fail(session, counter, error);
+}
+
+static int diagnostic_event_json(char *output, size_t capacity,
+				 const struct adi_rx_counter_diag_event *e)
+{
+	int size = snprintf(output, capacity,
+		"{\"sequence\":%" PRIu64 ",\"session\":%" PRIu64 ",\"visit\":%" PRIu64
+		",\"stage\":%u,\"step\":%u,\"profile\":%u,\"start_ns\":%" PRIu64
+		",\"end_ns\":%" PRIu64 ",\"elapsed_ns\":%" PRIu64
+		",\"spi_last_ns\":%" PRIu64 ",\"spi_max_ns\":%" PRIu64
+		",\"counter_before\":%u,\"counter_after\":%u,\"polls\":%u"
+		",\"last_status\":%d,\"error\":%d}",
+		(uint64_t)e->sequence, (uint64_t)e->session, (uint64_t)e->visit,
+		e->stage, e->step, e->profile, (uint64_t)e->start_ns,
+		(uint64_t)e->end_ns, (uint64_t)(e->end_ns - e->start_ns),
+		(uint64_t)e->spi_last_ns, (uint64_t)e->spi_max_ns,
+		e->counter_before, e->counter_after, e->polls, e->last_status, e->error);
+	return size < 0 || (size_t)size >= capacity ? -ENOSPC : size;
+}
+
+int spf_scan_session_diagnostics(struct spf_scan_session *session,
+	uint64_t identity, uint64_t generation, char *output, size_t capacity)
+{
+	struct adi_rx_counter_diagnostics kernel;
+	size_t used;
+	unsigned i;
+	int ret, kernel_error;
+	if (!session || !output || !capacity || capacity > SPF_SCAN_DIAG_MAX_BYTES)
+		return -EINVAL;
+	if (identity != session->setup.session || generation != session->setup.generation)
+		return -ESTALE;
+	kernel_error = spf_scan_radio_diagnostics(session->radio, &kernel);
+	if (kernel_error)
+		memset(&kernel, 0, sizeof(kernel));
+	ret = snprintf(output, capacity,
+		"{\"schema\":\"spf.scan-diagnostics/v1\",\"session\":%" PRIu64
+		",\"generation\":%" PRIu64 ",\"first_error\":%d,\"restoration_error\":%d"
+		",\"failure_stage\":%u,\"failure_counter\":%" PRIu64
+		",\"failure_ns\":%" PRIu64 ",\"failure_visit\":%" PRIu64
+		",\"kernel_error\":%d,\"kernel_total\":%" PRIu64 ",\"first_failure\":",
+		identity, generation, session->error, session->restoration_error,
+		session->failure_stage, session->failure_counter, session->failure_ns,
+		session->failure_visit, kernel_error, (uint64_t)kernel.total);
+	if (ret < 0 || (size_t)ret >= capacity)
+		return -ENOSPC;
+	used = (size_t)ret;
+#define APPEND_EVENT(event) do { \
+	ret = diagnostic_event_json(output + used, capacity - used, event); \
+	if (ret < 0) return ret; used += (size_t)ret; \
+} while (0)
+#define APPEND_TEXT(text) do { \
+	ret = snprintf(output + used, capacity - used, "%s", text); \
+	if (ret < 0 || (size_t)ret >= capacity - used) return -ENOSPC; \
+	used += (size_t)ret; \
+} while (0)
+	APPEND_EVENT(&kernel.first_failure);
+	APPEND_TEXT(",\"restoration_failure\":");
+	APPEND_EVENT(&kernel.restoration_failure);
+	APPEND_TEXT(",\"events\":[");
+	for (i = 0; i < kernel.count; i++) {
+		/* Oldest first; the ABI stores the bounded ring in physical order. */
+		uint64_t sequence = kernel.total - kernel.count + i;
+		if (i) APPEND_TEXT(",");
+		APPEND_EVENT(&kernel.events[sequence % ADI_RX_COUNTER_DIAG_CAPACITY]);
+	}
+	APPEND_TEXT("]}");
+#undef APPEND_EVENT
+#undef APPEND_TEXT
+	return (int)used;
 }
 
 int spf_scan_session_terminal(struct spf_scan_session *session,

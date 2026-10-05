@@ -1297,8 +1297,8 @@ int iiod_buffer_metadata_scan_take(void *provider_context,
 			ctx->scan_error = -ETIMEDOUT;
 			ctx->scan_finished = true;
 			ctx->scan_cancel_requested = true;
-			(void)spf_scan_session_fail(ctx->scan_session,
-				ctx->scan_counter_anchor, -ETIMEDOUT);
+			(void)spf_scan_session_fail_stage(ctx->scan_session,
+				ctx->scan_counter_anchor, -ETIMEDOUT, SPF_SCAN_STAGE_DMA_WATCHDOG);
 		}
 	}
 	ret = spf_scan_session_take_output(ctx->scan_session, output);
@@ -1433,6 +1433,20 @@ int iiod_buffer_metadata_scan_terminal(void *provider_context,
 	return ret;
 }
 
+int iiod_buffer_metadata_scan_diagnostics(void *provider_context,
+	uint64_t session, uint64_t generation, char *output, size_t capacity)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	int ret;
+	if (!ctx || !ctx->scan_enabled)
+		return -EOPNOTSUPP;
+	pthread_mutex_lock(&ctx->scan_lock);
+	ret = spf_scan_session_diagnostics(ctx->scan_session,
+					   session, generation, output, capacity);
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return ret;
+}
+
 int iiod_buffer_metadata_scan_fail(void *provider_context, int error)
 {
 	struct spf_iiod_metadata_context *ctx = provider_context;
@@ -1441,8 +1455,8 @@ int iiod_buffer_metadata_scan_fail(void *provider_context, int error)
 	if (!ctx || !ctx->scan_enabled || error >= 0)
 		return -EINVAL;
 	pthread_mutex_lock(&ctx->scan_lock);
-	ret = spf_scan_session_fail(ctx->scan_session,
-		ctx->scan_counter_anchor, error);
+	ret = spf_scan_session_fail_stage(ctx->scan_session,
+		ctx->scan_counter_anchor, error, SPF_SCAN_STAGE_PRODUCER);
 	ctx->scan_error = error;
 	ctx->scan_finished = true;
 	ctx->scan_cancel_requested = true;
