@@ -183,6 +183,14 @@ int iiod_buffer_metadata_scan_cancel(void *provider_context)
 	return -EOPNOTSUPP;
 }
 
+int iiod_buffer_metadata_scan_diagnostics(void *provider_context,
+	uint64_t session, uint64_t generation, char *output, size_t capacity)
+{
+	(void)provider_context; (void)session; (void)generation;
+	(void)output; (void)capacity;
+	return -EOPNOTSUPP;
+}
+
 int iiod_buffer_metadata_scan_fail(void *provider_context, int error)
 {
 	(void)provider_context;

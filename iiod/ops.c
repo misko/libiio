@@ -3933,6 +3933,34 @@ void read_adaptive_scan_time_capabilities(struct parser_pdata *pdata)
 	print_value(pdata, 1);
 }
 
+ssize_t read_adaptive_scan_diagnostics(struct parser_pdata *pdata,
+		struct iio_device *dev, size_t bytes)
+{
+	uint8_t query[16];
+	uint64_t session = 0, generation = 0;
+	char *output = NULL;
+	struct DevEntry *entry;
+	ssize_t ret;
+	unsigned i;
+	if (bytes != sizeof(query)) ret = -EINVAL;
+	else if ((ret = read_all(pdata, query, sizeof(query))) < 0) ;
+	else if (!(output = malloc(SPF_SCAN_DIAG_MAX_BYTES))) ret = -ENOMEM;
+	else if (!(entry = scan_control_entry_get(dev))) ret = -ENODATA;
+	else {
+		for (i = 0; i < 8; i++) {
+			session |= (uint64_t)query[i] << (8 * i);
+			generation |= (uint64_t)query[8 + i] << (8 * i);
+		}
+		ret = iiod_buffer_metadata_scan_diagnostics(entry->metadata_provider_context,
+			session, generation, output, SPF_SCAN_DIAG_MAX_BYTES);
+		scan_control_entry_put(entry);
+	}
+	print_value(pdata, ret);
+	if (ret > 0) ret = write_all(pdata, output, (size_t)ret);
+	free(output);
+	return ret;
+}
+
 ssize_t submit_adaptive_scan_feedback(struct parser_pdata *pdata,
 		struct iio_device *dev, size_t bytes)
 {

@@ -33,6 +33,21 @@ int spf_scan_session_fail(struct spf_scan_session *session, uint64_t counter, in
 	return error;
 }
 
+int spf_scan_session_fail_stage(struct spf_scan_session *session,
+	uint64_t counter, int error, uint32_t stage)
+{
+	(void)stage;
+	return spf_scan_session_fail(session, counter, error);
+}
+
+int spf_scan_session_diagnostics(struct spf_scan_session *session,
+	uint64_t identity, uint64_t generation, char *output, size_t capacity)
+{
+	(void)session; (void)identity; (void)generation;
+	(void)output; (void)capacity;
+	return -EOPNOTSUPP;
+}
+
 int spf_scan_session_take_output(struct spf_scan_session *session,
 	struct spf_scan_session_output *output)
 {

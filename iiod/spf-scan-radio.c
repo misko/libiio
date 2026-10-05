@@ -11,6 +11,42 @@ static int system_ioctl(int fd, unsigned long request, void *argument)
 	return ioctl(fd, request, argument);
 }
 
+int spf_scan_radio_diag_context(struct spf_scan_radio *radio,
+				uint64_t session, uint64_t visit)
+{
+	struct adi_rx_counter_diag_context context = {
+		.magic = ADI_RX_COUNTER_MAGIC, .version = ADI_RX_COUNTER_DIAG_VERSION,
+		.size = sizeof(context), .session = session, .visit = visit,
+	};
+	int error;
+	if (radio->diagnostics_unavailable)
+		return 0;
+	if (radio->call_ioctl(radio->fd, ADI_RX_COUNTER_IOC_DIAG_CONTEXT, &context) >= 0)
+		return 0;
+	error = errno;
+	if (error == ENOTTY) {
+		radio->diagnostics_unavailable = true;
+		return 0;
+	}
+	return -error;
+}
+
+int spf_scan_radio_diagnostics(struct spf_scan_radio *radio,
+			     struct adi_rx_counter_diagnostics *result)
+{
+	memset(result, 0, sizeof(*result));
+	if (radio->diagnostics_unavailable)
+		return -ENOTTY;
+	if (radio->call_ioctl(radio->fd, ADI_RX_COUNTER_IOC_GET_DIAGNOSTICS, result) < 0)
+		return -errno;
+	if (result->magic != ADI_RX_COUNTER_MAGIC ||
+	    result->version != ADI_RX_COUNTER_DIAG_VERSION ||
+	    result->size != sizeof(*result) || result->reserved ||
+	    result->count > ADI_RX_COUNTER_DIAG_CAPACITY)
+		return -EPROTO;
+	return 0;
+}
+
 static bool frequency_matches(uint64_t actual, uint64_t expected)
 {
 	return actual >= expected ? actual - expected <= 2 : expected - actual <= 2;

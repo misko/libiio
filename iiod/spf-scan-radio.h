@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "adi-rx-counter.h"
 
 #define SPF_SCAN_RADIO_MAX_PROFILES 8U
 
@@ -40,10 +41,15 @@ struct spf_scan_radio {
 	bool configured;
 	bool faulted;
 	bool released;
+	bool diagnostics_unavailable;
 };
 
 int spf_scan_radio_init(struct spf_scan_radio *radio, int fd,
 			spf_scan_radio_ioctl_fn call_ioctl);
+int spf_scan_radio_diag_context(struct spf_scan_radio *radio,
+				uint64_t session, uint64_t visit);
+int spf_scan_radio_diagnostics(struct spf_scan_radio *radio,
+			     struct adi_rx_counter_diagnostics *result);
 int spf_scan_radio_acquire(struct spf_scan_radio *radio, uint32_t source_rate_hz,
 			   uint32_t samples_per_block, uint32_t scan_mask);
 int spf_scan_radio_configure(struct spf_scan_radio *radio,
