@@ -781,12 +781,85 @@ static void test_last_recall_deadline_preserves_completed_visit(void)
 	assert(!spf_scan_session_destroy(session));
 }
 
+static void test_continuous_post_recall_guard_preserves_finite_modes(void)
+{
+	const uint64_t base = UINT64_C(0x1ffff0000);
+	const uint64_t after_offsets[] = { 0, 49999, 50000, 50001, 100000, 0 };
+	const struct spf_scan_session_runtime runtime = {
+		.block_count = 16, .headroom_blocks = 2, .block_samples = 1000000,
+		.bytes_per_sample = 8, .drain_bytes_per_second = 1000000000,
+		.release_block = release_block,
+	};
+	uintptr_t token = 5000;
+
+	for (unsigned version = 1; version <= 5; version++) {
+		for (unsigned boundary = 0; boundary < (version == 5 ? 6U : 1U); boundary++) {
+			struct spf_scan_setup request = setup();
+			struct spf_scan_session *session;
+			struct spf_scan_radio radio;
+			struct spf_scan_choice choice;
+			struct spf_scan_session_output output;
+			struct spf_scan_terminal terminal;
+			uint64_t selection = base + (boundary == 5 ? 1000 : 0);
+			uint64_t transition, expected_start, samples, end;
+
+			request.protocol_version = version;
+			request.rx_mask = SPF_SCAN_RX1_RX2;
+			request.maximum_revisit_ms = 1000;
+			if (version != 1) {
+				request.source_rate_hz = 2500000;
+				request.analog_bandwidth_hz = 2000000;
+			}
+			if (version == 3 || version == 4)
+				request.dwell_ms = 120;
+			if (version == 5) {
+				request.duration_ms = 0;
+				request.transition_budget_ms = 20;
+				request.maximum_boost = 1;
+				request.target_count = 8;
+				for (unsigned i = 0; i < 8; i++)
+					request.targets[i] = (struct spf_scan_target) {
+						i, i, UINT64_C(2400000000) + i * 1000000, 1, i + 1,
+					};
+			}
+			transition = (uint64_t)request.source_rate_hz * request.transition_budget_ms / 1000;
+			samples = (uint64_t)request.source_rate_hz * request.dwell_ms / 1000;
+			recall_before_offset = 0;
+			recall_after_offset = version == 5 ? after_offsets[boundary] : transition - 1;
+			mock_now = base;
+			assert(!spf_scan_radio_init(&radio, 29, mock_ioctl));
+			assert(!spf_scan_session_create(&session, &request, &runtime, &radio, base));
+			assert(!spf_scan_session_schedule(session, selection, base, &choice));
+			expected_start = selection + transition;
+			if (version == 5 && base + recall_after_offset + transition > expected_start)
+				expected_start = base + recall_after_offset + transition;
+			assert(!spf_scan_session_next_boundary(session, &end));
+			assert(end == expected_start + samples);
+			feed_blocks(session, base, &token, 1, 1000000);
+			mock_now = base + 1000000;
+			assert(!spf_scan_session_stop(session, mock_now));
+			output = take_complete_bytes(session, 0, samples * 8);
+			assert(output.record.valid_start == expected_start);
+			assert(output.record.transition_after == base + recall_after_offset);
+			if (version == 5)
+				assert(output.record.valid_start - output.record.transition_after >= transition);
+			else
+				assert(output.record.valid_start - output.record.transition_after == 1);
+			assert(!spf_scan_session_terminal(session, &terminal));
+			assert(terminal.delivered == 1 && !terminal.error && terminal.flags == 1);
+			assert(!spf_scan_session_destroy(session));
+		}
+	}
+	recall_before_offset = 100;
+	recall_after_offset = 1000;
+}
+
 static void test_continuous_ordered_bounded_history_and_counter_wrap(void)
 {
 	const uint64_t base = UINT64_C(0xffff0000);
 	struct spf_scan_setup request = setup();
 	struct spf_scan_session_runtime runtime = {
-		.block_count=16, .headroom_blocks=2, .block_samples=100000,
+		.block_count=16, .headroom_blocks=2, .block_samples=150000,
 		.bytes_per_sample=8, .drain_bytes_per_second=1000000000,
 		.release_block=release_block,
 	};
@@ -811,15 +884,16 @@ static void test_continuous_ordered_bounded_history_and_counter_wrap(void)
 	assert(!spf_scan_session_schedule(session,now,now,&choice));
 	for (uint64_t visit=0;visit<20000;visit++) {
 		assert(choice.visit==visit && choice.target==visit%8 && choice.dwell_ms==20);
-		/* Exact payload occupies the second half of one persistent DMA block. */
-		feed_blocks(session,now,&token,1,100000);
-		now+=100000; mock_now=now;
+		/* Recall completion plus the full guard precedes exact20ms support. */
+		feed_blocks(session,now,&token,1,150000);
+		now+=150000; mock_now=now;
 		if (visit==19999) assert(!spf_scan_session_stop(session,now));
 		else assert(!spf_scan_session_schedule(session,now,now,&choice));
 		assert(!spf_scan_session_take_output(session,&output));
 		assert(output.record.visit==visit && output.record.target==visit%8);
 		assert(output.record.protocol_version==5 && output.record.iq_bytes==400000);
 		assert(output.record.valid_end-output.record.valid_start==50000);
+		assert(output.record.valid_start-output.record.transition_after>=50000);
 		assert(!spf_scan_session_complete_output(session,visit));
 		assert(!spf_scan_session_status(session,&query,&status));
 		assert(status.delivered==visit+1 && status.queued_visits<=1);
@@ -857,16 +931,16 @@ static void test_continuous_partial_cancel_and_gap(void)
 		assert(!spf_scan_radio_init(&radio,29,mock_ioctl));
 		assert(!spf_scan_session_create(&session,&request,&runtime,&radio,base));
 		assert(!spf_scan_session_schedule(session,base,base,&choice));
-		feed_blocks(session,base,&token,3,25000);
-		mock_now=base+100000;
-		if (gap==1) feed_blocks(session,base+100000,&token,1,25000);
+		feed_blocks(session,base+1000,&token,3,25000);
+		mock_now=base+101000;
+		if (gap==1) feed_blocks(session,base+101000,&token,1,25000);
 		else if (gap==2) {
-			assert(!spf_scan_session_stop(session,base+100000));
+			assert(!spf_scan_session_stop(session,base+101000));
 			assert(!radio.released);
-			assert(!spf_scan_session_cancel(session,base+100000));
-			assert(!spf_scan_session_cancel(session,base+100000));
+			assert(!spf_scan_session_cancel(session,base+101000));
+			assert(!spf_scan_session_cancel(session,base+101000));
 		}
-		else assert(!spf_scan_session_cancel(session,base+75000));
+		else assert(!spf_scan_session_cancel(session,base+76000));
 		assert(!spf_scan_session_status(session,&query,&status));
 		assert(status.state==(gap==1?4:3));
 		assert(!spf_scan_session_take_output(session,&output));
@@ -887,7 +961,7 @@ static void test_continuous_pressure_stops_without_silent_skip(void)
 	const uint64_t base=UINT64_C(0x1ffff0000);
 	struct spf_scan_setup request=setup();
 	struct spf_scan_session_runtime runtime={.block_count=16,.headroom_blocks=2,
-		.block_samples=100000,.bytes_per_sample=8,.drain_bytes_per_second=1000000000,.release_block=release_block};
+		.block_samples=150000,.bytes_per_sample=8,.drain_bytes_per_second=1000000000,.release_block=release_block};
 	struct spf_scan_radio radio;
 	struct spf_scan_session *session;
 	struct spf_scan_choice choice;
@@ -903,8 +977,8 @@ static void test_continuous_pressure_stops_without_silent_skip(void)
 	assert(!spf_scan_radio_init(&radio,29,mock_ioctl));
 	assert(!spf_scan_session_create(&session,&request,&runtime,&radio,base));
 	assert(!spf_scan_session_schedule(session,base,base,&choice));
-	feed_blocks(session,base,&token,1,100000);
-	mock_now=base+100000;
+	feed_blocks(session,base,&token,1,150000);
+	mock_now=base+150000;
 	assert(spf_scan_session_schedule(session,mock_now,mock_now,&choice)==-ENOSPC);
 	(void)take_complete_bytes(session,0,400000);
 	assert(!spf_scan_session_take_output(session,&output));
@@ -920,6 +994,7 @@ static void test_continuous_pressure_stops_without_silent_skip(void)
 
 int main(void)
 {
+	test_continuous_post_recall_guard_preserves_finite_modes();
 	test_continuous_partial_cancel_and_gap();
 	test_continuous_pressure_stops_without_silent_skip();
 	test_continuous_ordered_bounded_history_and_counter_wrap();

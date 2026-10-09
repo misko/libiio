@@ -364,33 +364,33 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 		session->current_profile == session->setup.targets[selected.target].profile &&
 		recall.counter_before == recall.counter_after ? 0 :
 		ticks(session, session->setup.transition_budget_ms);
+	if (session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION)
+		transition = ticks(session, session->setup.transition_budget_ms);
 	if (selected.selection_counter > UINT64_MAX - transition) {
 		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session(session, -EOVERFLOW, recall.counter_after);
 	}
 	valid_start = selected.selection_counter + transition;
 	/* A snapshot and a Fast-Lock receipt are separate kernel operations.  The
-	 * receipt can legitimately be stamped just before the snapshot selected the
-	 * visit (the counter is sampled on different sides of the ioctl boundary).
-	 * That is safe: valid_start remains selection + transition, so it only gives
-	 * the LO more settling time.  Only a recall completing after valid_start can
-	 * contaminate the visit. */
+	 * receipt can legitimately precede selection. Neither clock boundary may
+	 * move backwards, and the continuous guard must follow actual completion. */
 	if (recall.counter_before > recall.counter_after) {
 		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session_reason(session, -ETIME, recall.counter_after,
 			TERMINAL_REASON_RECALL_LATE);
 	}
-	/* Fast-Lock execution is serialized by the PHY and can start later than
-	 * the preceding counter snapshot.  Do not discard the whole scan when that
-	 * happens: move this visit's valid boundary to transition milliseconds after
-	 * the actual recall completion.  This preserves the settling guarantee and
-	 * accurately accounts for the short non-IQ interval. */
-	if (recall.counter_after > valid_start) {
+	/* Correct the unpublished continuous candidate: selection plus a budget
+	 * does not guarantee that budget after recall. Even a recall completing one
+	 * tick before the old boundary needs the entire configured guard. Retain
+	 * the existing finite v1-v4 boundary rule and their historical receipts. */
+	if (session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION ||
+	    recall.counter_after > valid_start) {
 		if (recall.counter_after > UINT64_MAX - transition) {
 			make_failed_entry_coherent(session, entry, now, entry->queued);
 			return fail_session(session, -EOVERFLOW, recall.counter_after);
 		}
-		valid_start = recall.counter_after + transition;
+		if (recall.counter_after + transition > valid_start)
+			valid_start = recall.counter_after + transition;
 	}
 	ret = spf_scan_policy_commit(session->policy, valid_start);
 	if (ret == -ENODATA && session->ledger_count > 1 &&
