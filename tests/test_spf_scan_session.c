@@ -906,6 +906,71 @@ static void test_continuous_ordered_bounded_history_and_counter_wrap(void)
 	assert(!spf_scan_session_destroy(session));
 }
 
+static void test_continuous_diagnostics_survive_history_reuse(void)
+{
+	const uint64_t base = UINT64_C(0xffff0000);
+	struct spf_scan_setup request = setup();
+	struct spf_scan_session_runtime runtime = {
+		.block_count = 16, .headroom_blocks = 2, .block_samples = 150000,
+		.bytes_per_sample = 8, .drain_bytes_per_second = 1000000000,
+		.release_block = release_block,
+	};
+	struct spf_scan_radio radio;
+	struct spf_scan_session *session;
+	struct spf_scan_choice choice;
+	struct spf_scan_session_output output;
+	struct spf_scan_terminal terminal;
+	struct spf_scan_control query = {7, 1, 2, 1};
+	struct spf_scan_status status;
+	char diagnostics[SPF_SCAN_DIAG_MAX_BYTES];
+	uint64_t now = base;
+	uintptr_t token = 1;
+
+	request.protocol_version = SPF_SCAN_CONTINUOUS_ORDERED_VERSION;
+	request.source_rate_hz = 2500000; request.analog_bandwidth_hz = 2000000;
+	request.duration_ms = 0; request.dwell_ms = 20; request.transition_budget_ms = 20;
+	request.maximum_revisit_ms = 500; request.maximum_boost = 1;
+	request.target_count = 8; request.rx_mask = SPF_SCAN_RX1_RX2;
+	for (unsigned i = 0; i < 8; i++)
+		request.targets[i] = (struct spf_scan_target){i, i,
+			UINT64_C(2400000000) + i * 1000000, 1, UINT32_C(0x90000000) + i};
+	mock_now = now;
+	assert(!spf_scan_radio_init(&radio, 29, mock_ioctl));
+	assert(!spf_scan_session_create(&session, &request, &runtime, &radio, now));
+	assert(!spf_scan_session_schedule(session, now, now, &choice));
+	for (uint64_t visit = 0; visit < 200; visit++) {
+		feed_blocks(session, now, &token, 1, 150000);
+		now += 150000; mock_now = now;
+		if (visit == 199) {
+			fail_recall = fail_release = 1;
+			assert(spf_scan_session_schedule(session, now, now, &choice) == -EIO);
+			assert(spf_scan_session_fail_stage(session, now, -ETIMEDOUT,
+				SPF_SCAN_STAGE_PRODUCER) == -EIO);
+			fail_recall = fail_release = 0;
+		} else {
+			assert(!spf_scan_session_schedule(session, now, now, &choice));
+		}
+		assert(!spf_scan_session_take_output(session, &output));
+		assert(output.record.visit == visit && output.record.iq_bytes == 400000);
+		assert(!spf_scan_session_complete_output(session, visit));
+	}
+	/* The v0.61 first-failure evidence must retain absolute visit identity
+	 * after the continuous ledger has reused every physical history slot. */
+	assert(spf_scan_session_diagnostics(session, 1, 2, diagnostics, sizeof(diagnostics)) > 0);
+	assert(strstr(diagnostics, "\"first_error\":-5"));
+	assert(strstr(diagnostics, "\"restoration_error\":-121"));
+	assert(strstr(diagnostics, "\"failure_stage\":1"));
+	assert(strstr(diagnostics, "\"failure_visit\":200"));
+	assert(!spf_scan_session_status(session, &query, &status));
+	assert(status.state == 4 && status.error == -EIO && status.planned == 201);
+	assert(!spf_scan_session_take_output(session, &output));
+	assert(output.record.visit == 200 && !output.record.iq_bytes);
+	assert(!spf_scan_session_complete_output(session, 200));
+	assert(!spf_scan_session_terminal(session, &terminal));
+	assert(terminal.delivered == 200 && terminal.cancelled == 1 && terminal.error == -EIO);
+	assert(!spf_scan_session_destroy(session));
+}
+
 static void test_continuous_partial_cancel_and_gap(void)
 {
 	for (unsigned gap=0;gap<3;gap++) {
@@ -994,6 +1059,7 @@ static void test_continuous_pressure_stops_without_silent_skip(void)
 
 int main(void)
 {
+	test_continuous_diagnostics_survive_history_reuse();
 	test_continuous_post_recall_guard_preserves_finite_modes();
 	test_continuous_partial_cancel_and_gap();
 	test_continuous_pressure_stops_without_silent_skip();
