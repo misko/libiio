@@ -232,8 +232,39 @@ static int decode_ack(void *out, const void *wire, size_t bytes)
 static int decode_terminal(void *out, const void *wire, size_t bytes)
 { return spf_scan_terminal_decode(out, wire, bytes); }
 
+static void continuous_protocol(void)
+{
+	uint8_t wire[SPF_SCAN_SETUP_BYTES];
+	struct spf_scan_control q={1,2,3,2}, decoded;
+	struct spf_scan_status status={.identity={1,2,3,1},.state=2,.planned=20000,.counter=UINT64_C(0x100000010),.target=7}, out;
+	struct spf_scan_caps caps, caps_out;
+	struct spf_scan_setup request=setup(), request_out;
+	assert(!spf_scan_control_encode(wire,sizeof(wire),&q));
+	assert(!spf_scan_control_decode(&decoded,wire,48));
+	assert(!memcmp(&q,&decoded,sizeof(q)));
+	for (unsigned i=0;i<48;i++) { wire[i]^=1; assert(spf_scan_control_decode(&decoded,wire,48)); wire[i]^=1; }
+	assert(!spf_scan_status_encode(wire,sizeof(wire),&status));
+	assert(!spf_scan_status_decode(&out,wire,128));
+	assert(out.state==2 && out.planned==20000 && out.counter==status.counter && out.target==7);
+	for (unsigned i=0;i<128;i++) { wire[i]^=1; assert(spf_scan_status_decode(&out,wire,128)); wire[i]^=1; }
+	spf_scan_caps_default(&caps);
+	caps.protocol_version=5; caps.rate_mask=SPF_SCAN_RATE_2P5M;
+	caps.minimum_dwell_ms=caps.maximum_dwell_ms=20; caps.maximum_duration_ms=0;
+	assert(!spf_scan_caps_encode(wire,sizeof(wire),&caps));
+	assert(!spf_scan_caps_decode(&caps_out,wire,96));
+	assert(caps_out.protocol_version==5 && !caps_out.maximum_duration_ms);
+	request.protocol_version=5; request.source_rate_hz=2500000; request.analog_bandwidth_hz=2000000;
+	request.duration_ms=0; request.dwell_ms=20; request.target_count=8; request.maximum_boost=1;
+	for (unsigned i=0;i<8;i++) request.targets[i]=(struct spf_scan_target){i,i,UINT64_C(2400000000)+i*1000000,1,i+1};
+	assert(!spf_scan_setup_encode(wire,sizeof(wire),&request));
+	assert(!spf_scan_setup_decode(&request_out,wire,352));
+	request.duration_ms=300000; assert(spf_scan_setup_validate(&request));
+	request.protocol_version=1; request.duration_ms=0; assert(spf_scan_setup_validate(&request));
+}
+
 int main(int argc, char **argv)
 {
+	continuous_protocol();
 	uint8_t wire[SPF_SCAN_SETUP_BYTES];
 	struct spf_scan_caps caps, caps_out;
 	struct spf_scan_setup request = setup(), request_out;

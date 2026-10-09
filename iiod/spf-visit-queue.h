@@ -20,6 +20,7 @@ struct spf_visit_queue_config {
 	uint64_t maximum_bytes, maximum_age_ticks, drain_bytes_per_second;
 	uint32_t bytes_per_sample;
 	uint32_t maximum_visit_ms;
+	bool preserve_partial; /* opt-in continuous capture; legacy discard unchanged */
 };
 struct spf_visit_slice {
 	uintptr_t token;

@@ -78,6 +78,9 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token SCANCAPS2
 %token SCANCAPS3
 %token SCANCAPS4
+%token SCANCAPS5
+%token SCANSTATUS
+%token SCANSTOP
 %token SCANFEEDBACK
 %token SCANACK
 %token SCANTIME
@@ -450,6 +453,27 @@ Line:
 			YYABORT;
 		else
 			YYACCEPT;
+	}
+	| SCANCAPS5 SPACE WORD END {
+		char *capacity = $3;
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = read_adaptive_scan_capabilities(pdata, strtoul(capacity, NULL, 10), 5);
+		free(capacity);
+		if (ret < 0) YYABORT; else YYACCEPT;
+	}
+	| SCANSTATUS SPACE DEVICE SPACE WORD END {
+		char *size = $5;
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = read_adaptive_scan_control(pdata, $3, strcmp(size, "48") ? 0 : 48, false);
+		free(size);
+		if (ret < 0) YYABORT; else YYACCEPT;
+	}
+	| SCANSTOP SPACE DEVICE SPACE WORD END {
+		char *size = $5;
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = read_adaptive_scan_control(pdata, $3, strcmp(size, "48") ? 0 : 48, true);
+		free(size);
+		if (ret < 0) YYABORT; else YYACCEPT;
 	}
 	| SCANCAPS4 SPACE WORD END {
 		char *capacity = $3;

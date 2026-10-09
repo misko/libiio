@@ -86,6 +86,18 @@ static void discard(struct spf_visit_queue *q, struct visit *v, enum spf_visit_r
 	v->closed = true;
 }
 
+static void terminate(struct spf_visit_queue *q, struct visit *v, enum spf_visit_result result)
+{
+	if (!q->config.preserve_partial) { discard(q,v,result); return; }
+	/* Preserve only the contiguous admitted prefix. Its DMA leases remain
+	 * pinned until explicit transport completion; reservations remain bounded. */
+	q->stats.reserved_blocks -= v->remaining_blocks;
+	v->remaining_blocks = 0;
+	v->end = v->next;
+	v->result = result;
+	v->closed = true;
+}
+
 int spf_visit_queue_reserve(struct spf_visit_queue *q, uint64_t id,
 	uint32_t samples, uint64_t now, enum spf_visit_result *result)
 {
@@ -175,7 +187,7 @@ int spf_visit_queue_feed(struct spf_visit_queue *q, uintptr_t token,
 		unsigned s;
 		if (v->result != SPF_VISIT_ADMITTED) continue;
 		if (first > v->next && v->next < v->end) {
-			discard(q, v, SPF_VISIT_INVALID_GAP);
+			terminate(q, v, SPF_VISIT_INVALID_GAP);
 			continue;
 		}
 		a = first > v->start ? first : v->start;
@@ -184,7 +196,7 @@ int spf_visit_queue_feed(struct spf_visit_queue *q, uintptr_t token,
 		/* Reservation accounts for every potential slice; violations are
  * explicit corruption, never a partially valid capture. */
 		if (a != v->next || !v->remaining_blocks || v->slice_count >= 64) {
-			discard(q, v, SPF_VISIT_INVALID_GAP);
+			terminate(q, v, SPF_VISIT_INVALID_GAP);
 			continue;
 		}
 		s = v->slice_count++;
@@ -221,7 +233,7 @@ int spf_visit_queue_close_window(struct spf_visit_queue *q, uint64_t id, uint64_
 		if (v->closed) return 0;
 		if (v->sending) return -EINVAL;
 		v->closed = true;
-		if (invalid < v->end) discard(q, v, SPF_VISIT_INVALID_GAP);
+		if (invalid < v->end) terminate(q, v, SPF_VISIT_INVALID_GAP);
 		else if (v->next == v->end) v->result = SPF_VISIT_COMPLETE;
 		return 0;
 	}
@@ -269,7 +281,7 @@ int spf_visit_queue_expire(struct spf_visit_queue *q, uint64_t now)
 		struct visit *v = at(q, i);
 		if (now - v->reserved_at <= q->config.maximum_age_ticks) continue;
 		if (v->sending) ret = -ETIMEDOUT;
-		else if (v->bytes) discard(q, v, SPF_VISIT_SKIP_AGE);
+		else if (v->bytes) terminate(q, v, SPF_VISIT_SKIP_AGE);
 	}
 	return ret;
 }
@@ -283,7 +295,8 @@ int spf_visit_queue_cancel(struct spf_visit_queue *q)
 	for (i = 0; i < q->stats.visits; i++) {
 		struct visit *v = at(q, i);
 		if (v->sending) ret = -EBUSY;
-		else discard(q, v, SPF_VISIT_CANCELLED);
+		else if (!q->config.preserve_partial || v->result == SPF_VISIT_ADMITTED)
+			terminate(q, v, SPF_VISIT_CANCELLED);
 	}
 	return ret;
 }

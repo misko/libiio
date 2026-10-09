@@ -51,6 +51,25 @@
 #define SPF_SCAN_TERMINAL_BYTES 128U
 #define SPF_SCAN_TIME_QUERY_BYTES 48U
 #define SPF_SCAN_TIME_BYTES 128U
+#define SPF_SCAN_CONTROL_BYTES 48U
+#define SPF_SCAN_STATUS_BYTES 128U
+struct spf_scan_control {
+	uint64_t request, session, generation;
+	uint32_t flags; /* 1: snapshot/graceful stop, 2: forced stop */
+};
+struct spf_scan_status {
+	struct spf_scan_control identity;
+	uint64_t planned, delivered, counter, valid_start, valid_end, sweep;
+	uint32_t state, target, queued_visits;
+	int32_t error;
+	uint32_t terminal_state, terminal_reason;
+	uint64_t restore_after;
+	uint32_t restored_flags;
+};
+int spf_scan_control_encode(void *, size_t, const struct spf_scan_control *);
+int spf_scan_control_decode(struct spf_scan_control *, const void *, size_t);
+int spf_scan_status_encode(void *, size_t, const struct spf_scan_status *);
+int spf_scan_status_decode(struct spf_scan_status *, const void *, size_t);
 
 /* Separate opt-in command; existing published scan records are unchanged.
  * UINT64_MAX snapshot age means unknown, never zero uncertainty. */

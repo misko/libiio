@@ -204,6 +204,12 @@ int iiod_buffer_metadata_scan_time(void *provider_context,
 	(void)provider_context; (void)query; (void)result;
 	return -EOPNOTSUPP;
 }
+int iiod_buffer_metadata_scan_control(void *context,
+	const struct spf_scan_control *query, bool stop, struct spf_scan_status *out)
+{
+	(void)context; (void)query; (void)stop; (void)out;
+	return -EOPNOTSUPP;
+}
 
 int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, uint16_t version)
 {

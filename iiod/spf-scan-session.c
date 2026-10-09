@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define NO_ACTIVE SIZE_MAX
+#define NO_ACTIVE UINT64_MAX
 #define TERMINAL_FLAG_RESTORED UINT32_C(1)
 #define TERMINAL_REASON_COMPLETE UINT32_C(1)
 #define TERMINAL_REASON_INTERNAL UINT32_C(3)
@@ -36,10 +36,12 @@ struct spf_scan_session {
 	struct spf_scan_radio *radio;
 	uint32_t bytes_per_sample;
 	struct ledger_entry *ledger;
-	size_t ledger_capacity, ledger_count, active, output_index;
+	size_t ledger_capacity;
+	uint64_t ledger_count, active, output_index;
 	uint64_t latest_counter, final_counter;
 	uint32_t current_profile;
 	uint64_t delivered, skipped, invalid, cancelled, iq_bytes;
+	uint64_t inflight_bytes;
 	struct spf_scan_radio_release_receipt restoration;
 	enum spf_visit_result inflight_result;
 	int error;
@@ -64,7 +66,7 @@ static int close_active(struct spf_scan_session *session, uint64_t counter)
 
 	if (session->active == NO_ACTIVE)
 		return 0;
-	entry = &session->ledger[session->active];
+	entry = &session->ledger[session->active % session->ledger_capacity];
 	if (entry->closed)
 		return -EALREADY;
 	if (entry->queued) {
@@ -109,8 +111,8 @@ static int fail_session_reason(struct spf_scan_session *session, int error,
 	if (!session->stopping) {
 		(void)close_active(session, counter);
 		spf_scan_policy_stop(session->policy, counter);
-		for (size_t i = 0; i < session->ledger_count; i++)
-			session->ledger[i].closed = true;
+		for (uint64_t i = session->output_index; i < session->ledger_count; i++)
+			session->ledger[i % session->ledger_capacity].closed = true;
 		session->stopping = true;
 		session->final_counter = counter;
 	}
@@ -164,7 +166,8 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	if (ret)
 		return ret;
 	if (setup->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ||
-	    setup->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION) {
+	    setup->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION ||
+	    setup->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
 		if (!runtime->block_samples || runtime->block_count < 4 ||
 		    !runtime->headroom_blocks ||
 		    runtime->headroom_blocks >= runtime->block_count)
@@ -180,6 +183,8 @@ int spf_scan_session_create(struct spf_scan_session **out,
 	capacity = setup->duration_ms /
 		(setup->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ?
 		 120U : setup->dwell_ms) + 1U;
+	if (setup->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION)
+		capacity = setup->maximum_queue_visits + 2U;
 	if (capacity > SPF_SCAN_MAX_VISITS)
 		return -E2BIG;
 	session = calloc(1, sizeof(*session));
@@ -232,8 +237,10 @@ int spf_scan_session_create(struct spf_scan_session **out,
 		.maximum_age_ticks = (uint64_t)setup->source_rate_hz *
 			setup->maximum_queue_age_ms / 1000,
 		.drain_bytes_per_second = runtime->drain_bytes_per_second,
-		.maximum_visit_ms = setup->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ||
+		.maximum_visit_ms = setup->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION ? 20U :
+			setup->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ||
 			setup->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION ? 360U : 240U,
+		.preserve_partial = setup->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION,
 	};
 	ret = spf_visit_queue_create(&session->queue, &queue_config,
 				     runtime->release_block,
@@ -314,15 +321,15 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 		return fail_session(session, ret, now);
 	ret = spf_scan_policy_select(session->policy, now, &selected);
 	if (ret) {
-		if (ret == -ETIME)
+		if (ret == -ETIME || session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION)
 			return fail_session_reason(session, ret, now,
 				TERMINAL_REASON_POLICY_SELECT);
 		return ret;
 	}
 	if (selected.visit != session->ledger_count ||
-	    session->ledger_count >= session->ledger_capacity)
+	    session->ledger_count - session->output_index >= session->ledger_capacity)
 		return fail_session(session, -EOVERFLOW, now);
-	entry = &session->ledger[session->ledger_count++];
+	entry = &session->ledger[session->ledger_count++ % session->ledger_capacity];
 	memset(entry, 0, sizeof(*entry));
 	entry->choice = selected;
 	samples = (uint32_t)ticks(session, selected.dwell_ms);
@@ -357,36 +364,37 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 		session->current_profile == session->setup.targets[selected.target].profile &&
 		recall.counter_before == recall.counter_after ? 0 :
 		ticks(session, session->setup.transition_budget_ms);
+	if (session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION)
+		transition = ticks(session, session->setup.transition_budget_ms);
 	if (selected.selection_counter > UINT64_MAX - transition) {
 		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session(session, -EOVERFLOW, recall.counter_after);
 	}
 	valid_start = selected.selection_counter + transition;
 	/* A snapshot and a Fast-Lock receipt are separate kernel operations.  The
-	 * receipt can legitimately be stamped just before the snapshot selected the
-	 * visit (the counter is sampled on different sides of the ioctl boundary).
-	 * That is safe: valid_start remains selection + transition, so it only gives
-	 * the LO more settling time.  Only a recall completing after valid_start can
-	 * contaminate the visit. */
+	 * receipt can legitimately precede selection. Neither clock boundary may
+	 * move backwards, and the continuous guard must follow actual completion. */
 	if (recall.counter_before > recall.counter_after) {
 		make_failed_entry_coherent(session, entry, now, entry->queued);
 		return fail_session_reason(session, -ETIME, recall.counter_after,
 			TERMINAL_REASON_RECALL_LATE);
 	}
-	/* Fast-Lock execution is serialized by the PHY and can start later than
-	 * the preceding counter snapshot.  Do not discard the whole scan when that
-	 * happens: move this visit's valid boundary to transition milliseconds after
-	 * the actual recall completion.  This preserves the settling guarantee and
-	 * accurately accounts for the short non-IQ interval. */
-	if (recall.counter_after > valid_start) {
+	/* Correct the unpublished continuous candidate: selection plus a budget
+	 * does not guarantee that budget after recall. Even a recall completing one
+	 * tick before the old boundary needs the entire configured guard. Retain
+	 * the existing finite v1-v4 boundary rule and their historical receipts. */
+	if (session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION ||
+	    recall.counter_after > valid_start) {
 		if (recall.counter_after > UINT64_MAX - transition) {
 			make_failed_entry_coherent(session, entry, now, entry->queued);
 			return fail_session(session, -EOVERFLOW, recall.counter_after);
 		}
-		valid_start = recall.counter_after + transition;
+		if (recall.counter_after + transition > valid_start)
+			valid_start = recall.counter_after + transition;
 	}
 	ret = spf_scan_policy_commit(session->policy, valid_start);
-	if (ret == -ENODATA && session->ledger_count > 1) {
+	if (ret == -ENODATA && session->ledger_count > 1 &&
+	    session->setup.protocol_version != SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
 		/* Recall succeeded, but there is no room for another complete dwell.
 		 * Keep earlier windows drainable and exclude this uncommitted choice
 		 * from the ledger. The caller takes the normal end-of-scan path. */
@@ -418,6 +426,10 @@ int spf_scan_session_schedule(struct spf_scan_session *session,
 	entry->queued = admission == SPF_VISIT_ADMITTED;
 	entry->valid_start = valid_start;
 	entry->valid_end = valid_start + samples;
+	if (!entry->queued && session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
+		entry->closed = true;
+		return fail_session(session, -ENOSPC, recall.counter_after);
+	}
 	if (entry->queued) {
 		ret = spf_visit_queue_bind(session->queue, selected.visit,
 						 valid_start);
@@ -442,7 +454,7 @@ int spf_scan_session_next_boundary(const struct spf_scan_session *session,
 		return -ESHUTDOWN;
 	if (session->active == NO_ACTIVE)
 		return -EAGAIN;
-	*counter = session->ledger[session->active].valid_end;
+	*counter = session->ledger[session->active % session->ledger_capacity].valid_end;
 	return 0;
 }
 
@@ -459,7 +471,9 @@ int spf_scan_session_observe_gain(struct spf_scan_session *session,
 	 * impossible to encode (and strand READSCAN before its first record). */
 	if (session->setup.protocol_version != SPF_SCAN_RANDOM_DWELL_VERSION)
 		return 0;
-	entry = &session->ledger[visit];
+	if (session->ledger_count - visit > session->ledger_capacity)
+		return -ESTALE;
+	entry = &session->ledger[visit % session->ledger_capacity];
 	if (observation->counter < entry->valid_end ||
 	    (observation->valid &&
 	     (observation->rx1_gain_index > UINT8_C(0x7f) ||
@@ -498,6 +512,16 @@ int spf_scan_session_feed(struct spf_scan_session *session, uintptr_t token,
 	ret = spf_visit_queue_reap(session->queue);
 	if (ret)
 		return fail_session(session, ret, first + samples);
+	if (session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION && !session->stopping) {
+		struct spf_visit_queue_stats stats;
+		spf_visit_queue_stats(session->queue,&stats);
+		if (stats.missing_samples) {
+			/* The lease was consumed successfully. Signal failure through the
+			 * session state, not a return value that would double-return it. */
+			(void)fail_session(session,-ENODATA,first+samples);
+			return 0;
+		}
+	}
 	return maybe_release(session);
 }
 
@@ -570,12 +594,14 @@ int spf_scan_session_take_output(struct spf_scan_session *session,
 		return -EBUSY;
 	if (session->output_index >= session->ledger_count)
 		return -EAGAIN;
-	entry = &session->ledger[session->output_index];
+	entry = &session->ledger[session->output_index % session->ledger_capacity];
 	if (!entry->closed)
 		return -EAGAIN;
 	memset(output, 0, sizeof(*output));
 	if (!entry->queued) {
 		make_record(session, entry, entry->admission, &output->record);
+		if (session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION)
+			output->record.valid_end = output->record.valid_start;
 		session->inflight_result = entry->admission;
 	} else {
 		ret = spf_visit_queue_take(session->queue, &view);
@@ -584,12 +610,17 @@ int spf_scan_session_take_output(struct spf_scan_session *session,
 		if (view.id != entry->choice.visit)
 			return fail_session(session, -EILSEQ, session->latest_counter);
 		make_record(session, entry, view.result, &output->record);
+		if (session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
+			output->record.valid_end = view.end;
+			output->record.iq_bytes = (view.end-view.start)*session->bytes_per_sample;
+		}
 		session->inflight_result = view.result;
 		output->slice_count = view.slice_count;
 		memcpy(output->slices, view.slices,
 		       view.slice_count * sizeof(*view.slices));
 	}
 	session->output_inflight = true;
+	session->inflight_bytes = output->record.iq_bytes;
 	return 0;
 }
 
@@ -604,7 +635,7 @@ static int finish_output(struct spf_scan_session *session, uint64_t visit,
 	if (!session || !session->output_inflight ||
 	    session->output_index >= session->ledger_count)
 		return -EINVAL;
-	entry = &session->ledger[session->output_index];
+	entry = &session->ledger[session->output_index % session->ledger_capacity];
 	if (entry->choice.visit != visit)
 		return -EINVAL;
 	result = session->inflight_result;
@@ -630,14 +661,22 @@ static int finish_output(struct spf_scan_session *session, uint64_t visit,
 	}
 	if (result == SPF_VISIT_COMPLETE) {
 		session->delivered++;
-		session->iq_bytes += (entry->valid_end - entry->valid_start) *
-			session->bytes_per_sample;
+		if (session->setup.protocol_version != SPF_SCAN_CONTINUOUS_ORDERED_VERSION)
+			session->iq_bytes += (entry->valid_end - entry->valid_start) * session->bytes_per_sample;
 	} else if (result == SPF_VISIT_SKIP_CAPACITY || result == SPF_VISIT_SKIP_AGE) {
 		session->skipped++;
 	} else if (result == SPF_VISIT_INVALID_GAP) {
 		session->invalid++;
 	} else {
 		session->cancelled++;
+	}
+	if (transported && session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
+		if (session->inflight_bytes > UINT64_MAX-session->iq_bytes) {
+			session->output_inflight=false;
+			session->output_index++;
+			return fail_session(session,-EOVERFLOW,session->latest_counter);
+		}
+		session->iq_bytes += session->inflight_bytes;
 	}
 	session->output_inflight = false;
 	session->output_index++;
@@ -665,8 +704,10 @@ int spf_scan_session_stop(struct spf_scan_session *session,
 {
 	int ret;
 
-	if (!session || session->stopping)
+	if (!session)
 		return -EINVAL;
+	if (session->stopping)
+		return session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION ? maybe_release(session) : -EINVAL;
 	if (final_counter < session->latest_counter)
 		final_counter = session->latest_counter;
 	ret = close_active(session, final_counter);
@@ -685,8 +726,17 @@ int spf_scan_session_cancel(struct spf_scan_session *session,
 {
 	int ret;
 
-	if (!session || session->stopping)
+	if (!session)
 		return -EINVAL;
+	if (session->stopping) {
+		if (session->setup.protocol_version != SPF_SCAN_CONTINUOUS_ORDERED_VERSION)
+			return -EINVAL;
+		if (session->released) return 0;
+		(void)spf_visit_queue_cancel(session->queue);
+		session->cancelled_session = true;
+		if (!session->failed) session->error = -ECANCELED;
+		return maybe_release(session);
+	}
 	ret = close_active(session, final_counter);
 	if (ret)
 		return fail_session(session, ret, final_counter);
@@ -824,12 +874,40 @@ int spf_scan_session_terminal(struct spf_scan_session *session,
 		.reason = session->failed ? (session->failure_reason ?
 			session->failure_reason : TERMINAL_REASON_INTERNAL) :
 			(session->cancelled_session ? UINT32_C(2) :
-			 TERMINAL_REASON_COMPLETE),
+			 (session->setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION ? UINT32_C(2) : TERMINAL_REASON_COMPLETE)),
 		.error = session->failed || session->cancelled_session ?
 			session->error : 0,
 		.flags = TERMINAL_FLAG_RESTORED,
 	};
 	session->terminal_taken = true;
+	return 0;
+}
+
+int spf_scan_session_status(struct spf_scan_session *s,
+	const struct spf_scan_control *q, struct spf_scan_status *out)
+{
+	if (!s || !q || !out || s->setup.protocol_version != SPF_SCAN_CONTINUOUS_ORDERED_VERSION)
+		return -EOPNOTSUPP;
+	if (q->session != s->setup.session || q->generation != s->setup.generation)
+		return -ESTALE;
+	*out = (struct spf_scan_status){
+		.identity = *q, .planned = s->ledger_count, .delivered = s->delivered,
+		.counter = s->latest_counter, .sweep = s->ledger_count / SPF_SCAN_TARGETS,
+		.state = s->failed ? 4 : (s->released ? 3 : (s->stopping ? 2 : 1)),
+		.target = UINT32_MAX,
+		.queued_visits = (uint32_t)(s->ledger_count - s->output_index),
+		.error = s->error, .restore_after = s->restoration.counter_after,
+		.restored_flags = s->released ? TERMINAL_FLAG_RESTORED : 0,
+		.terminal_state = s->stopping ? (s->failed ? SPF_SCAN_TERMINAL_FAILED :
+			(s->cancelled_session ? SPF_SCAN_TERMINAL_CANCELLED : SPF_SCAN_TERMINAL_COMPLETED)) : 0,
+		.terminal_reason = s->stopping ? (s->failed ? (s->failure_reason ? s->failure_reason : TERMINAL_REASON_INTERNAL) : 2) : 0,
+	};
+	if (s->active != NO_ACTIVE) {
+		const struct ledger_entry *e = &s->ledger[s->active % s->ledger_capacity];
+		out->target = e->choice.target;
+		out->valid_start = e->valid_start;
+		out->valid_end = e->valid_end;
+	}
 	return 0;
 }
 

@@ -13,6 +13,8 @@
 #define SPF_SCAN_RUNTIME_RATE_VERSION UINT16_C(2)
 #define SPF_SCAN_RANDOM_DWELL_VERSION UINT16_C(3)
 #define SPF_SCAN_FIXED_DWELL_VERSION UINT16_C(4)
+#define SPF_SCAN_CONTINUOUS_ORDERED_VERSION UINT16_C(5)
+#define SPF_SCAN_CONTINUOUS_HISTORY 128U
 
 /* Policy is transport-independent. One session mutex must serialize its API.
  * All times are uint64 source-clock ticks, never host timestamps or doubles.
