@@ -81,6 +81,8 @@ int spf_scan_session_fail(struct spf_scan_session *session,
 	uint64_t final_counter, int error);
 int spf_scan_session_terminal(struct spf_scan_session *session,
 	struct spf_scan_terminal *terminal);
+int spf_scan_session_status(struct spf_scan_session *,
+	const struct spf_scan_control *, struct spf_scan_status *);
 int spf_scan_session_destroy(struct spf_scan_session *session);
 
 #endif

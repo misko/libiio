@@ -105,6 +105,7 @@ struct spf_iiod_metadata_context {
 	bool scan_started;
 	bool scan_thread_live;
 	bool scan_cancel_requested;
+	bool scan_stop_requested;
 	bool scan_finished;
 	unsigned int scan_kernel_buffers;
 	int scan_error;
@@ -1101,6 +1102,13 @@ static void *scan_scheduler(void *opaque)
 			pthread_mutex_unlock(&ctx->scan_lock);
 			break;
 		}
+		if (ctx->scan_stop_requested && (!boundary || now >= boundary)) {
+			ret = spf_scan_session_stop(ctx->scan_session, now);
+			ctx->scan_error = ret;
+			ctx->scan_finished = true;
+			pthread_mutex_unlock(&ctx->scan_lock);
+			break;
+		}
 		if (!boundary || now >= boundary) {
 			struct spf_scan_choice choice;
 			spf_gain_pair_t gain;
@@ -1267,6 +1275,14 @@ int iiod_buffer_metadata_scan_feed(void *provider_context,
 		spf_buffer_sequence_commit(&ctx->sequence, &sequence);
 	if (!ret)
 		ctx->scan_last_dma_ns = scan_monotonic_ns();
+	if (!ret && ctx->scan_setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
+		struct spf_scan_control query={1,ctx->scan_setup.session,ctx->scan_setup.generation,1};
+		struct spf_scan_status status;
+		if (!spf_scan_session_status(ctx->scan_session,&query,&status) && status.state==4) {
+			ctx->scan_finished=true;
+			ctx->scan_error=status.error;
+		}
+	}
 	pthread_mutex_unlock(&ctx->scan_lock);
 	return ret;
 }
@@ -1500,7 +1516,12 @@ int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, uint16_t ve
 	if (ret)
 		return ret;
 	spf_scan_caps_default(&caps);
-	if (version == SPF_SCAN_RANDOM_DWELL_VERSION) {
+	if (version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
+		caps.protocol_version = version;
+		caps.rate_mask = SPF_SCAN_RATE_2P5M;
+		caps.minimum_dwell_ms = caps.maximum_dwell_ms = 20;
+		caps.maximum_duration_ms = 0;
+	} else if (version == SPF_SCAN_RANDOM_DWELL_VERSION) {
 		caps.protocol_version = SPF_SCAN_RANDOM_DWELL_VERSION;
 		caps.rate_mode = SPF_SCAN_RATE_MODE_GAIN_OBSERVATION;
 		caps.rate_mask = SPF_SCAN_RATE_MASK_RANDOM_DWELL;
@@ -1523,6 +1544,31 @@ int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, uint16_t ve
 		caps.maximum_rate_hz = SPF_SCAN_RATE_MAX;
 	}
 	return spf_scan_caps_encode(wire, bytes, &caps);
+}
+
+int iiod_buffer_metadata_scan_control(void *provider_context,
+	const struct spf_scan_control *q, bool stop, struct spf_scan_status *out)
+{
+	struct spf_iiod_metadata_context *ctx = provider_context;
+	int ret;
+	if (!ctx || !ctx->scan_enabled) return -EOPNOTSUPP;
+	pthread_mutex_lock(&ctx->scan_lock);
+	ret = spf_scan_session_status(ctx->scan_session, q, out);
+	if (!ret && !stop && q->flags != 1) ret = -EINVAL;
+	if (!ret && stop && q->flags == 2 && !out->restored_flags) {
+		ctx->scan_cancel_requested = true;
+		ret = spf_scan_session_cancel(ctx->scan_session,ctx->scan_counter_anchor);
+		ctx->scan_finished = true;
+		ctx->scan_error = ret ? ret : -ECANCELED;
+		if (!ret) ret = spf_scan_session_status(ctx->scan_session,q,out);
+	} else if (!ret && stop && !ctx->scan_finished) {
+		ctx->scan_stop_requested = true;
+		out->state = 2;
+	}
+	if (!ret && ctx->scan_stop_requested && out->state == 1) out->state = 2;
+	if (!ret) out->counter = ctx->scan_counter_anchor;
+	pthread_mutex_unlock(&ctx->scan_lock);
+	return ret;
 }
 
 ssize_t iiod_buffer_metadata_get(void *provider_context,
