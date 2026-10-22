@@ -45,7 +45,9 @@ int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
 		!c->targets || c->targets > SPF_SCAN_TARGETS ||
 		(c->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION ?
 		 c->duration_ms != 0 || c->dwell_ms != 20 || c->targets != 8 ||
-		 c->source_rate_hz != 2500000 || c->maximum_boost != 1 :
+		 (c->source_rate_hz != 1250000 && c->source_rate_hz != 2500000 &&
+		  c->source_rate_hz != 5000000 && c->source_rate_hz != 7500000 &&
+		  c->source_rate_hz != 10000000) || c->maximum_boost != 1 :
 		 !c->duration_ms || c->duration_ms > 300000) ||
 		(c->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ||
 		 c->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION ?

@@ -193,7 +193,9 @@ static bool rate_valid(uint32_t rate, uint16_t version)
 		return (rate_flag(rate) & SPF_SCAN_RATE_MASK_FIXED) != 0;
 	if (version == SPF_SCAN_RANDOM_DWELL_VERSION)
 		return (rate_flag(rate) & SPF_SCAN_RATE_MASK_RANDOM_DWELL) != 0;
-	if (version == SPF_SCAN_FIXED_DWELL_VERSION || version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION)
+	if (version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION)
+		return (rate_flag(rate) & SPF_SCAN_RATE_MASK_CONTINUOUS) != 0;
+	if (version == SPF_SCAN_FIXED_DWELL_VERSION)
 		return rate == 2500000;
 	return version == SPF_SCAN_RUNTIME_RATE_VERSION && spf_scan_rate_valid(rate);
 }
@@ -297,7 +299,8 @@ static int caps_validate(const struct spf_scan_caps *caps)
 		return -EINVAL;
 	if (caps->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
 		if (caps->rate_mode || caps->minimum_rate_hz || caps->maximum_rate_hz ||
-		    caps->rate_mask != SPF_SCAN_RATE_2P5M || caps->minimum_dwell_ms != 20 ||
+		    (caps->rate_mask != SPF_SCAN_RATE_2P5M &&
+		     caps->rate_mask != SPF_SCAN_RATE_MASK_CONTINUOUS) || caps->minimum_dwell_ms != 20 ||
 		    caps->maximum_dwell_ms != 20 || caps->maximum_duration_ms)
 			return -EINVAL;
 	} else if (caps->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION) {
@@ -595,7 +598,9 @@ static int visit_validate(const struct spf_scan_visit_record *visit)
 	if ((visit->protocol_version != SPF_SCAN_CONTINUOUS_ORDERED_VERSION &&
 	     (visit->result == SPF_VISIT_COMPLETE) != !!visit->iq_bytes) ||
 	    (visit->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION &&
-	     (samples > 50000 || (visit->result == SPF_VISIT_COMPLETE && samples != 50000))) ||
+	     (samples > spf_scan_ticks(visit->source_rate_hz, 20) ||
+	      (visit->result == SPF_VISIT_COMPLETE &&
+	       samples != spf_scan_ticks(visit->source_rate_hz, 20)))) ||
 	    ((visit->result == SPF_VISIT_COMPLETE || visit->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) &&
 	     visit->iq_bytes != samples * 4 && visit->iq_bytes != samples * 8) ||
 	    (visit->gain_valid &&

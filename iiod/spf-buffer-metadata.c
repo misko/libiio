@@ -1518,7 +1518,7 @@ int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, uint16_t ve
 	spf_scan_caps_default(&caps);
 	if (version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
 		caps.protocol_version = version;
-		caps.rate_mask = SPF_SCAN_RATE_2P5M;
+		caps.rate_mask = SPF_SCAN_RATE_MASK_CONTINUOUS;
 		caps.minimum_dwell_ms = caps.maximum_dwell_ms = 20;
 		caps.maximum_duration_ms = 0;
 	} else if (version == SPF_SCAN_RANDOM_DWELL_VERSION) {

@@ -38,6 +38,8 @@
 	(SPF_SCAN_RATE_1P25M | SPF_SCAN_RATE_2P5M | SPF_SCAN_RATE_5M | SPF_SCAN_RATE_7P5M | \
 	 SPF_SCAN_RATE_10M)
 
+#define SPF_SCAN_RATE_MASK_CONTINUOUS SPF_SCAN_RATE_MASK_RANDOM_DWELL
+
 /* RX1 is the classifier source.  RX2 may only be added as a synchronous
  * capture stream; there is never a per-receiver tuning decision. */
 #define SPF_SCAN_RX1 UINT32_C(1)
