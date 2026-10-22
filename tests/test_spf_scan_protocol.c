@@ -258,6 +258,18 @@ static void continuous_protocol(void)
 	for (unsigned i=0;i<8;i++) request.targets[i]=(struct spf_scan_target){i,i,UINT64_C(2400000000)+i*1000000,1,i+1};
 	assert(!spf_scan_setup_encode(wire,sizeof(wire),&request));
 	assert(!spf_scan_setup_decode(&request_out,wire,352));
+	const uint32_t rates[] = {1250000, 2500000, 5000000, 7500000, 10000000};
+	caps.rate_mask=SPF_SCAN_RATE_MASK_CONTINUOUS;
+	assert(!spf_scan_caps_encode(wire,sizeof(wire),&caps));
+	assert(!spf_scan_caps_decode(&caps_out,wire,96));
+	for (unsigned i=0;i<sizeof(rates)/sizeof(rates[0]);i++) {
+		request.source_rate_hz=rates[i]; request.analog_bandwidth_hz=rates[i]*4/5;
+		assert(!spf_scan_setup_encode(wire,sizeof(wire),&request));
+		assert(!spf_scan_setup_decode(&request_out,wire,352));
+		assert(request_out.source_rate_hz==rates[i]);
+	}
+	request.source_rate_hz=15000000; assert(spf_scan_setup_validate(&request));
+	request.source_rate_hz=2500000;
 	request.duration_ms=300000; assert(spf_scan_setup_validate(&request));
 	request.protocol_version=1; request.duration_ms=0; assert(spf_scan_setup_validate(&request));
 }

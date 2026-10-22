@@ -854,12 +854,12 @@ static void test_continuous_post_recall_guard_preserves_finite_modes(void)
 	recall_after_offset = 1000;
 }
 
-static void test_continuous_ordered_bounded_history_and_counter_wrap(void)
+static void continuous_ordered_at_rate(uint32_t rate)
 {
 	const uint64_t base = UINT64_C(0xffff0000);
 	struct spf_scan_setup request = setup();
 	struct spf_scan_session_runtime runtime = {
-		.block_count=16, .headroom_blocks=2, .block_samples=150000,
+		.block_count=16, .headroom_blocks=2, .block_samples=rate * 60 / 1000,
 		.bytes_per_sample=8, .drain_bytes_per_second=1000000000,
 		.release_block=release_block,
 	};
@@ -873,7 +873,7 @@ static void test_continuous_ordered_bounded_history_and_counter_wrap(void)
 	uintptr_t token=1;
 	uint64_t now=base;
 	request.protocol_version=SPF_SCAN_CONTINUOUS_ORDERED_VERSION;
-	request.source_rate_hz=2500000; request.analog_bandwidth_hz=2000000;
+	request.source_rate_hz=rate; request.analog_bandwidth_hz=rate*4/5;
 	request.duration_ms=0; request.dwell_ms=20; request.transition_budget_ms=20;
 	request.maximum_revisit_ms=500; request.maximum_boost=1; request.target_count=8;
 	request.rx_mask=SPF_SCAN_RX1_RX2;
@@ -885,15 +885,15 @@ static void test_continuous_ordered_bounded_history_and_counter_wrap(void)
 	for (uint64_t visit=0;visit<20000;visit++) {
 		assert(choice.visit==visit && choice.target==visit%8 && choice.dwell_ms==20);
 		/* Recall completion plus the full guard precedes exact20ms support. */
-		feed_blocks(session,now,&token,1,150000);
-		now+=150000; mock_now=now;
+		feed_blocks(session,now,&token,1,rate * 60 / 1000);
+		now+=rate * 60 / 1000; mock_now=now;
 		if (visit==19999) assert(!spf_scan_session_stop(session,now));
 		else assert(!spf_scan_session_schedule(session,now,now,&choice));
 		assert(!spf_scan_session_take_output(session,&output));
 		assert(output.record.visit==visit && output.record.target==visit%8);
-		assert(output.record.protocol_version==5 && output.record.iq_bytes==400000);
-		assert(output.record.valid_end-output.record.valid_start==50000);
-		assert(output.record.valid_start-output.record.transition_after>=50000);
+		assert(output.record.protocol_version==5 && output.record.iq_bytes==(uint64_t)rate * 20 / 1000 * 8);
+		assert(output.record.valid_end-output.record.valid_start==(uint64_t)rate * 20 / 1000);
+		assert(output.record.valid_start-output.record.transition_after>=(uint64_t)rate * 20 / 1000);
 		assert(!spf_scan_session_complete_output(session,visit));
 		assert(!spf_scan_session_status(session,&query,&status));
 		assert(status.delivered==visit+1 && status.queued_visits<=1);
@@ -904,6 +904,13 @@ static void test_continuous_ordered_bounded_history_and_counter_wrap(void)
 	assert(terminal.state==SPF_SCAN_TERMINAL_COMPLETED && terminal.reason==2 && terminal.flags==1);
 	assert(status.state==3 && status.restored_flags==1);
 	assert(!spf_scan_session_destroy(session));
+}
+
+static void test_continuous_ordered_bounded_history_and_counter_wrap(void)
+{
+	const uint32_t rates[] = {1250000, 2500000, 5000000, 7500000, 10000000};
+	for (unsigned i=0; i<sizeof(rates)/sizeof(rates[0]); i++)
+		continuous_ordered_at_rate(rates[i]);
 }
 
 static void test_continuous_diagnostics_survive_history_reuse(void)
