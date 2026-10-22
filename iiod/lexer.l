@@ -110,6 +110,7 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 	return SCANCAPS4;
 }
 <INITIAL>SCANCAPS5|scancaps5 { return SCANCAPS5; }
+<INITIAL>SCANCAPS5M|scancaps5m { return SCANCAPS5M; }
 <INITIAL>SCANSTATUS|scanstatus { BEGIN(WANT_DEVICE); return SCANSTATUS; }
 <INITIAL>SCANSTOP|scanstop { BEGIN(WANT_DEVICE); return SCANSTOP; }
 

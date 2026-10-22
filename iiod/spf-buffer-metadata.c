@@ -1516,9 +1516,10 @@ int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, uint16_t ve
 	if (ret)
 		return ret;
 	spf_scan_caps_default(&caps);
-	if (version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
-		caps.protocol_version = version;
-		caps.rate_mask = SPF_SCAN_RATE_MASK_CONTINUOUS;
+	if (version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION || version == 0x105) {
+		/* Keep the original capability reply byte-identical for v0.62 clients. */
+		caps.protocol_version = SPF_SCAN_CONTINUOUS_ORDERED_VERSION;
+		caps.rate_mask = version == 0x105 ? SPF_SCAN_RATE_MASK_CONTINUOUS : SPF_SCAN_RATE_2P5M;
 		caps.minimum_dwell_ms = caps.maximum_dwell_ms = 20;
 		caps.maximum_duration_ms = 0;
 	} else if (version == SPF_SCAN_RANDOM_DWELL_VERSION) {

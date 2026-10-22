@@ -79,6 +79,7 @@ ssize_t yy_input(yyscan_t scanner, char *buf, size_t max_size);
 %token SCANCAPS3
 %token SCANCAPS4
 %token SCANCAPS5
+%token SCANCAPS5M
 %token SCANSTATUS
 %token SCANSTOP
 %token SCANFEEDBACK
@@ -458,6 +459,13 @@ Line:
 		char *capacity = $3;
 		struct parser_pdata *pdata = yyget_extra(scanner);
 		ssize_t ret = read_adaptive_scan_capabilities(pdata, strtoul(capacity, NULL, 10), 5);
+		free(capacity);
+		if (ret < 0) YYABORT; else YYACCEPT;
+	}
+	| SCANCAPS5M SPACE WORD END {
+		char *capacity = $3;
+		struct parser_pdata *pdata = yyget_extra(scanner);
+		ssize_t ret = read_adaptive_scan_capabilities(pdata, strtoul(capacity, NULL, 10), 0x105);
 		free(capacity);
 		if (ret < 0) YYABORT; else YYACCEPT;
 	}
