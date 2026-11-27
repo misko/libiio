@@ -20,11 +20,11 @@ struct spf_scan_policy {
 	struct scan_visit *visits;
 	uint64_t start, end, dwell, transition, revisit, age, delay, decay;
 	uint64_t rng, last_now, visit_count, max_visits;
-	uint64_t last_start[SPF_SCAN_TARGETS], boost_time[SPF_SCAN_TARGETS];
-	uint32_t boost[SPF_SCAN_TARGETS];
-	bool active[SPF_SCAN_TARGETS];
-	uint64_t channel_sequence[SPF_SCAN_TARGETS], highest_sequence, seen;
-	struct pending_feedback pending[SPF_SCAN_TARGETS];
+	uint64_t last_start[SPF_SCAN_LOGICAL_TARGETS], boost_time[SPF_SCAN_LOGICAL_TARGETS];
+	uint32_t boost[SPF_SCAN_LOGICAL_TARGETS];
+	bool active[SPF_SCAN_LOGICAL_TARGETS];
+	uint64_t channel_sequence[SPF_SCAN_LOGICAL_TARGETS], highest_sequence, seen;
+	struct pending_feedback pending[SPF_SCAN_LOGICAL_TARGETS];
 	struct spf_scan_ack acks[SPF_SCAN_ACK_CAPACITY];
 	unsigned ack_head, ack_count, pending_count;
 	struct spf_scan_choice selection;
@@ -42,9 +42,10 @@ int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
 	uint8_t digest = 0;
 	uint64_t slot;
 	if (!c || !c->session || !c->generation || !c->seed ||
-		!c->targets || c->targets > SPF_SCAN_TARGETS ||
-		(c->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION ?
-		 c->duration_ms != 0 || c->dwell_ms != 20 || c->targets != 8 ||
+		(c->protocol_version == SPF_SCAN_POSITION_VERSION && c->source_rate_hz != 10000000) ||
+		!c->targets || c->targets > (c->protocol_version == SPF_SCAN_POSITION_VERSION ? SPF_SCAN_LOGICAL_TARGETS : SPF_SCAN_TARGETS) ||
+		(spf_scan_is_continuous(c->protocol_version) ?
+		 c->duration_ms != 0 || c->dwell_ms != 20 || c->targets != (c->protocol_version == SPF_SCAN_POSITION_VERSION ? 24U : 8U) ||
 		 (c->source_rate_hz != 1250000 && c->source_rate_hz != 2500000 &&
 		  c->source_rate_hz != 5000000 && c->source_rate_hz != 7500000 &&
 		  c->source_rate_hz != 10000000) || c->maximum_boost != 1 :
@@ -65,7 +66,7 @@ int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
 	     c->protocol_version != SPF_SCAN_RUNTIME_RATE_VERSION &&
 	     c->protocol_version != SPF_SCAN_RANDOM_DWELL_VERSION &&
 	     c->protocol_version != SPF_SCAN_FIXED_DWELL_VERSION &&
-	     c->protocol_version != SPF_SCAN_CONTINUOUS_ORDERED_VERSION) ||
+	     !spf_scan_is_continuous(c->protocol_version)) ||
 	    (c->protocol_version == SPF_SCAN_FIXED_DWELL_VERSION &&
 	     c->source_rate_hz != 2500000) ||
 	    (c->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION &&
@@ -80,15 +81,15 @@ int spf_scan_policy_validate(const struct spf_scan_policy_config *c)
 		digest |= c->analysis_digest[i];
 	if (!digest)
 		return -EINVAL;
-	for (i = 0; i < SPF_SCAN_TARGETS; i++)
+	for (i = 0; i < SPF_SCAN_LOGICAL_TARGETS; i++)
 		if ((i < c->targets && (!c->baseline[i] || c->baseline[i] > 1024 ||
-			(c->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION && c->baseline[i] != 1))) ||
+			(spf_scan_is_continuous(c->protocol_version) && c->baseline[i] != 1))) ||
 			(i >= c->targets && c->baseline[i]))
 			return -EINVAL;
 	slot = (uint64_t)c->dwell_ms + c->transition_budget_ms;
 	if (slot * c->targets > c->maximum_revisit_ms ||
 		slot > c->application_delay_ms ||
-		(c->protocol_version != SPF_SCAN_CONTINUOUS_ORDERED_VERSION && slot > c->duration_ms))
+		(!spf_scan_is_continuous(c->protocol_version) && slot > c->duration_ms))
 		return -ERANGE;
 	return 0;
 }
@@ -110,7 +111,7 @@ int spf_scan_policy_create(struct spf_scan_policy **out,
 		return -ENOMEM;
 	p->config = *c;
 	p->start = p->last_now = start;
-	p->end = c->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION ?
+	p->end = spf_scan_is_continuous(c->protocol_version) ?
 		UINT64_MAX : start + ticks(c, c->duration_ms);
 	p->dwell = ticks(c, c->dwell_ms);
 	p->transition = ticks(c, c->transition_budget_ms);
@@ -119,7 +120,7 @@ int spf_scan_policy_create(struct spf_scan_policy **out,
 	p->delay = ticks(c, c->application_delay_ms);
 	p->decay = ticks(c, c->decay_ms);
 	p->rng = c->seed;
-	p->max_visits = c->protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION ?
+	p->max_visits = spf_scan_is_continuous(c->protocol_version) ?
 		SPF_SCAN_CONTINUOUS_HISTORY : c->duration_ms /
 		(c->protocol_version == SPF_SCAN_RANDOM_DWELL_VERSION ? 120U : c->dwell_ms) + 1;
 	if (p->max_visits > SPF_SCAN_MAX_VISITS) {
@@ -174,7 +175,7 @@ static void terminal_ack(struct spf_scan_policy *p, unsigned target,
  * lottery from painting itself into an impossible pair of imminent deadlines. */
 static bool feasible(const struct spf_scan_policy *p, unsigned candidate, uint64_t now)
 {
-	uint64_t deadlines[SPF_SCAN_TARGETS], t = now + p->transition;
+	uint64_t deadlines[SPF_SCAN_LOGICAL_TARGETS], t = now + p->transition;
 	unsigned n = 0, i, j;
 	if (t > p->last_start[candidate] + p->revisit)
 		return false;
@@ -211,7 +212,7 @@ static uint64_t random64(struct spf_scan_policy *p)
 int spf_scan_policy_select(struct spf_scan_policy *p, uint64_t now,
 	struct spf_scan_choice *choice)
 {
-	uint64_t weights[SPF_SCAN_TARGETS] = {0}, total = 0, draw, threshold;
+	uint64_t weights[SPF_SCAN_LOGICAL_TARGETS] = {0}, total = 0, draw, threshold;
 	uint32_t mask = 0;
 	unsigned i, chosen = 0;
 	if (!p || !choice)
@@ -223,7 +224,7 @@ int spf_scan_policy_select(struct spf_scan_policy *p, uint64_t now,
 	if (now < p->last_now || (p->visit_count &&
 	    now < p->visits[(p->visit_count - 1) % p->max_visits].end))
 		return -ERANGE;
-	if (p->config.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
+	if (spf_scan_is_continuous(p->config.protocol_version)) {
 		chosen = (unsigned)(p->visit_count % p->config.targets);
 		if (p->visit_count == UINT64_MAX ||
 		    UINT64_MAX - now < p->dwell + p->transition)
@@ -318,7 +319,7 @@ int spf_scan_policy_commit(struct spf_scan_policy *p, uint64_t start)
 	if (start > p->end ||
 	    p->end - start < ticks(&p->config, p->selection.dwell_ms))
 		return -ENODATA;
-	if (p->config.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION &&
+	if (spf_scan_is_continuous(p->config.protocol_version) &&
 	    start - p->last_start[p->selection.target] > p->revisit)
 		return -ETIME;
 	v = &p->visits[p->visit_count++ % p->max_visits];
@@ -349,7 +350,7 @@ enum spf_scan_feedback_result spf_scan_policy_feedback(struct spf_scan_policy *p
 	uint64_t distance;
 	unsigned t;
 	if (!p || !f || p->stopped ||
-	    p->config.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION)
+	    spf_scan_is_continuous(p->config.protocol_version))
 		return SPF_SCAN_REJECTED;
 	if (f->session != p->config.session || f->generation != p->config.generation)
 		return SPF_SCAN_WRONG_SESSION;

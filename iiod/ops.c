@@ -1903,7 +1903,8 @@ complete:
 static ssize_t send_scan_data(struct DevEntry *entry, struct ThdEntry *thd)
 {
 	struct spf_scan_session_output output;
-	uint8_t wire[SPF_SCAN_VISIT_BYTES];
+	uint8_t wire[SPF_SCAN_POSITION_VISIT_BYTES];
+	size_t wire_bytes;
 	ssize_t ret;
 	unsigned int i;
 
@@ -1931,11 +1932,12 @@ static ssize_t send_scan_data(struct DevEntry *entry, struct ThdEntry *thd)
 	}
 	if (ret)
 		return ret;
-	ret = spf_scan_visit_encode(wire, sizeof(wire), &output.record);
+	wire_bytes = output.record.protocol_version == SPF_SCAN_POSITION_VERSION ? SPF_SCAN_POSITION_VISIT_BYTES : SPF_SCAN_VISIT_BYTES;
+	ret = spf_scan_visit_encode(wire, wire_bytes, &output.record);
 	if (ret)
 		goto abort;
-	print_value(thd->pdata, sizeof(wire));
-	ret = write_all(thd->pdata, wire, sizeof(wire));
+	print_value(thd->pdata, wire_bytes);
+	ret = write_all(thd->pdata, wire, wire_bytes);
 	if (ret < 0)
 		goto abort;
 	print_value(thd->pdata, output.record.iq_bytes);
