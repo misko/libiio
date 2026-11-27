@@ -155,6 +155,114 @@ int spf_scan_radio_acquire(struct spf_scan_radio *radio, uint32_t source_rate_hz
 	return 0;
 }
 
+int spf_scan_radio_bank_supported(struct spf_scan_radio *radio)
+{
+	struct adi_rx_counter_bank_caps caps = { 0 };
+	if (!radio || !radio->call_ioctl)
+		return -EINVAL;
+	if (radio->call_ioctl(radio->fd, ADI_RX_COUNTER_IOC_GET_BANK_CAPS, &caps) < 0)
+		return -errno;
+	if (caps.magic != ADI_RX_COUNTER_MAGIC || caps.version != ADI_RX_COUNTER_BANK_VERSION ||
+	    caps.size != sizeof(caps) || caps.features != ADI_RX_COUNTER_BANK_FEATURES ||
+	    caps.maximum_targets != 24 || caps.maximum_profiles != 8 ||
+	    caps.profile_bytes != 16 || caps.source_counter_bits != 32 || caps.reserved)
+		return -EPROTO;
+	return 0;
+}
+
+int spf_scan_radio_configure_bank(struct spf_scan_radio *radio,
+	const struct spf_scan_radio_profile *profiles, size_t profile_count)
+{
+	struct adi_rx_counter_bank_config config = {
+		.magic = ADI_RX_COUNTER_MAGIC, .version = ADI_RX_COUNTER_BANK_VERSION,
+		.size = sizeof(config), .target_count = 24,
+	};
+	unsigned i;
+	int ret;
+	if (!radio || !profiles || profile_count != 24 || !radio->acquired ||
+	    radio->configured || radio->faulted || radio->released)
+		return -EINVAL;
+	ret = spf_scan_radio_bank_supported(radio);
+	if (ret)
+		return ret;
+	for (i = 0; i < 24; i++) {
+		if (profiles[i].profile != i % 8)
+			return -EINVAL;
+		config.profiles[i].frequency_hz = profiles[i].frequency_hz;
+		config.profiles[i].crc32 = profiles[i].crc32;
+		memcpy(config.profiles[i].values, profiles[i].values, 16);
+	}
+	if (radio->call_ioctl(radio->fd, ADI_RX_COUNTER_IOC_CONFIGURE_BANK, &config) < 0) {
+		radio->faulted = true;
+		return -errno;
+	}
+	for (i = 0; i < 24; i++) {
+		radio->bank_frequency_hz[i] = profiles[i].frequency_hz;
+		radio->bank_crc32[i] = profiles[i].crc32;
+	}
+	for (i = 0; i < 8; i++) {
+		radio->slot_target[i] = i;
+		radio->slot_generation[i] = 1;
+	}
+	radio->profile_mask = 0xff;
+	radio->bank_mode = radio->configured = true;
+	return 0;
+}
+
+int spf_scan_radio_recall_bank(struct spf_scan_radio *radio, uint32_t target,
+	uint64_t counter_anchor, struct spf_scan_radio_receipt *receipt)
+{
+	struct adi_rx_counter_bank_recall recall = {
+		.magic = ADI_RX_COUNTER_MAGIC, .version = ADI_RX_COUNTER_BANK_VERSION,
+		.size = sizeof(recall), .logical_target = target, .profile = target % 8,
+	};
+	uint64_t before, load_after, recall_before, after, expected;
+	uint32_t slot = target % 8;
+	int ret;
+	if (!radio || !receipt || target >= 24 || !radio->bank_mode ||
+	    !radio->configured || radio->faulted || radio->released)
+		return -EINVAL;
+	if (radio->slot_generation[slot] == UINT64_MAX)
+		return -EOVERFLOW;
+	recall.expected_generation = radio->slot_generation[slot];
+	recall.requested_frequency_hz = radio->bank_frequency_hz[target];
+	expected = recall.expected_generation + (radio->slot_target[slot] != target);
+	if (radio->call_ioctl(radio->fd, ADI_RX_COUNTER_IOC_REPLACE_RECALL, &recall) < 0) {
+		radio->faulted = true;
+		return -errno;
+	}
+	if (recall.magic != ADI_RX_COUNTER_MAGIC || recall.version != ADI_RX_COUNTER_BANK_VERSION ||
+	    recall.size != sizeof(recall) || recall.logical_target != target || recall.profile != slot ||
+	    recall.expected_generation != radio->slot_generation[slot] ||
+	    recall.requested_frequency_hz != radio->bank_frequency_hz[target] ||
+	    recall.slot_generation != expected || recall.profile_identity_crc32 != radio->bank_crc32[target] ||
+	    !frequency_matches(recall.frequency_hz, radio->bank_frequency_hz[target]) ||
+	    recall.reserved[0] || recall.reserved[1]) {
+		radio->faulted = true;
+		return -EPROTO;
+	}
+	ret = extend_counter(counter_anchor, recall.counter_before, &before);
+	if (!ret) ret = extend_counter(before, recall.load_after, &load_after);
+	if (!ret) ret = extend_counter(load_after, recall.recall_before, &recall_before);
+	if (!ret) ret = extend_counter(recall_before, recall.counter_after, &after);
+	if (ret || after - before > UINT64_C(1000000)) {
+		radio->faulted = true;
+		return ret ? ret : -ETIME;
+	}
+	/* Publish the replacement only after every identity and timing check.
+	 * The session copies this receipt into its bounded acquisition ledger. */
+	radio->slot_target[slot] = target;
+	radio->slot_generation[slot] = recall.slot_generation;
+	*receipt = (struct spf_scan_radio_receipt) {
+		.profile = slot, .frequency_hz = recall.frequency_hz,
+		.profile_crc32 = recall.profile_crc32, .counter_before = before,
+		.counter_after = after, .load_after = load_after, .recall_before = recall_before,
+		.slot_generation = recall.slot_generation,
+		.profile_identity_crc32 = recall.profile_identity_crc32,
+	};
+	return 0;
+}
+
 int spf_scan_radio_recall(struct spf_scan_radio *radio, uint32_t profile,
 			  uint64_t counter_anchor,
 			  struct spf_scan_radio_receipt *receipt)

@@ -47,7 +47,9 @@
 
 #define SPF_SCAN_CAPS_BYTES 96U
 #define SPF_SCAN_SETUP_BYTES 352U
+#define SPF_SCAN_POSITION_SETUP_BYTES 1120U
 #define SPF_SCAN_VISIT_BYTES 160U
+#define SPF_SCAN_POSITION_VISIT_BYTES 224U
 #define SPF_SCAN_FEEDBACK_BYTES 112U
 #define SPF_SCAN_ACK_BYTES 96U
 #define SPF_SCAN_TERMINAL_BYTES 128U
@@ -58,6 +60,7 @@
 struct spf_scan_control {
 	uint64_t request, session, generation;
 	uint32_t flags; /* 1: snapshot/graceful stop, 2: forced stop */
+	uint16_t protocol_version; /* zero retains the published v5 encoding */
 };
 struct spf_scan_status {
 	struct spf_scan_control identity;
@@ -112,6 +115,7 @@ struct spf_scan_target {
 	uint32_t channel, profile;
 	uint64_t frequency_hz;
 	uint32_t baseline_weight, profile_crc32;
+	uint8_t profile_values[16];
 };
 
 struct spf_scan_setup {
@@ -125,7 +129,7 @@ struct spf_scan_setup {
 	uint32_t maximum_queue_age_ms, maximum_queue_visits;
 	uint32_t target_count, rx_mask, format, flags;
 	uint8_t analysis_digest[32];
-	struct spf_scan_target targets[SPF_SCAN_TARGETS];
+	struct spf_scan_target targets[SPF_SCAN_LOGICAL_TARGETS];
 };
 
 struct spf_scan_visit_record {
@@ -139,6 +143,9 @@ struct spf_scan_visit_record {
 	uint64_t gain_counter;
 	uint32_t gain_read_duration_ns;
 	uint8_t rx1_gain_index, rx2_gain_index, gain_valid;
+	uint64_t load_after, recall_before, sweep, slot_generation, verified_frequency_hz;
+	uint32_t profile_identity_crc32, rx_mask;
+	uint8_t analysis_digest[32];
 };
 
 struct spf_scan_terminal {
@@ -148,6 +155,7 @@ struct spf_scan_terminal {
 	uint32_t state, reason;
 	int32_t error;
 	uint32_t flags;
+	uint16_t protocol_version; /* legacy terminal remains version 1 */
 };
 
 void spf_scan_caps_default(struct spf_scan_caps *caps);

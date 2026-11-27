@@ -13,6 +13,7 @@ struct spf_scan_radio_profile {
 	uint32_t profile;
 	uint64_t frequency_hz;
 	uint32_t crc32;
+	uint8_t values[16];
 };
 
 struct spf_scan_radio_receipt {
@@ -21,6 +22,8 @@ struct spf_scan_radio_receipt {
 	uint32_t profile_crc32;
 	uint64_t counter_before;
 	uint64_t counter_after;
+	uint64_t load_after, recall_before, slot_generation;
+	uint32_t profile_identity_crc32;
 };
 struct spf_scan_radio_release_receipt {
 	uint64_t frequency_hz, counter_before, counter_after;
@@ -42,6 +45,11 @@ struct spf_scan_radio {
 	bool faulted;
 	bool released;
 	bool diagnostics_unavailable;
+	bool bank_mode;
+	uint64_t slot_generation[SPF_SCAN_RADIO_MAX_PROFILES];
+	uint32_t slot_target[SPF_SCAN_RADIO_MAX_PROFILES];
+	uint64_t bank_frequency_hz[24];
+	uint32_t bank_crc32[24];
 };
 
 int spf_scan_radio_init(struct spf_scan_radio *radio, int fd,
@@ -55,6 +63,11 @@ int spf_scan_radio_acquire(struct spf_scan_radio *radio, uint32_t source_rate_hz
 int spf_scan_radio_configure(struct spf_scan_radio *radio,
 			     const struct spf_scan_radio_profile *profiles,
 			     size_t profile_count);
+int spf_scan_radio_configure_bank(struct spf_scan_radio *radio,
+	const struct spf_scan_radio_profile *profiles, size_t profile_count);
+int spf_scan_radio_bank_supported(struct spf_scan_radio *radio);
+int spf_scan_radio_recall_bank(struct spf_scan_radio *radio, uint32_t target,
+	uint64_t counter_anchor, struct spf_scan_radio_receipt *receipt);
 int spf_scan_radio_recall(struct spf_scan_radio *radio, uint32_t profile,
 			  uint64_t counter_anchor,
 			  struct spf_scan_radio_receipt *receipt);

@@ -1275,8 +1275,9 @@ int iiod_buffer_metadata_scan_feed(void *provider_context,
 		spf_buffer_sequence_commit(&ctx->sequence, &sequence);
 	if (!ret)
 		ctx->scan_last_dma_ns = scan_monotonic_ns();
-	if (!ret && ctx->scan_setup.protocol_version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION) {
-		struct spf_scan_control query={1,ctx->scan_setup.session,ctx->scan_setup.generation,1};
+	if (!ret && spf_scan_is_continuous(ctx->scan_setup.protocol_version)) {
+		struct spf_scan_control query={1,ctx->scan_setup.session,ctx->scan_setup.generation,1,
+			ctx->scan_setup.protocol_version == SPF_SCAN_POSITION_VERSION ? SPF_SCAN_POSITION_VERSION : 0};
 		struct spf_scan_status status;
 		if (!spf_scan_session_status(ctx->scan_session,&query,&status) && status.state==4) {
 			ctx->scan_finished=true;
@@ -1512,11 +1513,18 @@ int iiod_buffer_metadata_scan_capabilities(void *wire, size_t bytes, uint16_t ve
 	if (fd < 0)
 		return -errno;
 	ret = spf_scan_radio_init(&radio, fd, NULL);
+	if (!ret && version == SPF_SCAN_POSITION_VERSION) ret = spf_scan_radio_bank_supported(&radio);
 	close(fd);
 	if (ret)
 		return ret;
 	spf_scan_caps_default(&caps);
-	if (version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION || version == 0x105) {
+	if (version == SPF_SCAN_POSITION_VERSION) {
+		caps.protocol_version = SPF_SCAN_POSITION_VERSION;
+		caps.rate_mask = SPF_SCAN_RATE_10M;
+		caps.maximum_targets = 24;
+		caps.minimum_dwell_ms = caps.maximum_dwell_ms = 20;
+		caps.maximum_duration_ms = 0;
+	} else if (version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION || version == 0x105) {
 		/* Keep the original capability reply byte-identical for v0.62 clients. */
 		caps.protocol_version = SPF_SCAN_CONTINUOUS_ORDERED_VERSION;
 		caps.rate_mask = version == 0x105 ? SPF_SCAN_RATE_MASK_CONTINUOUS : SPF_SCAN_RATE_2P5M;

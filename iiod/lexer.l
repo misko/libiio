@@ -109,6 +109,9 @@ WORD (([[:alpha:]]+,)|(iio:))?(-|_|\.|[[:alnum:]])+
 <INITIAL>SCANCAPS4|scancaps4 {
 	return SCANCAPS4;
 }
+<INITIAL>SCANCAPS6|scancaps6 { return SCANCAPS6; }
+<INITIAL>SCANSTATUS6|scanstatus6 { BEGIN(WANT_DEVICE); return SCANSTATUS6; }
+<INITIAL>SCANSTOP6|scanstop6 { BEGIN(WANT_DEVICE); return SCANSTOP6; }
 <INITIAL>SCANCAPS5|scancaps5 { return SCANCAPS5; }
 <INITIAL>SCANCAPS5M|scancaps5m { return SCANCAPS5M; }
 <INITIAL>SCANSTATUS|scanstatus { BEGIN(WANT_DEVICE); return SCANSTATUS; }

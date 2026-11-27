@@ -107,6 +107,12 @@ add_executable(test_spf_scan_session test_spf_scan_session.c
 	../iiod/spf-visit-queue.c)
 target_include_directories(test_spf_scan_session PRIVATE ../iiod)
 list(APPEND IIO_TESTS_TARGETS test_spf_scan_session)
+add_executable(test_spf_position_scan test_spf_position_scan.c
+	../iiod/spf-scan-session.c ../iiod/spf-scan-protocol.c
+	../iiod/spf-scan-policy.c ../iiod/spf-scan-radio.c
+	../iiod/spf-visit-queue.c)
+target_include_directories(test_spf_position_scan PRIVATE ../iiod)
+list(APPEND IIO_TESTS_TARGETS test_spf_position_scan)
 add_executable(test_spf_hop_protocol test_spf_hop_protocol.c
 	../iiod/spf-hop-protocol.c)
 add_executable(test_spf_hop_session test_spf_hop_session.c

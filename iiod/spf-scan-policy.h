@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #define SPF_SCAN_TARGETS 8U
+#define SPF_SCAN_LOGICAL_TARGETS 24U
 #define SPF_SCAN_MAX_VISITS 16384U
 #define SPF_SCAN_ACK_CAPACITY 64U
 #define SPF_SCAN_WEIGHT_ONE 65536U
@@ -14,7 +15,14 @@
 #define SPF_SCAN_RANDOM_DWELL_VERSION UINT16_C(3)
 #define SPF_SCAN_FIXED_DWELL_VERSION UINT16_C(4)
 #define SPF_SCAN_CONTINUOUS_ORDERED_VERSION UINT16_C(5)
+#define SPF_SCAN_POSITION_VERSION UINT16_C(6)
 #define SPF_SCAN_CONTINUOUS_HISTORY 128U
+
+static inline bool spf_scan_is_continuous(uint16_t version)
+{
+	return version == SPF_SCAN_CONTINUOUS_ORDERED_VERSION ||
+		version == SPF_SCAN_POSITION_VERSION;
+}
 
 /* Policy is transport-independent. One session mutex must serialize its API.
  * All times are uint64 source-clock ticks, never host timestamps or doubles.
@@ -27,7 +35,7 @@ struct spf_scan_policy_config {
 	uint32_t source_rate_hz, targets, duration_ms, dwell_ms;
 	uint32_t transition_budget_ms, maximum_revisit_ms;
 	uint32_t feedback_age_ms, application_delay_ms, decay_ms;
-	uint32_t maximum_boost, baseline[SPF_SCAN_TARGETS];
+	uint32_t maximum_boost, baseline[SPF_SCAN_LOGICAL_TARGETS];
 	uint8_t analysis_digest[32];
 };
 

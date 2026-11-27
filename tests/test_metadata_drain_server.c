@@ -235,6 +235,37 @@ int main(void)
 	client_write(&fixture, "SCANTIME dev0 0\n", strlen("SCANTIME dev0 0\n"));
 	assert(fixture.output_bytes == 4 && !memcmp(fixture.output, "-22\n", 4));
 	fixture.output_offset = fixture.output_bytes;
+	/* The real public scanner grammar must reach the handler. The XML-only
+	 * fixture has no radio provider; unsupported/no-session is expected. */
+	{
+		const char *commands[] = {"SCANCAPS6 96\n", "READSCAN dev0\n"};
+		for (unsigned i=0;i<2;i++) {
+			client_write(&fixture,commands[i],strlen(commands[i]));
+			assert(fixture.output_bytes==4 && !memcmp(fixture.output,"-95\n",4));
+			fixture.output_offset=fixture.output_bytes;
+		}
+		struct spf_scan_control query={.request=1,.session=2,.generation=3,.flags=1,.protocol_version=6};
+		uint8_t packet[1200];
+		const char *controls[]={"SCANSTOP6 dev0 48\n","SCANSTATUS6 dev0 48\n",
+			"scanstop6 dev0 48\n","scanstatus6 dev0 48\n"};
+		for (unsigned i=0;i<4;i++) {
+			size_t prefix=strlen(controls[i]);
+			memcpy(packet,controls[i],prefix);
+			assert(!spf_scan_control_encode(packet+prefix,sizeof(packet)-prefix,&query));
+			client_write(&fixture,(const char *)packet,prefix+48);
+			assert(fixture.output_bytes==4 && !memcmp(fixture.output,"-61\n",4));
+			fixture.output_offset=fixture.output_bytes;
+		}
+		/* OPENM consumes the new setup size before rejecting the non-capture
+		 * XML device. No IIO acquisition buffer is created in this test. */
+		const char *open="OPENM dev1 100000 0000000f 1120\n";
+		size_t prefix=strlen(open);
+		memcpy(packet,open,prefix); memset(packet+prefix,0,1120);
+		client_write(&fixture,(const char *)packet,prefix+1120);
+		assert(fixture.output_bytes==4 && !memcmp(fixture.output,"-22\n",4));
+		fixture.output_offset=fixture.output_bytes;
+		assert(fixture.entry.buf==NULL);
+	}
 	drain_test_client_destroy(fixture.client);
 	pthread_mutex_destroy(&fixture.entry.thdlist_lock);
 	iio_context_destroy(fixture.parser.ctx);
